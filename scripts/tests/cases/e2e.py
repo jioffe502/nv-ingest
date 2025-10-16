@@ -43,10 +43,26 @@ def main() -> int:
     spill_dir = os.getenv("SPILL_DIR", "/tmp/spill")
     os.makedirs(spill_dir, exist_ok=True)
 
-    collection_name = os.getenv("COLLECTION_NAME", default_collection_name())
+    collection_name = os.getenv("COLLECTION_NAME") or default_collection_name()
     hostname = os.getenv("HOSTNAME", "localhost")
     sparse = os.getenv("SPARSE", "true").lower() == "true"
     gpu_search = os.getenv("GPU_SEARCH", "false").lower() == "true"
+
+    # API version configuration (v1 = default, v2 = PDF splitting support)
+    api_version = os.getenv("API_VERSION", "v1").lower()
+
+    # PDF split configuration (V2 only - server-side page splitting)
+    pdf_split_page_count = os.getenv("PDF_SPLIT_PAGE_COUNT")
+    if pdf_split_page_count:
+        try:
+            pdf_split_page_count = int(pdf_split_page_count)
+            if api_version != "v2":
+                print(f"WARNING: PDF_SPLIT_PAGE_COUNT={pdf_split_page_count} is set but API_VERSION={api_version}")
+                print("         PDF splitting only works with API_VERSION=v2. This setting will be ignored.")
+                pdf_split_page_count = None
+        except ValueError:
+            print(f"WARNING: Invalid PDF_SPLIT_PAGE_COUNT value '{pdf_split_page_count}', ignoring")
+            pdf_split_page_count = None
 
     # Extraction configuration (core testing variables)
     extract_text = os.getenv("EXTRACT_TEXT", "true").lower() == "true"
@@ -61,6 +77,10 @@ def main() -> int:
     enable_caption = os.getenv("ENABLE_CAPTION", "false").lower() == "true"
     enable_split = os.getenv("ENABLE_SPLIT", "false").lower() == "true"
 
+    # Text splitting configuration (client-side text chunking)
+    split_chunk_size = int(os.getenv("SPLIT_CHUNK_SIZE", "1024"))
+    split_chunk_overlap = int(os.getenv("SPLIT_CHUNK_OVERLAP", "150"))
+
     # Logging configuration
     log_path = os.getenv("LOG_PATH", "test_results")
 
@@ -71,32 +91,51 @@ def main() -> int:
     print(f"Dataset: {data_dir}")
     print(f"Collection: {collection_name}")
     print(f"Hostname: {hostname}")
+    print(f"API Version: {api_version}")
     print(f"Embed model: {model_name}, dim: {dense_dim}")
     print(f"Sparse: {sparse}, GPU search: {gpu_search}")
     print(f"Extract text: {extract_text}, tables: {extract_tables}, charts: {extract_charts}")
     print(f"Extract images: {extract_images}, infographics: {extract_infographics}")
     print(f"Text depth: {text_depth}, table format: {table_output_format}")
+
+    # V2-specific configuration display
+    if api_version == "v2" and pdf_split_page_count:
+        clamped_value = max(1, min(pdf_split_page_count, 128))
+        if clamped_value != pdf_split_page_count:
+            print(f"PDF split page count: {pdf_split_page_count} (will be clamped to {clamped_value} by server)")
+        else:
+            print(f"PDF split page count: {pdf_split_page_count}")
+    elif api_version == "v2":
+        print("PDF split page count: server default (32)")
+
     if enable_caption:
         print("Caption: enabled")
     if enable_split:
-        print("Split: enabled")
+        print(f"Text splitting: enabled (chunk_size={split_chunk_size}, overlap={split_chunk_overlap})")
     print("====================")
 
     ingestion_start = time.time()
 
-    # Build ingestor pipeline (simplified)
-    ingestor = (
-        Ingestor(message_client_hostname=hostname, message_client_port=7670)
-        .files(data_dir)
-        .extract(
-            extract_text=extract_text,
-            extract_tables=extract_tables,
-            extract_charts=extract_charts,
-            extract_images=extract_images,
-            text_depth=text_depth,
-            table_output_format=table_output_format,
-            extract_infographics=extract_infographics,
-        )
+    # Build ingestor pipeline with API version configuration
+    ingestor_kwargs = {"message_client_hostname": hostname, "message_client_port": 7670}
+    if api_version == "v2":
+        ingestor_kwargs["message_client_kwargs"] = {"api_version": "v2"}
+
+    ingestor = Ingestor(**ingestor_kwargs).files(data_dir)
+
+    # V2-only: Configure PDF splitting (server-side page splitting)
+    if api_version == "v2" and pdf_split_page_count:
+        ingestor = ingestor.pdf_split_config(pages_per_chunk=pdf_split_page_count)
+
+    # Extraction step
+    ingestor = ingestor.extract(
+        extract_text=extract_text,
+        extract_tables=extract_tables,
+        extract_charts=extract_charts,
+        extract_images=extract_images,
+        text_depth=text_depth,
+        table_output_format=table_output_format,
+        extract_infographics=extract_infographics,
     )
 
     # Optional pipeline steps
@@ -104,7 +143,10 @@ def main() -> int:
         ingestor = ingestor.caption()
 
     if enable_split:
-        ingestor = ingestor.split()
+        ingestor = ingestor.split(
+            chunk_size=split_chunk_size,
+            chunk_overlap=split_chunk_overlap,
+        )
 
     # Embed and upload (core pipeline)
     ingestor = (
@@ -181,6 +223,7 @@ def main() -> int:
     test_name = os.getenv("TEST_NAME", dataset_name)
     summary = {
         "test_name": test_name,
+        "api_version": api_version,
         "dataset_dir": data_dir,
         "collection_name": collection_name,
         "hostname": hostname,

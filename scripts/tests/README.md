@@ -71,6 +71,31 @@ TEXT_DEPTH=page                  # Text extraction depth (page/document)
 TABLE_OUTPUT_FORMAT=markdown     # Table format (markdown/html)
 ```
 
+#### API Configuration
+```bash
+# API version (v1 = default, v2 = PDF splitting support)
+API_VERSION=v1                   # Use v2 for automatic PDF splitting
+
+# V2-only: PDF splitting (server-side page splitting)
+PDF_SPLIT_PAGE_COUNT=32         # Pages per chunk (min=1, max=128, default=32)
+```
+
+> **Understanding Splitting Options:**
+> - **PDF Splitting** (`PDF_SPLIT_PAGE_COUNT`): V2-only server-side feature that splits multi-page PDFs into smaller PDF chunks *before* processing (e.g., 100-page PDF → 4x 25-page chunks). Improves parallelism and throughput.
+> - **Text Splitting** (`ENABLE_SPLIT`): Client-side pipeline step that chunks *extracted text content* into token-based segments *after* extraction (e.g., long text → multiple 1024-token chunks). Used for RAG and semantic search.
+> - These are **complementary** and can be used together in V2 for maximum performance.
+
+#### Pipeline Configuration
+```bash
+# Optional pipeline steps
+ENABLE_CAPTION=false             # Enable image captioning
+ENABLE_SPLIT=false              # Enable text chunking for RAG
+
+# Text splitting parameters (when ENABLE_SPLIT=true)
+SPLIT_CHUNK_SIZE=1024           # Tokens per chunk
+SPLIT_CHUNK_OVERLAP=150         # Token overlap between chunks
+```
+
 #### Runtime Configuration
 ```bash
 # Vector database settings
@@ -132,10 +157,29 @@ EXTRACT_IMAGES=true
 ENABLE_CAPTION=true
 ```
 
-**Chunking for RAG:**
+**Text Chunking for RAG:**
 ```bash
 # In .env file:
 ENABLE_SPLIT=true
+SPLIT_CHUNK_SIZE=512            # Smaller chunks for precise retrieval
+SPLIT_CHUNK_OVERLAP=100         # More overlap for better context
+```
+
+**V2 API with PDF Splitting:**
+```bash
+# In .env file:
+API_VERSION=v2
+PDF_SPLIT_PAGE_COUNT=16         # Split large PDFs into 16-page chunks
+```
+
+**Combined: V2 + PDF Split + Text Chunking:**
+```bash
+# In .env file:
+API_VERSION=v2                  # Enable V2 features
+PDF_SPLIT_PAGE_COUNT=32         # Server-side: split PDFs by pages
+ENABLE_SPLIT=true               # Client-side: chunk text content
+SPLIT_CHUNK_SIZE=1024
+SPLIT_CHUNK_OVERLAP=150
 ```
 
 ## Architecture
