@@ -245,16 +245,28 @@ def run_case(case_name: str, stdout_path: str, config, doc_analysis: bool = Fals
         def __init__(self, file_path, original_stream):
             self.file = open(file_path, "w")
             self.original = original_stream
+            self._closed = False
 
         def write(self, data):
             self.original.write(data)
-            self.file.write(data)
+            # Guard against background threads writing after close (e.g., pymilvus loggers)
+            if not self._closed:
+                try:
+                    self.file.write(data)
+                except ValueError:
+                    # File already closed by another thread
+                    pass
 
         def flush(self):
             self.original.flush()
-            self.file.flush()
+            if not self._closed:
+                try:
+                    self.file.flush()
+                except ValueError:
+                    pass
 
         def close(self):
+            self._closed = True
             self.file.close()
 
     tee_stdout = TeeFile(stdout_path, sys.stdout)
