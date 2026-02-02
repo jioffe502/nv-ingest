@@ -246,3 +246,8 @@ tools/harness/lancedb/
 history.db
 history.db-shm
 history.db-wal
+
+# Claude Code configuration
+.claude
+.claude/
+CLAUDE.md
