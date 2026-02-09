@@ -189,7 +189,8 @@ EXTRACT_IMAGES=true API_VERSION=v2 uv run nv-ingest-harness-run --case=e2e --dat
 #### Infrastructure Options
 - `hostname` (string): Service hostname
 - `readiness_timeout` (integer): Docker startup timeout in seconds
-- `profiles` (list): Docker compose profiles
+- `profiles` (list): Docker compose profiles (compose only)
+- `helm_values` (dict): Helm value overrides for this dataset (e.g. `nimOperator.audio.enabled: true`); merged with active `helm.values` when using `--deployment-type=helm`
 
 #### Runtime Options
 - `sparse` (boolean): Use sparse embeddings
