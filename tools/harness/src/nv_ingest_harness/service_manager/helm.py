@@ -164,10 +164,9 @@ class HelmManager(ServiceManager):
             else:
                 print(f"Warning: Values file {values_path} not found, skipping")
 
-        # Add inline values from config
+        # Add inline values from config (supports bool, list, dict; same as values file)
         if hasattr(self.config, "helm_values") and self.config.helm_values:
-            for key, value in self.config.helm_values.items():
-                cmd += ["--set", f"{key}={value}"]
+            cmd = self._add_values_to_command(cmd, self.config.helm_values)
 
         rc = run_cmd(cmd)
 
