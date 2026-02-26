@@ -173,6 +173,8 @@ datasets:
   video:
     path: /path/to/video_retrieval_data
     profiles: [retrieval, audio]
+    helm_values:
+      nimOperator.audio.enabled: true
     file_pattern: "*.mp4"
     total_size_mb: 55263
     extract_text: true
@@ -186,6 +188,8 @@ datasets:
   audio:
     path: /path/to/audio_retrieval_data_mp3
     profiles: [retrieval, audio, reranker]
+    helm_values:
+      nimOperator.audio.enabled: true
     file_pattern: "*.mp3"
     total_size_mb: 2859
     extract_text: false

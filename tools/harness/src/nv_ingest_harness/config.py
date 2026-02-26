@@ -257,7 +257,16 @@ def load_config(config_file: str = "test_configs.yaml", case: Optional[str] = No
                 # Apply dataset-specific configs (extraction settings + recall_dataset, excluding path)
                 dataset_specific_config = {k: v for k, v in dataset_config.items() if k != "path"}
                 if dataset_specific_config:
-                    config_dict.update(dataset_specific_config)
+                    # Merge dataset helm_values with active (dataset overrides on conflict)
+                    dataset_helm = dataset_specific_config.pop("helm_values", None)
+                    if dataset_helm is not None:
+                        base_helm = config_dict.get("helm_values") or {}
+                        if isinstance(base_helm, dict) and isinstance(dataset_helm, dict):
+                            config_dict["helm_values"] = {**base_helm, **dataset_helm}
+                        else:
+                            config_dict["helm_values"] = dataset_helm
+                    if dataset_specific_config:
+                        config_dict.update(dataset_specific_config)
             else:
                 # Not a configured dataset, treat dataset_name as direct path
                 config_dict["dataset_dir"] = dataset_name
