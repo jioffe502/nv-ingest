@@ -181,14 +181,12 @@ tags
 # End of https://www.gitignore.io/api/vim,c++,cmake,python,synology
 
 ./build
-.conda-bld
 .Dockerfile
 .tmp
 *.dirlock
 *.engine
 *.lock
 /build*/
-/conda-build/
 dask-worker-space
 data/*
 docs/source/_lib
@@ -220,14 +218,12 @@ processed_docs
 # Ignore devcontainer volumes
 .volumes
 
-# Ignore conda build output
-conda/output_conda_channel
 
 # Ignore generate docs site
 docs/site
 
 # Ignore "private_local" scripts that users might have in their local copy of nv-ingest they don't want to commit
-scripts/private_local/*
+scripts/private_local/
 
 # Test results should go to artifacts directory managed by nv-ingest-harness
 test_results/
@@ -251,3 +247,9 @@ history.db-wal
 .claude
 .claude/
 CLAUDE.md
+
+lancedb/
+outputs/
+models/
+
+nemo_retriever/run_results/
