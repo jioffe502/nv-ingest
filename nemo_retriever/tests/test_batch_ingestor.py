@@ -56,3 +56,34 @@ def test_batch_ingestor_filters_none_runtime_env_vars(monkeypatch) -> None:
     }
     assert dummy_ctx.enable_rich_progress_bars is True
     assert dummy_ctx.use_ray_tqdm is False
+
+
+def test_batch_ingestor_passes_through_object_store_env_var(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    dummy_ctx = SimpleNamespace(enable_rich_progress_bars=False, use_ray_tqdm=True)
+
+    monkeypatch.setenv("RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION", "0.85")
+    monkeypatch.setattr(
+        "nemo_retriever.ingest_modes.batch.resolve_hf_cache_dir",
+        lambda: "/tmp/hf-cache",
+    )
+    monkeypatch.setattr(
+        "nemo_retriever.ingest_modes.batch.ray.init",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "nemo_retriever.ingest_modes.batch.rd.DataContext.get_current",
+        lambda: dummy_ctx,
+    )
+    monkeypatch.setattr(
+        "nemo_retriever.ingest_modes.batch.gather_cluster_resources",
+        lambda _ray: _DummyClusterResources(),
+    )
+    monkeypatch.setattr(
+        "nemo_retriever.ingest_modes.batch.resolve_requested_plan",
+        lambda cluster_resources: {"plan": "dummy"},
+    )
+
+    BatchIngestor(documents=[])
+
+    assert captured["runtime_env"]["env_vars"]["RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION"] == "0.85"
