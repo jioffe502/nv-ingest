@@ -303,6 +303,21 @@ class ChartParams(_ParamsModel):
     inference_batch_size: int = 8
 
 
+class CaptionParams(_ParamsModel):
+    endpoint_url: Optional[str] = None
+    model_name: str = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
+    api_key: Optional[str] = None
+    prompt: str = "Caption the content of this image:"
+    system_prompt: Optional[str] = "/no_think"
+    temperature: float = 1.0
+    batch_size: int = 8
+    device: Optional[str] = None
+    hf_cache_dir: Optional[str] = None
+    context_text_max_chars: int = 0
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.5
+
+
 class InfographicParams(_ParamsModel):
     remote: RemoteInvokeParams = Field(default_factory=RemoteInvokeParams)
     remote_retry: RemoteRetryParams = Field(default_factory=RemoteRetryParams)
