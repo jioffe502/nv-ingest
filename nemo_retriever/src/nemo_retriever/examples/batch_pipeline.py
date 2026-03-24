@@ -462,6 +462,11 @@ def main(
             "(used when --table-output-format=markdown)."
         ),
     ),
+    store_images_uri: Optional[str] = typer.Option(
+        None,
+        "--store-images-uri",
+        help="When set, store extracted images to this URI (local path or fsspec URI like s3://bucket/prefix).",
+    ),
     text_chunk: bool = typer.Option(
         False,
         "--text-chunk",
@@ -682,6 +687,11 @@ def main(
         enable_text_chunk = text_chunk or text_chunk_max_tokens is not None or text_chunk_overlap_tokens is not None
         if enable_text_chunk:
             ingestor = ingestor.split(_text_chunk_params)
+
+        if store_images_uri:
+            from nemo_retriever.params import StoreParams
+
+            ingestor = ingestor.store(StoreParams(storage_uri=store_images_uri))
 
         ingestor = ingestor.embed(embed_params)
 

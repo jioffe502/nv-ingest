@@ -1328,6 +1328,16 @@ class InProcessIngestor(Ingestor):
         self._tasks.append((apply_asr_to_df, {"asr_params": self._extract_audio_asr_kwargs}))
         return self
 
+    def store(self, params: "StoreParams | None" = None, **kwargs: Any) -> "InProcessIngestor":
+        """Store extracted images to disk or cloud storage via fsspec."""
+        from nemo_retriever.io.image_store import store_extracted_images
+        from nemo_retriever.params import StoreParams
+
+        resolved = _coerce_params(params, StoreParams, kwargs)
+        store_kwargs = resolved.model_dump(mode="python")
+        self._tasks.append((store_extracted_images, store_kwargs))
+        return self
+
     def embed(self, params: EmbedParams | None = None, **kwargs: Any) -> "InProcessIngestor":
         """
         Configure embedding for in-process execution.

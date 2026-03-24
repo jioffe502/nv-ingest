@@ -47,6 +47,7 @@ from ..params import HtmlChunkParams
 from ..params import IngestExecuteParams
 from ..params import PdfSplitParams
 from ..params import TextChunkParams
+from ..params import StoreParams
 from ..params import VdbUploadParams
 
 logger = logging.getLogger(__name__)
@@ -859,6 +860,25 @@ class BatchIngestor(Ingestor):
             fn_constructor_kwargs={"params": resolved},
         )
 
+        return self
+
+    def store(self, params: StoreParams | None = None, **kwargs: Any) -> "BatchIngestor":
+        """Store extracted images to disk or cloud storage via fsspec."""
+        if self._rd_dataset is None:
+            raise RuntimeError("No Ray Dataset to store from. Call .files(...) / .extract(...) first.")
+
+        from nemo_retriever.io.image_store import store_extracted_images
+
+        resolved = _coerce_params(params, StoreParams, kwargs)
+        store_kwargs = resolved.model_dump(mode="python")
+        self._tasks.append(("store", dict(store_kwargs)))
+
+        _store_fn = partial(store_extracted_images, **store_kwargs)
+        self._rd_dataset = self._rd_dataset.map_batches(
+            _store_fn,
+            batch_format="pandas",
+            num_cpus=1,
+        )
         return self
 
     def vdb_upload(self, params: VdbUploadParams | None = None, **kwargs: Any) -> "BatchIngestor":
