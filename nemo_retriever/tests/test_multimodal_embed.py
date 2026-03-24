@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-25, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,6 +8,8 @@ Unit tests for multimodal embedding helpers and explode_content_to_rows.
 
 from __future__ import annotations
 
+import base64
+import io
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +25,7 @@ from nemo_retriever.text_embed.main_text_embed import (
     _image_from_row,
     _multimodal_callable_runner,
 )
+from nemo_retriever.io.image_store import store_extracted_images
 
 # ---------------------------------------------------------------------------
 # Stub heavy internal modules so ``from nemo_retriever.ingest_modes.inprocess``
@@ -92,6 +95,15 @@ from nemo_retriever.ingest_modes.inprocess import collapse_content_to_page_rows,
 for _mod_name in _injected:
     sys.modules.pop(_mod_name, None)
 del _injected
+
+
+def _make_tiny_png_b64(width: int = 8, height: int = 8, color=(255, 0, 0)) -> str:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    img = Image.new("RGB", (width, height), color=color)
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 # ===================================================================
@@ -235,6 +247,46 @@ class TestExplodeContentToRows:
             "full_page_b64",
             bbox_xyxy_norm=[0.1, 0.2, 0.9, 0.8],
         )
+
+
+class TestStoreThenExplodeMultimodal:
+    def test_store_keeps_image_payloads_by_default(self, tmp_path):
+        page_b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "hello",
+                    "page_image": {"image_b64": page_b64, "encoding": "png"},
+                }
+            ]
+        )
+
+        stored = store_extracted_images(df, storage_uri=str(tmp_path))
+        exploded = explode_content_to_rows(stored, modality="text_image")
+
+        assert exploded["_image_b64"].iloc[0] == page_b64
+        assert exploded["_embed_modality"].iloc[0] == "text_image"
+
+    def test_store_strip_base64_removes_multimodal_image_inputs(self, tmp_path):
+        page_b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "hello",
+                    "page_image": {"image_b64": page_b64, "encoding": "png"},
+                }
+            ]
+        )
+
+        stored = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
+        exploded = explode_content_to_rows(stored, modality="text_image")
+
+        assert stored.iloc[0]["page_image"]["image_b64"] is None
+        assert exploded["_image_b64"].iloc[0] is None
 
 
 # ===================================================================

@@ -11,7 +11,6 @@ import io
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from nemo_retriever.io.image_store import _safe_stem, store_extracted_images
 from nemo_retriever.params import StoreParams
@@ -24,6 +23,16 @@ def _make_tiny_png_b64(width: int = 4, height: int = 4, color=(255, 0, 0)) -> st
     buf = io.BytesIO()
     img = Image.new("RGB", (width, height), color=color)
     img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _make_tiny_jpeg_b64(width: int = 4, height: int = 4, color=(255, 0, 0)) -> str:
+    """Create a minimal JPEG image encoded as base64."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    img = Image.new("RGB", (width, height), color=color)
+    img.save(buf, format="JPEG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -68,9 +77,9 @@ class TestStorePageImages:
                     "path": "/docs/test.pdf",
                     "page_number": 1,
                     "page_image": {"image_b64": b64, "encoding": "png"},
-                    "tables": [],
-                    "charts": [],
-                    "infographics": [],
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
@@ -93,9 +102,9 @@ class TestStorePageImages:
                     "path": "/docs/test.pdf",
                     "page_number": 1,
                     "page_image": None,
-                    "tables": [],
-                    "charts": [],
-                    "infographics": [],
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
@@ -113,9 +122,9 @@ class TestStorePageImages:
                     "path": "/docs/test.pdf",
                     "page_number": 1,
                     "page_image": {"image_b64": b64},
-                    "tables": [],
-                    "charts": [],
-                    "infographics": [],
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
@@ -139,11 +148,11 @@ class TestStoreStructuredContent:
                     "path": "/docs/report.pdf",
                     "page_number": 2,
                     "page_image": {"image_b64": b64, "encoding": "png"},
-                    "tables": [
+                    "table": [
                         {"text": "col1|col2", "bbox_xyxy_norm": [0.1, 0.1, 0.9, 0.9]},
                     ],
-                    "charts": [],
-                    "infographics": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
@@ -154,7 +163,7 @@ class TestStoreStructuredContent:
         expected_file = tmp_path / "report" / "page_2_table_0.png"
         assert expected_file.exists()
 
-        table_item = result.iloc[0]["tables"][0]
+        table_item = result.iloc[0]["table"][0]
         assert "stored_image_uri" in table_item
 
     def test_direct_image_b64_preferred(self, tmp_path: Path):
@@ -166,18 +175,18 @@ class TestStoreStructuredContent:
                     "path": "/docs/test.pdf",
                     "page_number": 1,
                     "page_image": {"image_b64": page_b64},
-                    "tables": [
+                    "table": [
                         {"text": "data", "image_b64": item_b64, "bbox_xyxy_norm": [0, 0, 1, 1]},
                     ],
-                    "charts": [],
-                    "infographics": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
             ]
         )
         result = store_extracted_images(df, storage_uri=str(tmp_path))
-        table_item = result.iloc[0]["tables"][0]
+        table_item = result.iloc[0]["table"][0]
         assert "stored_image_uri" in table_item
 
         # Verify the file was written from item_b64, not cropped from page
@@ -192,9 +201,9 @@ class TestStoreStructuredContent:
                     "path": "/docs/test.pdf",
                     "page_number": 1,
                     "page_image": {"image_b64": b64},
-                    "tables": [{"text": "t", "bbox_xyxy_norm": [0.1, 0.1, 0.5, 0.5]}],
-                    "charts": [{"text": "c", "bbox_xyxy_norm": [0.1, 0.1, 0.5, 0.5]}],
-                    "infographics": [],
+                    "table": [{"text": "t", "bbox_xyxy_norm": [0.1, 0.1, 0.5, 0.5]}],
+                    "chart": [{"text": "c", "bbox_xyxy_norm": [0.1, 0.1, 0.5, 0.5]}],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
@@ -221,9 +230,9 @@ class TestStoreNaturalImages:
                     "path": "/docs/test.pdf",
                     "page_number": 1,
                     "page_image": None,
-                    "tables": [],
-                    "charts": [],
-                    "infographics": [],
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [{"image_b64": img_b64, "bbox_xyxy_norm": [0, 0, 1, 1]}],
                     "metadata": {},
                 }
@@ -233,6 +242,174 @@ class TestStoreNaturalImages:
         expected_file = tmp_path / "test" / "page_1_image_0.png"
         assert expected_file.exists()
         assert result.iloc[0]["images"][0].get("stored_image_uri") is not None
+
+
+# ---------------------------------------------------------------------------
+# store_extracted_images — format consistency
+# ---------------------------------------------------------------------------
+
+
+class TestFormatConsistency:
+    def test_page_image_keeps_source_encoding_extension(self, tmp_path: Path):
+        jpeg_b64 = _make_tiny_jpeg_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "page_image": {"image_b64": jpeg_b64, "encoding": "jpeg"},
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                    "metadata": {},
+                }
+            ]
+        )
+
+        result = store_extracted_images(df, storage_uri=str(tmp_path), image_format="png")
+        expected_file = tmp_path / "test" / "page_1.jpeg"
+        assert expected_file.exists()
+        assert not (tmp_path / "test" / "page_1.png").exists()
+        assert expected_file.read_bytes() == base64.b64decode(jpeg_b64)
+        assert result.iloc[0]["page_image"]["stored_image_uri"].endswith("/test/page_1.jpeg")
+
+    def test_direct_content_b64_keeps_payload_extension(self, tmp_path: Path):
+        item_b64 = _make_tiny_png_b64(color=(0, 255, 0))
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "page_image": None,
+                    "table": [{"image_b64": item_b64, "bbox_xyxy_norm": [0, 0, 1, 1]}],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                    "metadata": {},
+                }
+            ]
+        )
+
+        result = store_extracted_images(df, storage_uri=str(tmp_path), image_format="jpeg")
+        expected_file = tmp_path / "test" / "page_1_table_0.png"
+        assert expected_file.exists()
+        assert not (tmp_path / "test" / "page_1_table_0.jpeg").exists()
+        assert expected_file.read_bytes() == base64.b64decode(item_b64)
+        assert result.iloc[0]["table"][0]["stored_image_uri"].endswith("/test/page_1_table_0.png")
+
+    def test_crops_use_requested_output_format(self, tmp_path: Path):
+        page_b64 = _make_tiny_png_b64(width=100, height=100)
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/report.pdf",
+                    "page_number": 2,
+                    "page_image": {"image_b64": page_b64, "encoding": "png"},
+                    "table": [{"bbox_xyxy_norm": [0.2, 0.2, 0.8, 0.8]}],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                    "metadata": {},
+                }
+            ]
+        )
+
+        result = store_extracted_images(df, storage_uri=str(tmp_path), image_format="jpeg")
+        expected_file = tmp_path / "report" / "page_2_table_0.jpeg"
+        assert expected_file.exists()
+        assert expected_file.read_bytes().startswith(b"\xff\xd8\xff")
+        assert result.iloc[0]["table"][0]["stored_image_uri"].endswith("/report/page_2_table_0.jpeg")
+
+
+# ---------------------------------------------------------------------------
+# store_extracted_images — base64 stripping
+# ---------------------------------------------------------------------------
+
+
+class TestBase64Stripping:
+    def test_page_image_b64_preserved_by_default(self, tmp_path: Path):
+        b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "page_image": {"image_b64": b64, "encoding": "png"},
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                    "metadata": {},
+                }
+            ]
+        )
+        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        page_img = result.iloc[0]["page_image"]
+        assert page_img["image_b64"] == b64
+        assert "stored_image_uri" in page_img
+
+    def test_page_image_b64_stripped_when_enabled(self, tmp_path: Path):
+        b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "page_image": {"image_b64": b64, "encoding": "png"},
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                    "metadata": {},
+                }
+            ]
+        )
+        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
+        page_img = result.iloc[0]["page_image"]
+        assert page_img["image_b64"] is None
+        assert "stored_image_uri" in page_img
+
+    def test_structured_content_b64_stripped(self, tmp_path: Path):
+        page_b64 = _make_tiny_png_b64(width=100, height=100)
+        item_b64 = _make_tiny_png_b64(color=(0, 255, 0))
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "page_image": {"image_b64": page_b64},
+                    "table": [{"text": "data", "image_b64": item_b64, "bbox_xyxy_norm": [0, 0, 1, 1]}],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                    "metadata": {},
+                }
+            ]
+        )
+        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
+        assert result.iloc[0]["table"][0]["image_b64"] is None
+        assert "stored_image_uri" in result.iloc[0]["table"][0]
+
+    def test_natural_image_b64_stripped(self, tmp_path: Path):
+        img_b64 = _make_tiny_png_b64(color=(0, 0, 255))
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "page_image": None,
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [{"image_b64": img_b64, "bbox_xyxy_norm": [0, 0, 1, 1]}],
+                    "metadata": {},
+                }
+            ]
+        )
+        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
+        assert result.iloc[0]["images"][0]["image_b64"] is None
+        assert "stored_image_uri" in result.iloc[0]["images"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +431,9 @@ class TestStoreEdgeCases:
                     "path": "/docs/test.pdf",
                     "page_number": 1,
                     "page_image": {"image_b64": b64},
-                    "tables": [],
-                    "charts": [],
-                    "infographics": [],
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
@@ -278,9 +455,9 @@ class TestStoreEdgeCases:
                     "path": "/docs/test.pdf",
                     "page_number": i,
                     "page_image": {"image_b64": b64},
-                    "tables": [],
-                    "charts": [],
-                    "infographics": [],
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
                     "images": [],
                     "metadata": {},
                 }
@@ -304,9 +481,11 @@ class TestStoreParams:
         assert p.store_page_images is True
         assert p.store_tables is True
         assert p.image_format == "png"
+        assert p.strip_base64 is False
 
     def test_overrides(self):
-        p = StoreParams(storage_uri="s3://bucket/prefix", store_tables=False, image_format="jpeg")
+        p = StoreParams(storage_uri="s3://bucket/prefix", store_tables=False, image_format="jpeg", strip_base64=True)
         assert p.storage_uri == "s3://bucket/prefix"
         assert p.store_tables is False
         assert p.image_format == "jpeg"
+        assert p.strip_base64 is True
