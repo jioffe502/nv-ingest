@@ -395,9 +395,3 @@ retriever-harness sweep --runs-config harness/vidore_sweep.yaml
 ```
 
 The same commands also work under the main CLI as `retriever harness ...` if you prefer a single top-level command namespace.
-
-The harness now supports multiple execution modes through a shared structured metrics contract:
-
-- `run_mode: batch` is the default path.
-- `run_mode: inprocess` and `run_mode: fused` use the same `results.json` / `session_summary.json` schema.
-- Per-run structured metrics are written under `runtime_metrics/<run>.run_report.json`, and the harness derives its compact summary views from that report rather than scraping console output.

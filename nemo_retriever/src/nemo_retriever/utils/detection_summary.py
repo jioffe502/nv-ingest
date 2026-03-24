@@ -13,7 +13,6 @@ be shared.
 
 from __future__ import annotations
 
-import ast
 from datetime import datetime
 import json
 from collections import defaultdict
@@ -120,12 +119,7 @@ def iter_lancedb_rows(uri: str, table_name: str):
                 if isinstance(parsed, dict):
                     meta = parsed
             except Exception:
-                try:
-                    parsed = ast.literal_eval(raw_metadata)
-                    if isinstance(parsed, dict):
-                        meta = parsed
-                except Exception:
-                    pass
+                pass
         yield (source_id, page_number), meta, {}
 
 

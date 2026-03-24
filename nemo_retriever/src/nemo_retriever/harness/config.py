@@ -146,8 +146,8 @@ class HarnessConfig:
         if self.evaluation_mode == "recall" and self.recall_required and not self.query_csv:
             errors.append("recall_required=true requires query_csv")
 
-        if self.input_type not in {"pdf", "txt", "html", "doc", "image"}:
-            errors.append(f"input_type must be one of pdf/txt/html/doc/image, got '{self.input_type}'")
+        if self.input_type not in {"pdf", "txt", "html", "doc"}:
+            errors.append(f"input_type must be one of pdf/txt/html/doc, got '{self.input_type}'")
 
         if self.run_mode == "fused" and self.input_type != "pdf":
             errors.append("fused run_mode currently supports only input_type=pdf")

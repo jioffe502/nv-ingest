@@ -80,9 +80,6 @@ def _runtime_env_vars() -> dict[str, str]:
     env_vars = {
         "NEMO_RETRIEVER_HF_CACHE_DIR": resolve_hf_cache_dir(),
         "LOG_LEVEL": "INFO",
-        # Allow per-run Ray tuning via the caller environment without baking
-        # a shared repo default into the batch runtime.
-        "RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION": os.environ.get("RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION"),
     }
     return {key: value for key, value in env_vars.items() if isinstance(value, str)}
 

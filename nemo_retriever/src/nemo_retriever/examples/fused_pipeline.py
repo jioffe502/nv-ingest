@@ -11,27 +11,38 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
+import lancedb
+import ray
 import typer
-from nemo_retriever.application.modes.reports import RunArtifactConfig, RunEvaluationConfig
-from nemo_retriever.application.modes.run_fused import (
-    FusedPipelineConfig,
-    render_fused_run_report,
-    run_fused_pipeline,
-)
-from nemo_retriever.application.modes.shared import (
-    DEFAULT_LANCEDB_TABLE as LANCEDB_TABLE,
-    DEFAULT_LANCEDB_URI as LANCEDB_URI,
-    configure_cli_logging,
-    restore_cli_logging,
-)
+from nemo_retriever import create_ingestor
 from nemo_retriever.params import EmbedParams
 from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import VdbUploadParams
+from nemo_retriever.examples.batch_pipeline import (
+    LANCEDB_TABLE,
+    LANCEDB_URI,
+    _configure_logging,
+    _ensure_lancedb_table,
+)
+from nemo_retriever.utils.detection_summary import (
+    collect_detection_summary_from_lancedb,
+    print_detection_summary,
+    write_detection_summary,
+)
+from nemo_retriever.examples.common import estimate_processed_pages, print_pages_per_second
+from nemo_retriever.recall.core import (
+    RecallConfig,
+    gold_to_doc_page,
+    hit_key_and_distance,
+    is_hit_at_k,
+    retrieve_and_score,
+)
 
 app = typer.Typer()
 
@@ -164,10 +175,11 @@ def main(
         help="Embedding granularity: 'element' (one row per table/chart/text) or 'page' (one row per page).",
     ),
 ) -> None:
-    log_handle, original_stdout, original_stderr = configure_cli_logging(log_file)
+    log_handle, original_stdout, original_stderr = _configure_logging(log_file)
     try:
         os.environ["RAY_LOG_TO_DRIVER"] = "1" if ray_log_to_driver else "0"
         lancedb_uri = str(Path(lancedb_uri).expanduser().resolve())
+        _ensure_lancedb_table(lancedb_uri, LANCEDB_TABLE)
 
         if start_ray:
             subprocess.run(["ray", "start", "--head"], check=True, env=os.environ)
@@ -181,17 +193,14 @@ def main(
         else:
             raise typer.BadParameter(f"Path does not exist: {input_path}")
 
-        report = run_fused_pipeline(
-            FusedPipelineConfig(
-                input_path=str(input_path),
-                input_type="pdf",
-                file_patterns=file_patterns,
-                create_params=IngestorCreateParams(ray_address=ray_address, ray_log_to_driver=ray_log_to_driver),
-                execute_params=IngestExecuteParams(
-                    runtime_metrics_dir=str(runtime_metrics_dir) if runtime_metrics_dir is not None else None,
-                    runtime_metrics_prefix=runtime_metrics_prefix,
-                ),
-                extract_params=ExtractParams(
+        ingestor = create_ingestor(
+            run_mode="fused",
+            params=IngestorCreateParams(ray_address=ray_address, ray_log_to_driver=ray_log_to_driver),
+        )
+        ingestor = (
+            ingestor.files(file_patterns)
+            .extract(
+                ExtractParams(
                     extract_text=True,
                     extract_tables=True,
                     extract_charts=True,
@@ -202,8 +211,10 @@ def main(
                         "pdf_split_batch_size": int(pdf_split_batch_size),
                         "pdf_extract_batch_size": int(pdf_extract_batch_size),
                     },
-                ),
-                embed_params=EmbedParams(
+                )
+            )
+            .embed(
+                EmbedParams(
                     model_name="nemo_retriever_v1",
                     embed_granularity=embed_granularity,
                     fused_tuning={
@@ -212,30 +223,145 @@ def main(
                         "fused_cpus_per_actor": float(fused_cpus_per_actor),
                         "fused_gpus_per_actor": float(fused_gpus_per_actor),
                     },
-                ),
-                vdb_upload_params=VdbUploadParams(
+                )
+            )
+            .vdb_upload(
+                VdbUploadParams(
                     lancedb={
                         "lancedb_uri": lancedb_uri,
                         "table_name": LANCEDB_TABLE,
                         "overwrite": True,
                         "create_index": True,
                     }
-                ),
-                evaluation=RunEvaluationConfig(
-                    evaluation_mode="recall",
-                    query_csv=str(query_csv),
-                ),
-                artifacts=RunArtifactConfig(
-                    lancedb_uri=lancedb_uri,
-                    lancedb_table=LANCEDB_TABLE,
-                    detection_summary_file=str(detection_summary_file) if detection_summary_file is not None else None,
-                    log_file=str(log_file) if log_file is not None else None,
-                ),
+                )
             )
         )
-        render_fused_run_report(report)
+
+        print("Running extraction...")
+        ingest_start = time.perf_counter()
+        ingestor.ingest(
+            params=IngestExecuteParams(
+                runtime_metrics_dir=str(runtime_metrics_dir) if runtime_metrics_dir is not None else None,
+                runtime_metrics_prefix=runtime_metrics_prefix,
+            )
+        )
+        ingest_elapsed_s = time.perf_counter() - ingest_start
+        processed_pages = estimate_processed_pages(lancedb_uri, LANCEDB_TABLE)
+        detection_summary = collect_detection_summary_from_lancedb(lancedb_uri, LANCEDB_TABLE)
+        print("Extraction complete.")
+        print_detection_summary(detection_summary)
+        if detection_summary_file is not None:
+            write_detection_summary(detection_summary_file, detection_summary)
+            print(f"Wrote detection summary JSON to {Path(detection_summary_file).expanduser().resolve()}")
+
+        ray.shutdown()
+
+        query_csv = Path(query_csv)
+        if not query_csv.exists():
+            print(f"Query CSV not found at {query_csv}; skipping recall evaluation.")
+            print_pages_per_second(processed_pages, ingest_elapsed_s)
+            return
+
+        db = lancedb.connect(lancedb_uri)
+        table = None
+        open_err: Optional[Exception] = None
+        for _ in range(3):
+            try:
+                table = db.open_table(LANCEDB_TABLE)
+                open_err = None
+                break
+            except Exception as e:
+                open_err = e
+                _ensure_lancedb_table(lancedb_uri, LANCEDB_TABLE)
+                time.sleep(2)
+        if table is None:
+            raise RuntimeError(
+                f"Recall stage requires LanceDB table {LANCEDB_TABLE!r} at {lancedb_uri!r}, " f"but it was not found."
+            ) from open_err
+        try:
+            if int(table.count_rows()) == 0:
+                print(f"LanceDB table {LANCEDB_TABLE!r} exists but is empty; skipping recall evaluation.")
+                print_pages_per_second(processed_pages, ingest_elapsed_s)
+                return
+        except Exception:
+            pass
+
+        unique_basenames = table.to_pandas()["pdf_basename"].unique()
+        print(f"Unique basenames: {unique_basenames}")
+
+        cfg = RecallConfig(
+            lancedb_uri=str(lancedb_uri),
+            lancedb_table=str(LANCEDB_TABLE),
+            embedding_model="nvidia/llama-nemotron-embed-1b-v2",
+            top_k=10,
+            ks=(1, 5, 10),
+        )
+
+        _df_query, _gold, _raw_hits, _retrieved_keys, metrics = retrieve_and_score(query_csv=query_csv, cfg=cfg)
+
+        if not no_recall_details:
+            print("\nPer-query retrieval details:")
+        missed_gold: list[tuple[str, str]] = []
+        for i, (q, g, hits) in enumerate(
+            zip(
+                _df_query["query"].astype(str).tolist(),
+                _gold,
+                _raw_hits,
+            )
+        ):
+            doc, page = gold_to_doc_page(g)
+
+            scored_hits: list[tuple[str, float | None]] = []
+            for h in hits:
+                key, dist = hit_key_and_distance(h)
+                if key:
+                    scored_hits.append((key, dist))
+
+            top_keys = [k for (k, _d) in scored_hits]
+            hit = is_hit_at_k(g, top_keys, cfg.top_k, match_mode="pdf_page")
+
+            if not no_recall_details:
+                print(f"\nQuery {i}: {q}")
+                print(f"  Gold: {g}  (file: {doc}.pdf, page: {page})")
+                print(f"  Hit@{cfg.top_k}: {hit}")
+                print("  Top hits:")
+                if not scored_hits:
+                    print("    (no hits)")
+                else:
+                    for rank, (key, dist) in enumerate(scored_hits[: int(cfg.top_k)], start=1):
+                        if dist is None:
+                            print(f"    {rank:02d}. {key}")
+                        else:
+                            print(f"    {rank:02d}. {key}  distance={dist:.6f}")
+
+            if not hit:
+                missed_gold.append((f"{doc}.pdf", str(page)))
+
+        missed_unique = sorted(set(missed_gold), key=lambda x: (x[0], x[1]))
+        print("\nMissed gold (unique pdf/page):")
+        if not missed_unique:
+            print("  (none)")
+        else:
+            for pdf, page in missed_unique:
+                print(f"  {pdf} page {page}")
+        print(f"\nTotal missed: {len(missed_unique)} / {len(_gold)}")
+
+        print("\nRecall metrics (matching nemo_retriever.recall.core):")
+        for k, v in metrics.items():
+            print(f"  {k}: {v:.4f}")
+        print_pages_per_second(processed_pages, ingest_elapsed_s)
     finally:
-        restore_cli_logging(log_handle, original_stdout, original_stderr)
+        # Restore real stdio before closing the mirror file so exception hooks
+        # and late flushes never write to a closed stream wrapper.
+        import sys
+
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        if log_handle is not None:
+            try:
+                log_handle.flush()
+            finally:
+                log_handle.close()
 
 
 if __name__ == "__main__":

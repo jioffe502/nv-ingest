@@ -90,38 +90,6 @@ def _safe_str(x: Any) -> str:
     return "" if x is None else str(x)
 
 
-def _build_detection_metadata_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract per-page detection counters into the stored metadata payload."""
-
-    out: Dict[str, Any] = {}
-
-    pe_num = row.get("page_elements_v3_num_detections")
-    if pe_num is not None:
-        try:
-            out["page_elements_v3_num_detections"] = int(pe_num)
-        except Exception:
-            pass
-
-    pe_counts = row.get("page_elements_v3_counts_by_label")
-    if isinstance(pe_counts, dict):
-        counts_by_label: Dict[str, int] = {}
-        for key, value in pe_counts.items():
-            if not isinstance(key, str) or value is None:
-                continue
-            try:
-                counts_by_label[str(key)] = int(value)
-            except Exception:
-                continue
-        out["page_elements_v3_counts_by_label"] = counts_by_label
-
-    for ocr_col in ("table", "chart", "infographic"):
-        entries = row.get(ocr_col)
-        if isinstance(entries, list):
-            out[f"ocr_{ocr_col}_detections"] = int(len(entries))
-
-    return out
-
-
 def _extract_source_path_and_id(meta: Dict[str, Any]) -> Tuple[str, str]:
     """
     Extract a stable source path/id from metadata.
@@ -170,7 +138,6 @@ def _build_lancedb_rows_from_df(rows: List[Dict[str, Any]]) -> List[Dict[str, An
         meta = row.get("metadata")
         if not isinstance(meta, dict):
             continue
-        meta = dict(meta)
 
         embedding = meta.get("embedding")
         if embedding is None:
@@ -183,7 +150,6 @@ def _build_lancedb_rows_from_df(rows: List[Dict[str, Any]]) -> List[Dict[str, An
             except Exception:
                 continue
         meta.pop("embedding", None)  # Remove embedding from metadata to save space in LanceDB.
-        meta.update(_build_detection_metadata_from_row(row))
         # path, source_id = _extract_source_path_and_id(meta)
         path = row.get("path", "")
         source_id = meta.get("source_path", path)
@@ -208,7 +174,7 @@ def _build_lancedb_rows_from_df(rows: List[Dict[str, Any]]) -> List[Dict[str, An
                 "source_id": source_id,
                 "path": path,
                 "text": row.get("text", ""),
-                "metadata": json.dumps(meta, ensure_ascii=False),
+                "metadata": str(meta),
             }
         )
 

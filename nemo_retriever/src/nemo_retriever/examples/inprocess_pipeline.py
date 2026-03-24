@@ -7,27 +7,31 @@ In-process ingestion pipeline (no Ray) with optional recall evaluation.
 Run with: uv run python -m nemo_retriever.examples.inprocess_pipeline <input-dir>
 """
 
+import time
 from pathlib import Path
 from typing import Optional
 
+import lancedb
 import typer
-from nemo_retriever.application.modes.reports import RunArtifactConfig, RunEvaluationConfig
-from nemo_retriever.application.modes.run_inprocess import (
-    InProcessPipelineConfig,
-    render_inprocess_run_report,
-    run_inprocess_pipeline,
-)
-from nemo_retriever.application.modes.shared import (
-    DEFAULT_LANCEDB_TABLE as LANCEDB_TABLE,
-    DEFAULT_LANCEDB_URI as LANCEDB_URI,
-)
+from nemo_retriever import create_ingestor
+from nemo_retriever.examples.common import estimate_processed_pages, print_pages_per_second
 from nemo_retriever.params import EmbedParams
 from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import TextChunkParams
 from nemo_retriever.params import VdbUploadParams
+from nemo_retriever.recall.core import (
+    RecallConfig,
+    gold_to_doc_page,
+    hit_key_and_distance,
+    is_hit_at_k,
+    retrieve_and_score,
+)
 
 app = typer.Typer()
+
+LANCEDB_URI = "lancedb"
+LANCEDB_TABLE = "nv-ingest"
 
 
 @app.command()
@@ -193,68 +197,210 @@ def main(
     else:
         raise typer.BadParameter(f"Path does not exist: {input_path}")
 
-    enable_text_chunk = text_chunk or text_chunk_max_tokens is not None or text_chunk_overlap_tokens is not None
-    extract_params = ExtractParams(
-        method=method,
-        extract_text=True,
-        extract_tables=True,
-        extract_charts=True,
-        extract_infographics=False,
-        use_graphic_elements=use_graphic_elements,
-        graphic_elements_invoke_url=graphic_elements_invoke_url,
-        use_table_structure=use_table_structure,
-        table_output_format=table_output_format,
-        table_structure_invoke_url=table_structure_invoke_url,
-        page_elements_invoke_url=page_elements_invoke_url,
-        ocr_invoke_url=ocr_invoke_url,
-    )
-    chunk_params = TextChunkParams(
-        max_tokens=text_chunk_max_tokens or 1024,
-        overlap_tokens=text_chunk_overlap_tokens if text_chunk_overlap_tokens is not None else 150,
-    )
+    ingestor = create_ingestor(run_mode="inprocess")
+    if input_type == "txt":
+        ingestor = ingestor.files(file_patterns).extract_txt(
+            TextChunkParams(
+                max_tokens=text_chunk_max_tokens or 1024,
+                overlap_tokens=text_chunk_overlap_tokens if text_chunk_overlap_tokens is not None else 150,
+            )
+        )
+    elif input_type == "html":
+        ingestor = ingestor.files(file_patterns).extract_html(
+            TextChunkParams(
+                max_tokens=text_chunk_max_tokens or 1024,
+                overlap_tokens=text_chunk_overlap_tokens if text_chunk_overlap_tokens is not None else 150,
+            )
+        )
+    elif input_type == "image":
+        ingestor = ingestor.files(file_patterns).extract_image_files(
+            ExtractParams(
+                method=method,
+                extract_text=True,
+                extract_tables=True,
+                extract_charts=True,
+                extract_infographics=False,
+                use_graphic_elements=use_graphic_elements,
+                graphic_elements_invoke_url=graphic_elements_invoke_url,
+                use_table_structure=use_table_structure,
+                table_output_format=table_output_format,
+                table_structure_invoke_url=table_structure_invoke_url,
+                page_elements_invoke_url=page_elements_invoke_url,
+                ocr_invoke_url=ocr_invoke_url,
+            )
+        )
+    elif input_type == "doc":
+        ingestor = ingestor.files(file_patterns).extract(
+            ExtractParams(
+                method=method,
+                extract_text=True,
+                extract_tables=True,
+                extract_charts=True,
+                extract_infographics=False,
+                use_graphic_elements=use_graphic_elements,
+                graphic_elements_invoke_url=graphic_elements_invoke_url,
+                use_table_structure=use_table_structure,
+                table_output_format=table_output_format,
+                table_structure_invoke_url=table_structure_invoke_url,
+                page_elements_invoke_url=page_elements_invoke_url,
+                ocr_invoke_url=ocr_invoke_url,
+            )
+        )
+    else:
+        ingestor = ingestor.files(file_patterns).extract(
+            ExtractParams(
+                method=method,
+                extract_text=True,
+                extract_tables=True,
+                extract_charts=True,
+                extract_infographics=False,
+                use_graphic_elements=use_graphic_elements,
+                graphic_elements_invoke_url=graphic_elements_invoke_url,
+                use_table_structure=use_table_structure,
+                table_output_format=table_output_format,
+                table_structure_invoke_url=table_structure_invoke_url,
+                page_elements_invoke_url=page_elements_invoke_url,
+                ocr_invoke_url=ocr_invoke_url,
+            )
+        )
 
-    report = run_inprocess_pipeline(
-        InProcessPipelineConfig(
-            input_path=str(input_path),
-            input_type=input_type,
-            file_patterns=file_patterns,
-            execute_params=IngestExecuteParams(
-                parallel=True,
-                max_workers=max_workers,
-                gpu_devices=gpu_device_list,
-                show_progress=True,
-            ),
-            extract_params=extract_params,
-            embed_params=EmbedParams(
-                model_name=str(embed_model_name),
-                embed_invoke_url=embed_invoke_url,
-                embed_modality=embed_modality,
-                text_elements_modality=text_elements_modality,
-                structured_elements_modality=structured_elements_modality,
-                embed_granularity=embed_granularity,
-            ),
-            text_chunk_params=chunk_params,
-            enable_text_chunk=enable_text_chunk,
-            vdb_upload_params=VdbUploadParams(
-                lancedb={
-                    "lancedb_uri": LANCEDB_URI,
-                    "table_name": LANCEDB_TABLE,
-                    "overwrite": True,
-                    "create_index": True,
-                    "hybrid": hybrid,
-                }
-            ),
-            evaluation=RunEvaluationConfig(
-                evaluation_mode="recall",
-                query_csv=str(query_csv),
-            ),
-            artifacts=RunArtifactConfig(
-                lancedb_uri=LANCEDB_URI,
-                lancedb_table=LANCEDB_TABLE,
-            ),
+    enable_text_chunk = text_chunk or text_chunk_max_tokens is not None or text_chunk_overlap_tokens is not None
+    if enable_text_chunk:
+        ingestor = ingestor.split(
+            TextChunkParams(
+                max_tokens=text_chunk_max_tokens or 1024,
+                overlap_tokens=text_chunk_overlap_tokens if text_chunk_overlap_tokens is not None else 150,
+            )
+        )
+
+    ingestor = ingestor.embed(
+        EmbedParams(
+            model_name=str(embed_model_name),
+            embed_invoke_url=embed_invoke_url,
+            embed_modality=embed_modality,
+            text_elements_modality=text_elements_modality,
+            structured_elements_modality=structured_elements_modality,
+            embed_granularity=embed_granularity,
+        )
+    ).vdb_upload(
+        VdbUploadParams(
+            lancedb={
+                "lancedb_uri": LANCEDB_URI,
+                "table_name": LANCEDB_TABLE,
+                "overwrite": True,
+                "create_index": True,
+                "hybrid": hybrid,
+            }
         )
     )
-    render_inprocess_run_report(report, include_ingest_summary=False)
+
+    print("Running extraction...")
+    ingest_start = time.perf_counter()
+    ingestor.ingest(
+        params=IngestExecuteParams(
+            parallel=True,
+            max_workers=max_workers,
+            gpu_devices=gpu_device_list,
+            show_progress=True,
+        )
+    )
+    ingest_elapsed_s = time.perf_counter() - ingest_start
+    processed_pages = estimate_processed_pages(LANCEDB_URI, LANCEDB_TABLE)
+    print("Extraction complete.")
+
+    # ---------------------------------------------------------------------------
+    # Recall calculation (optional)
+    # ---------------------------------------------------------------------------
+    query_csv = Path(query_csv)
+    if not query_csv.exists():
+        print(f"Query CSV not found at {query_csv}; skipping recall evaluation.")
+        print_pages_per_second(processed_pages, ingest_elapsed_s)
+        return
+
+    db = lancedb.connect(f"./{LANCEDB_URI}")
+    table = db.open_table(LANCEDB_TABLE)
+    unique_basenames = table.to_pandas()["pdf_basename"].unique()
+    print(f"Unique basenames: {unique_basenames}")
+
+    # Resolve the HF model ID for recall query embedding so aliases
+    # (e.g. "nemo_retriever_v1") map to the correct model.
+    from nemo_retriever.model import resolve_embed_model
+
+    _recall_model = resolve_embed_model(str(embed_model_name))
+
+    cfg = RecallConfig(
+        lancedb_uri=str(LANCEDB_URI),
+        lancedb_table=str(LANCEDB_TABLE),
+        embedding_model=_recall_model,
+        embedding_http_endpoint=embed_invoke_url,
+        top_k=10,
+        ks=(1, 5, 10),
+        hybrid=hybrid,
+    )
+
+    _df_query, _gold, _raw_hits, _retrieved_keys, metrics = retrieve_and_score(query_csv=query_csv, cfg=cfg)
+
+    if not no_recall_details:
+        print("\nPer-query retrieval details:")
+    missed_gold: list[tuple[str, str]] = []
+    for i, (q, g, hits) in enumerate(
+        zip(
+            _df_query["query"].astype(str).tolist(),
+            _gold,
+            _raw_hits,
+        )
+    ):
+        doc, page = gold_to_doc_page(g)
+
+        scored_hits: list[tuple[str, float | None]] = []
+        for h in hits:
+            key, dist = hit_key_and_distance(h)
+            if key:
+                scored_hits.append((key, dist))
+
+        top_keys = [k for (k, _d) in scored_hits]
+        hit = is_hit_at_k(g, top_keys, cfg.top_k, match_mode="pdf_page")
+
+        if not no_recall_details:
+            ext = (
+                ".txt"
+                if input_type == "txt"
+                else (".html" if input_type == "html" else (".docx" if input_type == "doc" else ".pdf"))
+            )
+            print(f"\nQuery {i}: {q}")
+            print(f"  Gold: {g}  (file: {doc}{ext}, page: {page})")
+            print(f"  Hit@{cfg.top_k}: {hit}")
+            print("  Top hits:")
+            if not scored_hits:
+                print("    (no hits)")
+            else:
+                for rank, (key, dist) in enumerate(scored_hits[: int(cfg.top_k)], start=1):
+                    if dist is None:
+                        print(f"    {rank:02d}. {key}")
+                    else:
+                        print(f"    {rank:02d}. {key}  distance={dist:.6f}")
+
+        if not hit:
+            ext = (
+                ".txt"
+                if input_type == "txt"
+                else (".html" if input_type == "html" else (".docx" if input_type == "doc" else ".pdf"))
+            )
+            missed_gold.append((f"{doc}{ext}", str(page)))
+
+    missed_unique = sorted(set(missed_gold), key=lambda x: (x[0], x[1]))
+    print("\nMissed gold (unique doc/page):")
+    if not missed_unique:
+        print("  (none)")
+    else:
+        for doc_page, page in missed_unique:
+            print(f"  {doc_page} page {page}")
+    print(f"\nTotal missed: {len(missed_unique)} / {len(_gold)}")
+
+    print("\nRecall metrics (matching nemo_retriever.recall.core):")
+    for k, v in metrics.items():
+        print(f"  {k}: {v:.4f}")
+    print_pages_per_second(processed_pages, ingest_elapsed_s)
 
 
 if __name__ == "__main__":

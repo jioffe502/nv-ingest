@@ -9,8 +9,7 @@ It captures what exists now, what was intentionally chosen, and what to iterate 
 ## Current Scope and Intent
 
 - Harness is standalone under `nemo_retriever` (not based on `tools/harness`).
-- It now executes shared run-mode runners directly instead of scraping CLI output.
-- `batch` remains the default run mode, with `inprocess` and `fused` supported through the same harness config surface.
+- It wraps `nemo_retriever.examples.batch_pipeline`.
 - Primary use case is benchmark orchestration for local/cluster runs without Docker orchestration.
 - Vector DB is LanceDB only.
 - Recall gating is supported and enforced by config (`recall_required`).
@@ -18,21 +17,17 @@ It captures what exists now, what was intentionally chosen, and what to iterate 
 ## Key Files
 
 - `nemo_retriever/src/nemo_retriever/harness/run.py`
-  - CLI run/sweep/nightly orchestration, run-mode dispatch, artifact writes.
+  - CLI run/sweep/nightly orchestration, subprocess execution, metrics extraction, artifact writes.
 - `nemo_retriever/src/nemo_retriever/harness/config.py`
-  - YAML + CLI/env merge logic and `HarnessConfig`, including `run_mode`.
+  - YAML + CLI/env merge logic and `HarnessConfig`.
+- `nemo_retriever/src/nemo_retriever/harness/parsers.py`
+  - Stream parsing for ingest/throughput/recall metrics.
 - `nemo_retriever/src/nemo_retriever/harness/artifacts.py`
   - Artifact/session directory creation and session summary writing.
 - `nemo_retriever/src/nemo_retriever/harness/recall_adapters.py`
   - Dataset-specific query normalization adapters for recall inputs.
-- `nemo_retriever/src/nemo_retriever/application/modes/reports.py`
-  - Shared `RunReport` / `RunMetrics` schema and artifact persistence helpers.
-- `nemo_retriever/src/nemo_retriever/application/modes/run_batch.py`
-- `nemo_retriever/src/nemo_retriever/application/modes/run_inprocess.py`
-- `nemo_retriever/src/nemo_retriever/application/modes/run_fused.py`
-  - Shared mode runners that return structured reports consumed by the harness.
 - `nemo_retriever/harness/test_configs.yaml`
-  - Active defaults, presets, dataset presets, and default `run_mode`.
+  - Active defaults, presets, dataset presets.
 - `nemo_retriever/harness/nightly_config.yaml`
   - Ordered run list for sweep/nightly.
 
@@ -53,6 +48,7 @@ It captures what exists now, what was intentionally chosen, and what to iterate 
 From repo root:
 
 ```bash
+source ~/setup_env.sh
 source .retriever/bin/activate
 uv pip install -e ./nemo_retriever
 ```
@@ -96,8 +92,6 @@ Per run:
 - `command.txt`
 - `runtime_metrics/`
 - `lancedb/`
-- `runtime_metrics/<run>.run_report.json`
-- `runtime_metrics/<run>.runtime.summary.json`
 
 Session-level:
 
@@ -119,9 +113,8 @@ Notes:
    - Kept `session_summary.json`.
    - Removed `sweep_results.json` generation.
 
-3. **Structured run reports are authoritative**
-   - Harness metrics are populated from `RunReport` objects returned by the mode runners.
-   - Console output is now presentation-only and is no longer scraped for harness metrics.
+3. **TTY-backed subprocess retained**
+   - Harness runs batch pipeline through a PTY so Ray progress remains rich/pretty by default.
 
 ## Known Behavior to Remember
 
@@ -166,41 +159,62 @@ Harness-focused tests pass:
 
 ```bash
 pytest -q nemo_retriever/tests/test_batch_ingestor.py \
+  nemo_retriever/tests/test_batch_pipeline.py \
+  nemo_retriever/tests/test_harness_parsers.py \
   nemo_retriever/tests/test_harness_config.py \
   nemo_retriever/tests/test_harness_run.py \
   nemo_retriever/tests/test_harness_reporting.py \
-  nemo_retriever/tests/test_harness_nightly.py \
   nemo_retriever/tests/test_harness_recall_adapters.py \
   nemo_retriever/tests/test_recall_core.py
 ```
 
-## Structured Metrics Contract (Mar 2026)
+## Upstream Batch Compatibility (Mar 2026)
 
-The harness no longer relies on stdout or stderr to derive ingest or evaluation
-metrics. Instead, each supported run mode produces a shared structured
-`RunReport`, and the harness projects that report into `results.json` and
-`session_summary.json`.
+The upstream `nemo_retriever.examples.batch_pipeline` CLI and log output changed
+after the initial harness work landed. The harness now carries a compatibility
+shim for that newer upstream behavior.
 
-### Authoritative metrics sources
+### CLI compatibility
 
-- `results.json["run_report"]` is the canonical per-run payload.
-- `results.json["metrics"]` is a flattened compatibility view derived from the report.
-- `results.json["summary_metrics"]` is the compact downstream view used by nightly/reporting.
-- `runtime_metrics/<run>.run_report.json` mirrors the same report for direct inspection.
+- Harness config field names remain unchanged for now.
+- `harness.run._build_command()` maps those fields to the newer public batch CLI
+  flags, including:
+  - `pdf_extract_workers` -> `--pdf-extract-tasks`
+  - `pdf_extract_num_cpus` -> `--pdf-extract-cpus-per-task`
+  - `page_elements_workers` -> `--page-elements-actors`
+  - `ocr_workers` -> `--ocr-actors`
+  - `embed_workers` -> `--embed-actors`
+  - `gpu_page_elements` -> `--page-elements-gpus-per-actor`
+  - `gpu_ocr` -> `--ocr-gpus-per-actor`
+  - `gpu_embed` -> `--embed-gpus-per-actor`
 
-### Legacy compatibility
+### Artifact / parser semantics
 
-- `results.json` still keeps compatibility fields such as `metrics.pages`,
-  `metrics.pages_per_sec_ingest`, `summary_metrics.recall_5`, and
-  `summary_metrics.ndcg_10`.
-- `command.txt` is retained for reproducibility, but it is no longer a metrics source.
+- Current upstream batch mode no longer emits the old plain `[done]` / `Pages/sec`
+  lines on the main ingest path.
+- Harness parsers now accept:
+  - the legacy plain-text format when present
+  - the newer logged line:
+    - `Ingestion complete. <rows> rows procesed in <secs> seconds. <pps> PPS`
+  - logger-prefixed recall lines such as:
+    - `2026-... INFO ... recall@5: 0.9043`
+- `results.json` keeps the legacy page fields for backward compatibility:
+  - `metrics.pages`
+  - `metrics.pages_per_sec_ingest`
+- For current upstream batch runs, those legacy page fields may be `null`.
+- The authoritative ingest counters for the current upstream path are:
+  - `metrics.rows_processed`
+  - `metrics.rows_per_sec_ingest`
+- `metrics.ingest_secs` is still populated from whichever upstream ingest summary
+  line is available.
 
 ### Remaining caveat
 
-- Metric semantics still need care when comparing `input_pages`,
-  `processed_pages`, and `rows_processed` across modes.
-- The harness now preserves all three counters explicitly rather than inferring
-  one from CLI text.
+- This compatibility follow-up restores harness operability and recall gating.
+- It does **not** solve the larger semantic question of authoritative physical PDF
+  page counts versus uploaded unique pages versus post-explode rows.
+- `runtime_summary` and `detection_summary` remain best-effort side artifacts and
+  may still be `null` until upstream batch mode writes them consistently again.
 
 ## Recommended Next Iterations
 

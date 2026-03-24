@@ -11,24 +11,27 @@ import json
 import logging
 import os
 import sys
+import time
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Optional, TextIO
 
+from nemo_retriever.utils.detection_summary import print_run_summary
+import ray
 import typer
+from nemo_retriever import create_ingestor
+from nemo_retriever.ingest_modes.batch import BatchIngestor
 from nemo_retriever.ingest_modes.lancedb_utils import lancedb_schema
+from nemo_retriever.model import resolve_embed_model
 from nemo_retriever.params import EmbedParams
 from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import TextChunkParams
-from nemo_retriever.application.modes.reports import RunArtifactConfig, RunEvaluationConfig
-from nemo_retriever.application.modes.run_batch import (
-    BatchPipelineConfig,
-    render_batch_run_report,
-    run_batch_pipeline,
-)
+from nemo_retriever.recall.beir import BeirConfig, evaluate_lancedb_beir
+from nemo_retriever.recall.core import RecallConfig, retrieve_and_score
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
+from nemo_retriever.vector_store.lancedb_store import handle_lancedb
 
 logger = logging.getLogger(__name__)
 
@@ -647,6 +650,13 @@ def main(
         else:
             raise typer.BadParameter(f"Path does not exist: {input_path}")
 
+        ingestor = create_ingestor(
+            run_mode="batch",
+            params=IngestorCreateParams(
+                ray_address=ray_address, ray_log_to_driver=ray_log_to_driver, debug=bool(debug)
+            ),
+        )
+
         # -- Shared params used by multiple input-type branches ----------------
         embed_params = EmbedParams(
             model_name=str(embed_model_name),
@@ -720,55 +730,192 @@ def main(
             overlap_tokens=text_chunk_overlap_tokens if text_chunk_overlap_tokens is not None else 150,
         )
 
-        enable_text_chunk = text_chunk or text_chunk_max_tokens is not None or text_chunk_overlap_tokens is not None
-        if input_type == "txt" or input_type == "html":
-            resolved_extract_params = None
+        if input_type == "txt":
+            ingestor = ingestor.files(file_patterns).extract_txt(_text_chunk_params)
+        elif input_type == "html":
+            ingestor = ingestor.files(file_patterns).extract_html(_text_chunk_params)
         elif input_type == "image":
-            resolved_extract_params = _extract_params(_detection_batch_tuning)
+            ingestor = ingestor.files(file_patterns).extract_image_files(_extract_params(_detection_batch_tuning))
         elif input_type == "doc":
-            resolved_extract_params = _extract_params(_pdf_batch_tuning)
+            ingestor = ingestor.files(file_patterns).extract(_extract_params(_pdf_batch_tuning))
         else:
-            resolved_extract_params = _extract_params(_pdf_batch_tuning, inference_batch_size=page_elements_batch_size)
+            ingestor = ingestor.files(file_patterns).extract(
+                _extract_params(_pdf_batch_tuning, inference_batch_size=page_elements_batch_size)
+            )
 
-        report = run_batch_pipeline(
-            BatchPipelineConfig(
-                input_path=str(input_path),
-                input_type=input_type,
-                file_patterns=file_patterns,
-                create_params=IngestorCreateParams(
-                    ray_address=ray_address, ray_log_to_driver=ray_log_to_driver, debug=bool(debug)
-                ),
-                execute_params=IngestExecuteParams(
+        enable_text_chunk = text_chunk or text_chunk_max_tokens is not None or text_chunk_overlap_tokens is not None
+        if enable_text_chunk:
+            ingestor = ingestor.split(_text_chunk_params)
+
+        ingestor = ingestor.embed(embed_params)
+
+        logger.info("Running extraction...")
+        ingest_start = time.perf_counter()
+
+        ingest_results = (
+            ingestor.ingest(
+                params=IngestExecuteParams(
                     runtime_metrics_dir=str(runtime_metrics_dir) if runtime_metrics_dir is not None else None,
                     runtime_metrics_prefix=runtime_metrics_prefix,
-                ),
-                extract_params=resolved_extract_params,
-                embed_params=embed_params,
-                text_chunk_params=_text_chunk_params,
-                enable_text_chunk=enable_text_chunk,
-                evaluation=RunEvaluationConfig(
-                    evaluation_mode=evaluation_mode,
-                    query_csv=str(query_csv),
-                    recall_match_mode=recall_match_mode,
-                    beir_loader=beir_loader,
-                    beir_dataset_name=beir_dataset_name,
-                    beir_split=beir_split,
-                    beir_query_language=beir_query_language,
-                    beir_doc_id_field=beir_doc_id_field,
-                    beir_ks=tuple(beir_k) if beir_k else (1, 3, 5, 10),
-                    reranker=bool(reranker),
-                    reranker_model_name=str(reranker_model_name),
-                ),
-                artifacts=RunArtifactConfig(
-                    lancedb_uri=lancedb_uri,
-                    lancedb_table=LANCEDB_TABLE,
-                    detection_summary_file=str(detection_summary_file) if detection_summary_file is not None else None,
-                    log_file=str(log_file) if log_file is not None else None,
-                ),
-                hybrid=hybrid,
+                )
             )
+            .get_dataset()
+            .materialize()
         )
-        render_batch_run_report(report, hybrid=hybrid)
+
+        ingestion_only_total_time = time.perf_counter() - ingest_start
+
+        # Capture the time it takes to download the Ray dataset to the local machine for reporting.
+        ray_dataset_download_start = time.perf_counter()
+        ingest_local_results = ingest_results.take_all()
+        ray_dataset_download_time = time.perf_counter() - ray_dataset_download_start
+
+        # Write to lancedb and capture the time it takes.
+        lancedb_write_start = time.perf_counter()
+        handle_lancedb(ingest_local_results, lancedb_uri, LANCEDB_TABLE, hybrid=hybrid, mode="overwrite")
+        lancedb_write_time = time.perf_counter() - lancedb_write_start
+
+        if isinstance(ingestor, BatchIngestor):
+            error_rows = ingestor.get_error_rows(dataset=ingest_results).materialize()
+            error_count = int(error_rows.count())
+
+            # Error out, stop processing, and write top 5 errors rows to a local file for analysis.
+            if error_count > 0:
+                error_file = Path("ingest_errors.json").resolve()
+                max_error_rows_to_write = 5
+                error_rows_to_write = error_rows.take(min(max_error_rows_to_write, error_count))
+                with error_file.open("w", encoding="utf-8") as fh:
+                    json.dump(error_rows_to_write, fh, indent=2, default=str)
+                    fh.write("\n")
+                logger.error(
+                    "Detected %d error row(s) in ingest results. Wrote first %d row(s) "
+                    "to %s. Showing top 5 extracted errors and exiting before recall."
+                    " Writing top(%d) error rows to %s",
+                    error_count,
+                    len(error_rows_to_write),
+                    str(error_file),
+                    int(max_error_rows_to_write),
+                    str(error_file),
+                )
+
+                ray.shutdown()
+                logger.error(f"Exiting with code 1 due to {error_count} error rows in ingest results.")
+                raise typer.Exit(code=1)
+
+        # ---------------------------------------------------------------------------
+        # Evaluation calculation
+        # ---------------------------------------------------------------------------
+        evaluation_label = "Recall"
+        evaluation_total_time = 0.0
+        evaluation_metrics: dict[str, float] = {}
+        evaluation_query_count: Optional[int] = None
+
+        if evaluation_mode == "recall":
+            query_csv = Path(query_csv)
+            if not query_csv.exists():
+                logger.warning(f"Query CSV not found at {query_csv}; skipping recall evaluation.")
+                return
+
+        db = _lancedb().connect(lancedb_uri)
+        table = None
+        open_err: Optional[Exception] = None
+        for _ in range(3):
+            try:
+                table = db.open_table(LANCEDB_TABLE)
+                open_err = None
+                break
+            except Exception as e:
+                open_err = e
+                # Create table if missing, then retry open.
+                _ensure_lancedb_table(lancedb_uri, LANCEDB_TABLE)
+                time.sleep(2)
+        if table is None:
+            raise RuntimeError(
+                f"Recall stage requires LanceDB table {LANCEDB_TABLE!r} at {lancedb_uri!r}, " f"but it was not found."
+            ) from open_err
+        try:
+            if int(table.count_rows()) == 0:
+                logger.warning(
+                    f"LanceDB table {LANCEDB_TABLE!r} exists but is empty; skipping {evaluation_mode} evaluation."
+                )
+                return
+        except Exception:
+            pass
+
+        _recall_model = resolve_embed_model(str(embed_model_name))
+        if evaluation_mode == "beir":
+            if not beir_loader:
+                raise ValueError("--beir-loader is required when --evaluation-mode=beir")
+            if not beir_dataset_name:
+                raise ValueError("--beir-dataset-name is required when --evaluation-mode=beir")
+
+            beir_cfg = BeirConfig(
+                lancedb_uri=str(lancedb_uri),
+                lancedb_table=str(LANCEDB_TABLE),
+                embedding_model=_recall_model,
+                loader=str(beir_loader),
+                dataset_name=str(beir_dataset_name),
+                split=str(beir_split),
+                query_language=beir_query_language,
+                doc_id_field=str(beir_doc_id_field),
+                ks=tuple(beir_k) if beir_k else (1, 3, 5, 10),
+                embedding_http_endpoint=embed_invoke_url,
+                embedding_api_key=embed_remote_api_key or "",
+                hybrid=hybrid,
+                reranker=bool(reranker),
+                reranker_model_name=str(reranker_model_name),
+            )
+            evaluation_start = time.perf_counter()
+            beir_dataset, _raw_hits, _run, evaluation_metrics = evaluate_lancedb_beir(beir_cfg)
+            evaluation_total_time = time.perf_counter() - evaluation_start
+            evaluation_label = "BEIR"
+            evaluation_query_count = len(beir_dataset.query_ids)
+        else:
+            recall_cfg = RecallConfig(
+                lancedb_uri=str(lancedb_uri),
+                lancedb_table=str(LANCEDB_TABLE),
+                embedding_model=_recall_model,
+                embedding_http_endpoint=embed_invoke_url,
+                embedding_api_key=embed_remote_api_key or "",
+                top_k=10,
+                ks=(1, 5, 10),
+                hybrid=hybrid,
+                match_mode=recall_match_mode,
+                reranker=reranker_model_name if reranker else None,
+            )
+
+            evaluation_start = time.perf_counter()
+            _df_query, _gold, _raw_hits, _retrieved_keys, evaluation_metrics = retrieve_and_score(
+                query_csv=query_csv,
+                cfg=recall_cfg,
+            )
+            evaluation_total_time = time.perf_counter() - evaluation_start
+            evaluation_query_count = len(_df_query.index)
+
+        total_time = time.perf_counter() - ingest_start
+
+        # This processing has nothing to do with processing or performance so we exclude
+        # it from the runtimes. Just getting row counts for metrics ...
+        num_rows = ingest_results.groupby("source_id").count().count()
+
+        ray.shutdown()
+
+        # Print runtimes for easy user viewing at end
+        print_run_summary(
+            num_rows,
+            input_path,
+            hybrid,
+            lancedb_uri,
+            LANCEDB_TABLE,
+            total_time,
+            ingestion_only_total_time,
+            ray_dataset_download_time,
+            lancedb_write_time,
+            evaluation_total_time,
+            evaluation_metrics,
+            evaluation_label=evaluation_label,
+            evaluation_count=evaluation_query_count,
+        )
 
     finally:
         # Restore real stdio before closing the mirror file so exception hooks
