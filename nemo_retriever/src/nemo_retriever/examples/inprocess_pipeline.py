@@ -15,6 +15,7 @@ import lancedb
 import typer
 from nemo_retriever import create_ingestor
 from nemo_retriever.examples.common import estimate_processed_pages, print_pages_per_second
+from nemo_retriever.params import CaptionParams
 from nemo_retriever.params import EmbedParams
 from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import IngestExecuteParams
@@ -44,7 +45,7 @@ def main(
     input_type: str = typer.Option(
         "pdf",
         "--input-type",
-        help="Input format: 'pdf', 'txt', 'html', or 'doc'. Use 'txt' for .txt, 'html' for .html (markitdown -> chunks), 'doc' for .docx/.pptx (converted to PDF via LibreOffice).",  # noqa: E501
+        help="Input format: 'pdf', 'txt', 'html', 'doc', or 'image'. Use 'txt' for .txt, 'html' for .html (markitdown -> chunks), 'doc' for .docx/.pptx (converted to PDF via LibreOffice), 'image' for standalone image files (PNG, JPEG, BMP, TIFF, SVG).",  # noqa: E501
     ),
     query_csv: Path = typer.Option(
         "bo767_query_gt.csv",
@@ -92,34 +93,35 @@ def main(
         "--embed-model-name",
         help="Embedding model name passed to .embed().",
     ),
+    extract_text: bool = typer.Option(
+        True,
+        "--extract-text/--no-extract-text",
+        help="Extract text from PDF pages.",
+    ),
+    extract_tables: bool = typer.Option(
+        True,
+        "--extract-tables/--no-extract-tables",
+        help="Extract tables from PDF pages.",
+    ),
+    extract_charts: bool = typer.Option(
+        True,
+        "--extract-charts/--no-extract-charts",
+        help="Extract charts from PDF pages.",
+    ),
+    extract_infographics: bool = typer.Option(
+        False,
+        "--extract-infographics/--no-extract-infographics",
+        help="Extract infographics from PDF pages.",
+    ),
     method: str = typer.Option(
         "pdfium",
         "--method",
-        help="PDF text extraction method: 'pdfium' (native only), 'pdfium_hybrid' (native + OCR for scanned), or 'ocr' (OCR all pages).",  # noqa: E501
-    ),
-    nemotron_parse_actors: float = typer.Option(
-        0.0,
-        "--nemotron-parse-actors",
-        min=0.0,
-        help="Enable Parse-only extraction path when > 0.0 with parse GPU/batch-size.",
-    ),
-    nemotron_parse_gpus_per_actor: float = typer.Option(
-        0.0,
-        "--nemotron-parse-gpus-per-actor",
-        min=0.0,
-        help="GPU allocation hint for Parse-only extraction path.",
-    ),
-    nemotron_parse_ray_batch_size: float = typer.Option(
-        0.0,
-        "--nemotron-parse-ray-batch-size",
-        min=0.0,
-        help="Parse stage batch size (enables Parse-only path when > 0.0 with parse workers/GPU).",
+        help="PDF text extraction method: 'pdfium' (native only), 'pdfium_hybrid' (native + OCR for scanned), 'ocr' (OCR all pages), or 'nemotron_parse' (Nemotron Parse only).",  # noqa: E501
     ),
     embed_modality: str = typer.Option(
         "text",
         "--embed-modality",
-        help="Default embedding modality for all element types: "
-        "'text', 'image', or 'text_image' ('image_text' is also accepted).",
+        help="Default embedding modality for all element types: 'text', 'image', or 'text_image'.",
     ),
     text_elements_modality: Optional[str] = typer.Option(
         None,
@@ -168,6 +170,43 @@ def main(
         "--graphic-elements-invoke-url",
         help="Optional remote endpoint URL for graphic-elements model inference.",
     ),
+    caption: bool = typer.Option(
+        False,
+        "--caption/--no-caption",
+        help="Enable image captioning. Uses a local model by default, "
+        "or a remote endpoint if --caption-invoke-url is set.",
+    ),
+    caption_invoke_url: Optional[str] = typer.Option(
+        None,
+        "--caption-invoke-url",
+        help="Optional VLM endpoint URL for image captioning (e.g. http://vlm:8000/v1/chat/completions). "
+        "Implies --caption. When omitted, a local HF model is loaded instead.",
+    ),
+    caption_model_name: str = typer.Option(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        "--caption-model-name",
+        help="VLM model name / HF model ID for image captioning.",
+    ),
+    caption_device: Optional[str] = typer.Option(
+        None,
+        "--caption-device",
+        help="GPU device for the local VLM captioner (e.g. 'cuda:1'). Defaults to the first --gpu-devices entry.",
+    ),
+    caption_context_text_max_chars: int = typer.Option(
+        0,
+        "--caption-context-text-max-chars",
+        help="Max characters of surrounding page text to include in the VLM prompt. 0 disables context.",
+    ),
+    caption_gpu_memory_utilization: float = typer.Option(
+        0.5,
+        "--caption-gpu-memory-utilization",
+        help="Fraction of GPU memory vLLM may use for the caption model (0.0–1.0).",
+    ),
+    hybrid: bool = typer.Option(
+        False,
+        "--hybrid/--no-hybrid",
+        help="Enable LanceDB hybrid mode (dense + FTS text).",
+    ),
     text_chunk: bool = typer.Option(
         False,
         "--text-chunk",
@@ -204,6 +243,7 @@ def main(
             "txt": ["*.txt"],
             "html": ["*.html"],
             "doc": ["*.docx", "*.pptx"],
+            "image": ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tiff", "*.tif", "*.svg"],
         }
         exts = ext_map.get(input_type, ["*.pdf"])
         file_patterns = [str(input_path / e) for e in exts]
@@ -225,14 +265,14 @@ def main(
                 overlap_tokens=text_chunk_overlap_tokens if text_chunk_overlap_tokens is not None else 150,
             )
         )
-    elif input_type == "doc":
-        ingestor = ingestor.files(file_patterns).extract(
+    elif input_type == "image":
+        ingestor = ingestor.files(file_patterns).extract_image_files(
             ExtractParams(
                 method=method,
-                extract_text=True,
-                extract_tables=True,
-                extract_charts=True,
-                extract_infographics=False,
+                extract_text=extract_text,
+                extract_tables=extract_tables,
+                extract_charts=extract_charts,
+                extract_infographics=extract_infographics,
                 use_graphic_elements=use_graphic_elements,
                 graphic_elements_invoke_url=graphic_elements_invoke_url,
                 use_table_structure=use_table_structure,
@@ -240,21 +280,33 @@ def main(
                 table_structure_invoke_url=table_structure_invoke_url,
                 page_elements_invoke_url=page_elements_invoke_url,
                 ocr_invoke_url=ocr_invoke_url,
-                batch_tuning={
-                    "nemotron_parse_workers": float(nemotron_parse_actors),
-                    "gpu_nemotron_parse": float(nemotron_parse_gpus_per_actor),
-                    "nemotron_parse_batch_size": float(nemotron_parse_ray_batch_size),
-                },
+            )
+        )
+    elif input_type == "doc":
+        ingestor = ingestor.files(file_patterns).extract(
+            ExtractParams(
+                method=method,
+                extract_text=extract_text,
+                extract_tables=extract_tables,
+                extract_charts=extract_charts,
+                extract_infographics=extract_infographics,
+                use_graphic_elements=use_graphic_elements,
+                graphic_elements_invoke_url=graphic_elements_invoke_url,
+                use_table_structure=use_table_structure,
+                table_output_format=table_output_format,
+                table_structure_invoke_url=table_structure_invoke_url,
+                page_elements_invoke_url=page_elements_invoke_url,
+                ocr_invoke_url=ocr_invoke_url,
             )
         )
     else:
         ingestor = ingestor.files(file_patterns).extract(
             ExtractParams(
                 method=method,
-                extract_text=True,
-                extract_tables=True,
-                extract_charts=True,
-                extract_infographics=False,
+                extract_text=extract_text,
+                extract_tables=extract_tables,
+                extract_charts=extract_charts,
+                extract_infographics=extract_infographics,
                 use_graphic_elements=use_graphic_elements,
                 graphic_elements_invoke_url=graphic_elements_invoke_url,
                 use_table_structure=use_table_structure,
@@ -262,11 +314,6 @@ def main(
                 table_structure_invoke_url=table_structure_invoke_url,
                 page_elements_invoke_url=page_elements_invoke_url,
                 ocr_invoke_url=ocr_invoke_url,
-                batch_tuning={
-                    "nemotron_parse_workers": float(nemotron_parse_actors),
-                    "gpu_nemotron_parse": float(nemotron_parse_gpus_per_actor),
-                    "nemotron_parse_batch_size": float(nemotron_parse_ray_batch_size),
-                },
             )
         )
 
@@ -276,6 +323,18 @@ def main(
             TextChunkParams(
                 max_tokens=text_chunk_max_tokens or 1024,
                 overlap_tokens=text_chunk_overlap_tokens if text_chunk_overlap_tokens is not None else 150,
+            )
+        )
+
+    enable_caption = caption or caption_invoke_url is not None
+    if enable_caption:
+        ingestor = ingestor.caption(
+            CaptionParams(
+                endpoint_url=caption_invoke_url,
+                model_name=caption_model_name,
+                device=caption_device,
+                context_text_max_chars=caption_context_text_max_chars,
+                gpu_memory_utilization=caption_gpu_memory_utilization,
             )
         )
 
@@ -295,6 +354,7 @@ def main(
                 "table_name": LANCEDB_TABLE,
                 "overwrite": True,
                 "create_index": True,
+                "hybrid": hybrid,
             }
         )
     )
@@ -340,6 +400,7 @@ def main(
         embedding_http_endpoint=embed_invoke_url,
         top_k=10,
         ks=(1, 5, 10),
+        hybrid=hybrid,
     )
 
     _df_query, _gold, _raw_hits, _retrieved_keys, metrics = retrieve_and_score(query_csv=query_csv, cfg=cfg)

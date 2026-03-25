@@ -23,11 +23,14 @@ from nemo_retriever import create_ingestor
 from nemo_retriever.ingest_modes.batch import BatchIngestor
 from nemo_retriever.ingest_modes.lancedb_utils import lancedb_schema
 from nemo_retriever.model import resolve_embed_model
+from nemo_retriever.params import CaptionParams
 from nemo_retriever.params import EmbedParams
+from nemo_retriever.params import StoreParams
 from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import TextChunkParams
+from nemo_retriever.recall.beir import BeirConfig, evaluate_lancedb_beir
 from nemo_retriever.recall.core import RecallConfig, retrieve_and_score
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 from nemo_retriever.vector_store.lancedb_store import handle_lancedb
@@ -189,6 +192,12 @@ def main(
         "--debug/--no-debug",
         help="Enable debug-level logging for this full pipeline run.",
     ),
+    dpi: int = typer.Option(
+        300,
+        "--dpi",
+        min=72,
+        help="Render DPI for PDF page images (default: 300).",
+    ),
     input_path: Path = typer.Argument(
         ...,
         help="File or directory containing PDFs, .txt, .html, or .doc/.pptx files to ingest.",
@@ -205,6 +214,11 @@ def main(
         "pdf_page",
         "--recall-match-mode",
         help="Recall match mode: 'pdf_page' or 'pdf_only'.",
+    ),
+    evaluation_mode: str = typer.Option(
+        "recall",
+        "--evaluation-mode",
+        help="Evaluation mode after LanceDB upload: 'recall' or 'beir'.",
     ),
     no_recall_details: bool = typer.Option(
         False,
@@ -240,6 +254,36 @@ def main(
         "--embed-granularity",
         help="Embedding granularity: 'element' (one row per table/chart/text) or 'page' (one row per page).",
     ),
+    beir_loader: Optional[str] = typer.Option(
+        None,
+        "--beir-loader",
+        help="BEIR-style evaluation loader identifier (for example, 'vidore_hf').",
+    ),
+    beir_dataset_name: Optional[str] = typer.Option(
+        None,
+        "--beir-dataset-name",
+        help="Dataset name used by the BEIR loader (for example, 'vidore_v3_computer_science').",
+    ),
+    beir_split: str = typer.Option(
+        "test",
+        "--beir-split",
+        help="Dataset split name for BEIR-style evaluation.",
+    ),
+    beir_query_language: Optional[str] = typer.Option(
+        None,
+        "--beir-query-language",
+        help="Optional query language filter for BEIR-style evaluation.",
+    ),
+    beir_doc_id_field: str = typer.Option(
+        "pdf_basename",
+        "--beir-doc-id-field",
+        help="LanceDB hit field to use as the BEIR document identifier.",
+    ),
+    beir_k: list[int] = typer.Option(
+        [],
+        "--beir-k",
+        help="Cutoff(s) for BEIR-style metrics. Repeatable; defaults to 1,3,5,10.",
+    ),
     graphic_elements_invoke_url: Optional[str] = typer.Option(
         None,
         "--graphic-elements-invoke-url",
@@ -263,8 +307,7 @@ def main(
     embed_modality: str = typer.Option(
         "text",
         "--embed-modality",
-        help="Default embedding modality for all element types: "
-        "'text', 'image', or 'text_image' ('image_text' is also accepted).",
+        help="Default embedding modality for all element types: 'text', 'image', or 'text_image'.",
     ),
     hybrid: bool = typer.Option(
         False,
@@ -284,7 +327,7 @@ def main(
     method: str = typer.Option(
         "pdfium",
         "--method",
-        help="PDF text extraction method: 'pdfium' (native only), 'pdfium_hybrid' (native + OCR for scanned), or 'ocr' (OCR all pages).",  # noqa: E501
+        help="PDF text extraction method: 'pdfium' (native only), 'pdfium_hybrid' (native + OCR for scanned), 'ocr' (OCR all pages), or 'nemotron_parse' (Nemotron Parse only, auto-configured).",  # noqa: E501
     ),
     log_file: Optional[Path] = typer.Option(
         None,
@@ -425,6 +468,14 @@ def main(
         "--runtime-metrics-prefix",
         help="Optional filename prefix for per-run metrics artifacts.",
     ),
+    reranker: Optional[bool] = typer.Option(
+        False, "--reranker/--no-reranker", help="Enable a re-ranking stage with a cross-encoder model."
+    ),
+    reranker_model_name: str = typer.Option(
+        "nvidia/llama-nemotron-rerank-1b-v2",
+        "--reranker-model-name",
+        help="Cross-encoder model name for re-ranking stage (passed to .embed()).",
+    ),
     structured_elements_modality: Optional[str] = typer.Option(
         None,
         "--structured-elements-modality",
@@ -467,6 +518,61 @@ def main(
         "--store-images-uri",
         help="When set, store extracted images to this URI (local path or fsspec URI like s3://bucket/prefix).",
     ),
+    extract_text: bool = typer.Option(
+        True,
+        "--extract-text/--no-extract-text",
+        help="Extract text from PDF pages.",
+    ),
+    extract_tables: bool = typer.Option(
+        True,
+        "--extract-tables/--no-extract-tables",
+        help="Extract tables from PDF pages.",
+    ),
+    extract_charts: bool = typer.Option(
+        True,
+        "--extract-charts/--no-extract-charts",
+        help="Extract charts from PDF pages.",
+    ),
+    extract_infographics: bool = typer.Option(
+        False,
+        "--extract-infographics/--no-extract-infographics",
+        help="Extract infographic content alongside tables and charts.",
+    ),
+    extract_page_as_image: bool = typer.Option(
+        True,
+        "--extract-page-as-image/--no-extract-page-as-image",
+        help="Render and retain full page images for downstream multimodal stages.",
+    ),
+    caption: bool = typer.Option(
+        False,
+        "--caption/--no-caption",
+        help="Enable image captioning via a local VLM or remote endpoint.",
+    ),
+    caption_invoke_url: Optional[str] = typer.Option(
+        None,
+        "--caption-invoke-url",
+        help="Optional VLM endpoint URL for image captioning. Implies --caption.",
+    ),
+    caption_model_name: str = typer.Option(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        "--caption-model-name",
+        help="VLM model name / HF model ID for image captioning.",
+    ),
+    caption_device: Optional[str] = typer.Option(
+        None,
+        "--caption-device",
+        help="GPU device for the local VLM captioner (e.g. 'cuda:1').",
+    ),
+    caption_context_text_max_chars: int = typer.Option(
+        0,
+        "--caption-context-text-max-chars",
+        help="Max characters of surrounding page text to include in the VLM prompt. 0 disables context.",
+    ),
+    caption_gpu_memory_utilization: float = typer.Option(
+        0.5,
+        "--caption-gpu-memory-utilization",
+        help="Fraction of GPU memory vLLM may use for the caption model (0.0–1.0).",
+    ),
     text_chunk: bool = typer.Option(
         False,
         "--text-chunk",
@@ -490,6 +596,8 @@ def main(
     try:
         if recall_match_mode not in {"pdf_page", "pdf_only"}:
             raise ValueError(f"Unsupported --recall-match-mode: {recall_match_mode}")
+        if evaluation_mode not in {"recall", "beir"}:
+            raise ValueError(f"Unsupported --evaluation-mode: {evaluation_mode}")
 
         os.environ["RAY_LOG_TO_DRIVER"] = "1" if ray_log_to_driver else "0"
         # Use an absolute path so driver and Ray actors resolve the same LanceDB URI.
@@ -614,6 +722,7 @@ def main(
                 "embed_workers": embed_actors,
                 "embed_batch_size": int(embed_batch_size),
                 "embed_cpus_per_actor": float(embed_cpus_per_actor),
+                "gpu_embed": float(embed_gpus_per_actor),
             },
         )
         # txt/html don't use embed_granularity from batch_tuning the same way,
@@ -650,10 +759,12 @@ def main(
         def _extract_params(batch_tuning: dict, **overrides: Any) -> ExtractParams:
             return ExtractParams(
                 method=method,
-                extract_text=True,
-                extract_tables=True,
-                extract_charts=True,
-                extract_infographics=False,
+                dpi=int(dpi),
+                extract_text=extract_text,
+                extract_tables=extract_tables,
+                extract_charts=extract_charts,
+                extract_infographics=extract_infographics,
+                extract_page_as_image=extract_page_as_image,
                 api_key=extract_remote_api_key,
                 use_graphic_elements=use_graphic_elements,
                 graphic_elements_invoke_url=graphic_elements_invoke_url,
@@ -689,9 +800,19 @@ def main(
             ingestor = ingestor.split(_text_chunk_params)
 
         if store_images_uri:
-            from nemo_retriever.params import StoreParams
-
             ingestor = ingestor.store(StoreParams(storage_uri=store_images_uri))
+
+        enable_caption = caption or caption_invoke_url is not None
+        if enable_caption:
+            ingestor = ingestor.caption(
+                CaptionParams(
+                    endpoint_url=caption_invoke_url,
+                    model_name=caption_model_name,
+                    device=caption_device,
+                    context_text_max_chars=caption_context_text_max_chars,
+                    gpu_memory_utilization=caption_gpu_memory_utilization,
+                )
+            )
 
         ingestor = ingestor.embed(embed_params)
 
@@ -751,12 +872,18 @@ def main(
                 raise typer.Exit(code=1)
 
         # ---------------------------------------------------------------------------
-        # Recall calculation
+        # Evaluation calculation
         # ---------------------------------------------------------------------------
-        query_csv = Path(query_csv)
-        if not query_csv.exists():
-            logger.warning(f"Query CSV not found at {query_csv}; skipping recall evaluation.")
-            return
+        evaluation_label = "Recall"
+        evaluation_total_time = 0.0
+        evaluation_metrics: dict[str, float] = {}
+        evaluation_query_count: Optional[int] = None
+
+        if evaluation_mode == "recall":
+            query_csv = Path(query_csv)
+            if not query_csv.exists():
+                logger.warning(f"Query CSV not found at {query_csv}; skipping recall evaluation.")
+                return
 
         db = _lancedb().connect(lancedb_uri)
         table = None
@@ -777,29 +904,62 @@ def main(
             ) from open_err
         try:
             if int(table.count_rows()) == 0:
-                logger.warning(f"LanceDB table {LANCEDB_TABLE!r} exists but is empty; skipping recall evaluation.")
+                logger.warning(
+                    f"LanceDB table {LANCEDB_TABLE!r} exists but is empty; skipping {evaluation_mode} evaluation."
+                )
                 return
         except Exception:
             pass
 
         _recall_model = resolve_embed_model(str(embed_model_name))
+        if evaluation_mode == "beir":
+            if not beir_loader:
+                raise ValueError("--beir-loader is required when --evaluation-mode=beir")
+            if not beir_dataset_name:
+                raise ValueError("--beir-dataset-name is required when --evaluation-mode=beir")
 
-        cfg = RecallConfig(
-            lancedb_uri=str(lancedb_uri),
-            lancedb_table=str(LANCEDB_TABLE),
-            embedding_model=_recall_model,
-            embedding_http_endpoint=embed_invoke_url,
-            embedding_api_key=embed_remote_api_key or "",
-            top_k=10,
-            ks=(1, 5, 10),
-            hybrid=hybrid,
-            match_mode=recall_match_mode,
-        )
+            beir_cfg = BeirConfig(
+                lancedb_uri=str(lancedb_uri),
+                lancedb_table=str(LANCEDB_TABLE),
+                embedding_model=_recall_model,
+                loader=str(beir_loader),
+                dataset_name=str(beir_dataset_name),
+                split=str(beir_split),
+                query_language=beir_query_language,
+                doc_id_field=str(beir_doc_id_field),
+                ks=tuple(beir_k) if beir_k else (1, 3, 5, 10),
+                embedding_http_endpoint=embed_invoke_url,
+                embedding_api_key=embed_remote_api_key or "",
+                hybrid=hybrid,
+                reranker=bool(reranker),
+                reranker_model_name=str(reranker_model_name),
+            )
+            evaluation_start = time.perf_counter()
+            beir_dataset, _raw_hits, _run, evaluation_metrics = evaluate_lancedb_beir(beir_cfg)
+            evaluation_total_time = time.perf_counter() - evaluation_start
+            evaluation_label = "BEIR"
+            evaluation_query_count = len(beir_dataset.query_ids)
+        else:
+            recall_cfg = RecallConfig(
+                lancedb_uri=str(lancedb_uri),
+                lancedb_table=str(LANCEDB_TABLE),
+                embedding_model=_recall_model,
+                embedding_http_endpoint=embed_invoke_url,
+                embedding_api_key=embed_remote_api_key or "",
+                top_k=10,
+                ks=(1, 5, 10),
+                hybrid=hybrid,
+                match_mode=recall_match_mode,
+                reranker=reranker_model_name if reranker else None,
+            )
 
-        # Capture recall only times.
-        recall_start = time.perf_counter()
-        _df_query, _gold, _raw_hits, _retrieved_keys, metrics = retrieve_and_score(query_csv=query_csv, cfg=cfg)
-        recall_total_time = time.perf_counter() - recall_start
+            evaluation_start = time.perf_counter()
+            _df_query, _gold, _raw_hits, _retrieved_keys, evaluation_metrics = retrieve_and_score(
+                query_csv=query_csv,
+                cfg=recall_cfg,
+            )
+            evaluation_total_time = time.perf_counter() - evaluation_start
+            evaluation_query_count = len(_df_query.index)
 
         total_time = time.perf_counter() - ingest_start
 
@@ -820,8 +980,10 @@ def main(
             ingestion_only_total_time,
             ray_dataset_download_time,
             lancedb_write_time,
-            recall_total_time,
-            metrics,
+            evaluation_total_time,
+            evaluation_metrics,
+            evaluation_label=evaluation_label,
+            evaluation_count=evaluation_query_count,
         )
 
     finally:

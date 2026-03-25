@@ -53,6 +53,7 @@ active:
         local_port: 8015
         remote_port: 8000
     values:  # inline Helm values
+      nimOperator.rerankqa.enabled: true
       nimOperator.llama_3_2_nv_rerankqa_1b_v2.enabled: true
 
   # Runtime configuration

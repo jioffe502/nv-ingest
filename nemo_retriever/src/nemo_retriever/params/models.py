@@ -44,6 +44,7 @@ class IngestorCreateParams(_ParamsModel):
     ray_log_to_driver: bool = True
     debug: bool = False
     base_url: str = "http://localhost:7670"
+    allow_no_gpu: bool = False
 
 
 class IngestExecuteParams(_ParamsModel):
@@ -167,6 +168,7 @@ class ExtractParams(_ParamsModel):
     dpi: int = 200
     image_format: str = "jpeg"
     jpeg_quality: int = 100
+    render_mode: Literal["full_dpi", "fit_to_model"] = "fit_to_model"
     inference_batch_size: int = 8
     ocr_model_dir: Optional[str] = None
 
@@ -211,7 +213,8 @@ class ExtractParams(_ParamsModel):
         return self
 
 
-IMAGE_MODALITIES: frozenset[str] = frozenset({"image", "text_image", "image_text"})
+VALID_EMBED_MODALITIES: frozenset[str] = frozenset({"text", "image", "text_image"})
+IMAGE_MODALITIES: frozenset[str] = frozenset({"image", "text_image"})
 
 
 class EmbedParams(_ParamsModel):
@@ -238,10 +241,15 @@ class EmbedParams(_ParamsModel):
 
     @field_validator("embed_modality", "text_elements_modality", "structured_elements_modality", mode="before")
     @classmethod
-    def _normalize_modality(cls, v: str | None) -> str | None:
-        if v == "image_text":
-            return "text_image"
-        return v
+    def _validate_modality(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        modality = str(v).strip()
+        if modality == "image_text":
+            raise ValueError("Use 'text_image' instead of 'image_text'.")
+        if modality not in VALID_EMBED_MODALITIES:
+            raise ValueError(f"Modality must be one of {sorted(VALID_EMBED_MODALITIES)}")
+        return modality
 
     @model_validator(mode="after")
     def _warn_page_granularity_overrides(self) -> "EmbedParams":
@@ -306,6 +314,21 @@ class ChartParams(_ParamsModel):
     remote: RemoteInvokeParams = Field(default_factory=RemoteInvokeParams)
     remote_retry: RemoteRetryParams = Field(default_factory=RemoteRetryParams)
     inference_batch_size: int = 8
+
+
+class CaptionParams(_ParamsModel):
+    endpoint_url: Optional[str] = None
+    model_name: str = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
+    api_key: Optional[str] = None
+    prompt: str = "Caption the content of this image:"
+    system_prompt: Optional[str] = "/no_think"
+    temperature: float = 1.0
+    batch_size: int = 8
+    device: Optional[str] = None
+    hf_cache_dir: Optional[str] = None
+    context_text_max_chars: int = 0
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.5
 
 
 class InfographicParams(_ParamsModel):

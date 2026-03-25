@@ -947,3 +947,173 @@ done
         except Exception as e:
             print(f"Error: Failed to dump logs: {e}")
             return 1
+
+    # Deployment names for stage-based control (per chart NIMService names and main deploy)
+    _INGESTION_DEPLOYMENTS = (
+        # main deploy uses release name (e.g. nv-ingest); set at runtime
+        "nemotron-page-elements-v3",
+        "nemoretriever-page-elements-v3",
+        "nemotron-graphic-elements-v1",
+        "nemoretriever-graphic-elements-v1",
+        "nemotron-table-structure-v1",
+        "nemoretriever-table-structure-v1",
+        "nemotron-ocr-v1",
+        "nemoretriever-ocr-v1",
+    )
+    _NON_INGESTION_DEPLOYMENTS = (
+        "llama-nemotron-rerank-1b-v2",
+        "llama-32-nv-rerankqa-1b-v2",
+    )
+
+    def _wait_for_deployments_available(self, timeout_s: int = 600, verbose: bool = True) -> None:
+        """Wait for all deployments in the release namespace to be available (condition=available).
+        Ensures the deployment list is complete before scaling. No-op or proceeds on timeout/no resources.
+        """
+        if verbose:
+            print(f"Waiting for deployments in {self.namespace} to be available (timeout: {timeout_s}s)...")
+        cmd = self.kubectl_cmd + [
+            "wait",
+            "--for=condition=available",
+            "deployment",
+            "--all",
+            "-n",
+            self.namespace,
+            f"--timeout={timeout_s}s",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
+            if result.returncode == 0 and verbose:
+                print("Deployments available.")
+            elif result.returncode != 0 and verbose:
+                print("Proceeding (deployments wait finished or timed out).")
+        except Exception as e:
+            if verbose:
+                print(f"Proceeding after wait error: {e}")
+
+    def _get_existing_deployments(self) -> set[str]:
+        """Return set of deployment names that exist in the release namespace."""
+        cmd = self.kubectl_cmd + [
+            "get",
+            "deployments",
+            "-n",
+            self.namespace,
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                return set()
+            return {n.strip() for n in result.stdout.strip().split("\n") if n.strip()}
+        except Exception:
+            return set()
+
+    def _scale_deployment(self, name: str, replicas: int) -> int:
+        """Scale a deployment to the given replica count. Returns 0 on success."""
+        cmd = self.kubectl_cmd + [
+            "scale",
+            "deployment",
+            name,
+            "-n",
+            self.namespace,
+            "--replicas",
+            str(replicas),
+        ]
+        return run_cmd(cmd)
+
+    def stop_ingestion_services(self) -> int:
+        """Stop only ingestion-related services (scale to 0) to free VRAM before recall."""
+        existing = self._get_existing_deployments()
+        main_name = self.release_name
+        to_stop = ([main_name] if main_name in existing else []) + [
+            d for d in self._INGESTION_DEPLOYMENTS if d in existing
+        ]
+        if not to_stop:
+            return 0
+        print("Stopping ingestion-only services (minimize VRAM)...")
+        for name in to_stop:
+            rc = self._scale_deployment(name, 0)
+            if rc != 0:
+                print(f"Warning: Failed to scale {name} to 0")
+        return 0
+
+    def start_ingestion_services(self) -> int:
+        """Start ingestion-related services (scale to 1) before the next dataset's e2e."""
+        existing = self._get_existing_deployments()
+        main_name = self.release_name
+        to_start = ([main_name] if main_name in existing else []) + [
+            d for d in self._INGESTION_DEPLOYMENTS if d in existing
+        ]
+        if not to_start:
+            return 0
+        print("Starting ingestion-only services...")
+        for name in to_start:
+            rc = self._scale_deployment(name, 1)
+            if rc != 0:
+                print(f"Warning: Failed to scale {name} to 1")
+        return 0
+
+    def stop_non_ingestion_services(self) -> int:
+        """Stop reranker and other non-ingestion services (scale to 0) after initial start."""
+        timeout_s = getattr(self.config, "readiness_timeout", 600)
+        self._wait_for_deployments_available(timeout_s=timeout_s, verbose=True)
+        existing = self._get_existing_deployments()
+        to_stop = [d for d in self._NON_INGESTION_DEPLOYMENTS if d in existing]
+        if not to_stop:
+            return 0
+        print("Stopping non-ingestion services (reranker, etc.)...")
+        for name in to_stop:
+            rc = self._scale_deployment(name, 0)
+            if rc != 0:
+                print(f"Warning: Failed to scale {name} to 0")
+        return 0
+
+    def start_retrieval_services(self, reranker: bool = False) -> int:
+        """Start recall-required services; if reranker is True, scale reranker(s) to 1.
+        Tries both known reranker deployment names (llama-nemotron-rerank-1b-v2, llama-32-nv-rerankqa-1b-v2).
+        """
+        if not reranker:
+            return 0
+        existing = self._get_existing_deployments()
+        to_start = [d for d in self._NON_INGESTION_DEPLOYMENTS if d in existing]
+        if not to_start:
+            return 0
+        print("Starting retrieval services (reranker)...")
+        rc = 0
+        for name in to_start:
+            if self._scale_deployment(name, 1) != 0:
+                print(f"Warning: Failed to scale {name} to 1")
+                rc = 1
+        return rc
+
+    def wait_for_reranker_readiness(self, timeout_s: int, verbose: bool = True) -> bool:
+        """Wait for reranker NIM to become ready (poll /v1/health/ready on port 8015)."""
+        hostname = getattr(self.config, "hostname", "localhost")
+        url = f"http://{hostname}:8015/v1/health/ready"
+        deadline = time.time() + timeout_s
+        last_status_time = 0.0
+        status_interval = 10.0
+
+        if verbose:
+            print(f"Waiting for reranker to become ready (timeout: {timeout_s}s)...")
+
+        while time.time() < deadline:
+            now = time.time()
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    if resp.status == 200:
+                        if verbose:
+                            print("Reranker ready.")
+                        return True
+            except Exception:
+                pass
+
+            if verbose and (now - last_status_time >= status_interval or last_status_time == 0):
+                last_status_time = now
+                print("  reranker (8015): not ready")
+
+            time.sleep(3)
+
+        if verbose:
+            print("Readiness timeout. Reranker (8015) did not become ready.")
+        return False
