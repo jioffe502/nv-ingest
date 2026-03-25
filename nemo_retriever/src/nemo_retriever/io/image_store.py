@@ -153,6 +153,20 @@ def _build_uri_info(
     return info
 
 
+def load_image_b64_from_uri(uri: str) -> Optional[str]:
+    """Read an image from a stored URI and return its base64 encoding.
+
+    Accepts any fsspec-compatible URI (``file://``, ``s3://``, etc.).
+    Returns ``None`` on failure so callers can fall back gracefully.
+    """
+    try:
+        raw = UPath(uri).read_bytes()
+        return base64.b64encode(raw).decode("ascii")
+    except Exception as exc:
+        logger.warning("Failed to load image from %s: %s", uri, exc)
+        return None
+
+
 def store_extracted_images(
     df: pd.DataFrame,
     *,
@@ -165,7 +179,7 @@ def store_extracted_images(
     store_infographics: bool = True,
     store_images: bool = True,
     image_format: str = "png",
-    strip_base64: bool = False,
+    strip_base64: bool = True,
 ) -> pd.DataFrame:
     """Pipeline task: store extracted images to disk or cloud storage.
 
@@ -205,9 +219,10 @@ def store_extracted_images(
         Output image format for generated crops (default ``"png"``).
         Direct-write payloads preserve their source encoding and file extension.
     strip_base64 : bool
-        When ``True``, clear ``image_b64`` after successful writes to reduce memory
-        pressure. Keep this ``False`` when embedding with image-based modalities
-        after ``.store()``.
+        When ``True`` (the default), clear ``image_b64`` after successful writes
+        to reduce memory pressure.  The embed stage loads images from the stored
+        URIs when base64 is absent.  Set to ``False`` only if downstream code
+        requires inline base64 for a reason other than embedding.
 
     Returns
     -------
@@ -221,10 +236,7 @@ def store_extracted_images(
     storage_root = UPath(storage_uri, **(storage_options or {}))
     ext = _normalize_image_format(image_format)
     if strip_base64:
-        logger.warning(
-            "strip_base64=True removes image payloads. If .store() runs before .embed() "
-            "with image/text_image modalities, embeddings will lose image input."
-        )
+        logger.debug("strip_base64=True: image payloads will be cleared after writing.")
 
     col_flags: dict[str, str] = {}
     if store_tables:

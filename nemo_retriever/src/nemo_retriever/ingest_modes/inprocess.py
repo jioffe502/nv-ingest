@@ -55,7 +55,9 @@ from ..params import ExtractParams
 from ..params import HtmlChunkParams
 from ..params import IngestExecuteParams
 from ..params import TextChunkParams
+from ..params import StoreParams
 from ..params import VdbUploadParams
+from ..io.image_store import load_image_b64_from_uri
 from ..pdf.extract import pdf_extraction
 from ..pdf.split import _split_pdf_to_single_page_bytes, pdf_path_to_pages_df
 from ..utils.remote_auth import resolve_remote_api_key
@@ -102,6 +104,41 @@ def _deep_copy_row(row_dict: Dict[str, Any]) -> Dict[str, Any]:
         else:
             out[k] = v
     return out
+
+
+def _b64_from_dict(d: dict) -> Optional[str]:
+    """Resolve base64 from a dict: inline ``image_b64`` then ``stored_image_uri``."""
+    b64 = d.get("image_b64")
+    if isinstance(b64, str) and b64:
+        return b64
+    uri = d.get("stored_image_uri")
+    if isinstance(uri, str) and uri:
+        return load_image_b64_from_uri(uri)
+    return None
+
+
+def _resolve_page_image_b64(page_image: Any) -> Optional[str]:
+    """Return base64 for a page image, loading from stored URI if needed."""
+    if not isinstance(page_image, dict):
+        return None
+    return _b64_from_dict(page_image)
+
+
+def _resolve_item_image_b64(item: dict, page_image_b64: Optional[str]) -> Optional[str]:
+    """Return base64 for a structured content item, with fallback chain.
+
+    Priority: inline base64 > stored URI > crop from page image.
+    """
+    resolved = _b64_from_dict(item)
+    if resolved:
+        return resolved
+    if page_image_b64:
+        bbox = item.get("bbox_xyxy_norm")
+        if bbox and len(bbox) == 4:
+            cropped_b64, _ = _crop_b64_image_by_norm_bbox(page_image_b64, bbox_xyxy_norm=bbox)
+            return cropped_b64
+        return page_image_b64
+    return None
 
 
 def explode_content_to_rows(
@@ -162,9 +199,7 @@ def explode_content_to_rows(
     if not any(c in batch_df.columns for c in content_columns):
         batch_df = batch_df.copy()
         if text_mod in IMAGE_MODALITIES and "page_image" in batch_df.columns:
-            batch_df["_image_b64"] = batch_df["page_image"].apply(
-                lambda pi: pi.get("image_b64") if isinstance(pi, dict) else None
-            )
+            batch_df["_image_b64"] = batch_df["page_image"].apply(_resolve_page_image_b64)
         batch_df["_embed_modality"] = text_mod
         return batch_df
 
@@ -176,8 +211,8 @@ def explode_content_to_rows(
         # Extract page-level image b64 once per source row.
         page_image = row_dict.get("page_image")
         page_image_b64: Optional[str] = None
-        if any_images and isinstance(page_image, dict):
-            page_image_b64 = page_image.get("image_b64")
+        if any_images:
+            page_image_b64 = _resolve_page_image_b64(page_image)
 
         # Row for page text.
         page_text = row_dict.get(text_column)
@@ -205,15 +240,8 @@ def explode_content_to_rows(
                 content_row[text_column] = t.strip()
                 content_row["_embed_modality"] = struct_mod
                 content_row["_content_type"] = col
-                if struct_mod in IMAGE_MODALITIES and page_image_b64:
-                    bbox = item.get("bbox_xyxy_norm")
-                    if bbox and len(bbox) == 4:
-                        cropped_b64, _ = _crop_b64_image_by_norm_bbox(page_image_b64, bbox_xyxy_norm=bbox)
-                        content_row["_image_b64"] = cropped_b64
-                    else:
-                        content_row["_image_b64"] = page_image_b64
-                elif struct_mod in IMAGE_MODALITIES:
-                    content_row["_image_b64"] = None
+                if struct_mod in IMAGE_MODALITIES:
+                    content_row["_image_b64"] = _resolve_item_image_b64(item, page_image_b64)
                 new_rows.append(content_row)
                 exploded_any = True
 
@@ -266,9 +294,7 @@ def collapse_content_to_page_rows(
     # Full page image (no cropping) for image modalities.
     if modality in IMAGE_MODALITIES:
         if "page_image" in batch_df.columns:
-            batch_df["_image_b64"] = batch_df["page_image"].apply(
-                lambda pi: pi.get("image_b64") if isinstance(pi, dict) else None
-            )
+            batch_df["_image_b64"] = batch_df["page_image"].apply(_resolve_page_image_b64)
         else:
             batch_df["_image_b64"] = None
 
@@ -1331,7 +1357,6 @@ class InProcessIngestor(Ingestor):
     def store(self, params: "StoreParams | None" = None, **kwargs: Any) -> "InProcessIngestor":
         """Store extracted images to disk or cloud storage via fsspec."""
         from nemo_retriever.io.image_store import store_extracted_images
-        from nemo_retriever.params import StoreParams
 
         resolved = _coerce_params(params, StoreParams, kwargs)
         store_kwargs = resolved.model_dump(mode="python")

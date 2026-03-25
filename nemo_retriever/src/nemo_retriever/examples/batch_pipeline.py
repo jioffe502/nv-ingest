@@ -721,6 +721,8 @@ def main(
         handle_lancedb(ingest_local_results, lancedb_uri, LANCEDB_TABLE, hybrid=hybrid, mode="overwrite")
         lancedb_write_time = time.perf_counter() - lancedb_write_start
 
+        del ingest_local_results  # free driver heap before error check
+
         if isinstance(ingestor, BatchIngestor):
             error_rows = ingestor.get_error_rows(dataset=ingest_results).materialize()
             error_count = int(error_rows.count())

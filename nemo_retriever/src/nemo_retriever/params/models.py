@@ -272,7 +272,7 @@ class StoreParams(_ParamsModel):
     store_infographics: bool = True
     store_images: bool = True
     image_format: str = "png"
-    strip_base64: bool = False
+    strip_base64: bool = True
 
 
 class PageElementsParams(_ParamsModel):

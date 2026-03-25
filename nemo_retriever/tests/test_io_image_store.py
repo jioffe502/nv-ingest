@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from nemo_retriever.io.image_store import _safe_stem, store_extracted_images
+from nemo_retriever.io.image_store import _safe_stem, load_image_b64_from_uri, store_extracted_images
 from nemo_retriever.params import StoreParams
 
 
@@ -328,7 +328,7 @@ class TestFormatConsistency:
 
 
 class TestBase64Stripping:
-    def test_page_image_b64_preserved_by_default(self, tmp_path: Path):
+    def test_page_image_b64_stripped_by_default(self, tmp_path: Path):
         b64 = _make_tiny_png_b64()
         df = pd.DataFrame(
             [
@@ -345,6 +345,27 @@ class TestBase64Stripping:
             ]
         )
         result = store_extracted_images(df, storage_uri=str(tmp_path))
+        page_img = result.iloc[0]["page_image"]
+        assert page_img["image_b64"] is None
+        assert "stored_image_uri" in page_img
+
+    def test_page_image_b64_preserved_when_strip_disabled(self, tmp_path: Path):
+        b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "page_image": {"image_b64": b64, "encoding": "png"},
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                    "metadata": {},
+                }
+            ]
+        )
+        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=False)
         page_img = result.iloc[0]["page_image"]
         assert page_img["image_b64"] == b64
         assert "stored_image_uri" in page_img
@@ -470,6 +491,28 @@ class TestStoreEdgeCases:
 
 
 # ---------------------------------------------------------------------------
+# load_image_b64_from_uri
+# ---------------------------------------------------------------------------
+
+
+class TestLoadImageB64FromUri:
+    def test_round_trip(self, tmp_path: Path):
+        from PIL import Image
+
+        img = Image.new("RGB", (4, 4), (0, 255, 0))
+        dest = tmp_path / "green.png"
+        img.save(dest, format="PNG")
+        result = load_image_b64_from_uri(dest.as_uri())
+        assert result is not None
+        raw = base64.b64decode(result)
+        assert raw.startswith(b"\x89PNG")
+
+    def test_missing_file_returns_none(self):
+        result = load_image_b64_from_uri("file:///nonexistent/path/image.png")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
 # StoreParams model
 # ---------------------------------------------------------------------------
 
@@ -481,7 +524,7 @@ class TestStoreParams:
         assert p.store_page_images is True
         assert p.store_tables is True
         assert p.image_format == "png"
-        assert p.strip_base64 is False
+        assert p.strip_base64 is True
 
     def test_overrides(self):
         p = StoreParams(storage_uri="s3://bucket/prefix", store_tables=False, image_format="jpeg", strip_base64=True)

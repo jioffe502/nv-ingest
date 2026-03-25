@@ -250,7 +250,26 @@ class TestExplodeContentToRows:
 
 
 class TestStoreThenExplodeMultimodal:
-    def test_store_keeps_image_payloads_by_default(self, tmp_path):
+    def test_store_preserves_b64_when_strip_disabled(self, tmp_path):
+        page_b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "hello",
+                    "page_image": {"image_b64": page_b64, "encoding": "png"},
+                }
+            ]
+        )
+
+        stored = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=False)
+        exploded = explode_content_to_rows(stored, modality="text_image")
+
+        assert exploded["_image_b64"].iloc[0] == page_b64
+        assert exploded["_embed_modality"].iloc[0] == "text_image"
+
+    def test_store_strip_then_explode_loads_from_uri(self, tmp_path):
         page_b64 = _make_tiny_png_b64()
         df = pd.DataFrame(
             [
@@ -264,12 +283,14 @@ class TestStoreThenExplodeMultimodal:
         )
 
         stored = store_extracted_images(df, storage_uri=str(tmp_path))
+        assert stored.iloc[0]["page_image"]["image_b64"] is None
+        assert stored.iloc[0]["page_image"]["stored_image_uri"] is not None
+
         exploded = explode_content_to_rows(stored, modality="text_image")
+        loaded_b64 = exploded["_image_b64"].iloc[0]
+        assert isinstance(loaded_b64, str) and len(loaded_b64) > 0
 
-        assert exploded["_image_b64"].iloc[0] == page_b64
-        assert exploded["_embed_modality"].iloc[0] == "text_image"
-
-    def test_store_strip_base64_removes_multimodal_image_inputs(self, tmp_path):
+    def test_store_strip_then_explode_structured_loads_from_uri(self, tmp_path):
         page_b64 = _make_tiny_png_b64()
         df = pd.DataFrame(
             [
@@ -278,15 +299,29 @@ class TestStoreThenExplodeMultimodal:
                     "page_number": 1,
                     "text": "hello",
                     "page_image": {"image_b64": page_b64, "encoding": "png"},
+                    "table": [
+                        {
+                            "text": "table data",
+                            "image_b64": page_b64,
+                            "encoding": "png",
+                        }
+                    ],
+                    "chart": [],
+                    "infographic": [],
                 }
             ]
         )
 
-        stored = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
-        exploded = explode_content_to_rows(stored, modality="text_image")
+        stored = store_extracted_images(df, storage_uri=str(tmp_path))
+        table_item = stored.iloc[0]["table"][0]
+        assert table_item["image_b64"] is None
+        assert table_item["stored_image_uri"] is not None
 
-        assert stored.iloc[0]["page_image"]["image_b64"] is None
-        assert exploded["_image_b64"].iloc[0] is None
+        exploded = explode_content_to_rows(stored, modality="text", structured_elements_modality="text_image")
+        struct_rows = exploded[exploded["_content_type"] == "table"]
+        assert len(struct_rows) == 1
+        loaded_b64 = struct_rows.iloc[0]["_image_b64"]
+        assert isinstance(loaded_b64, str) and len(loaded_b64) > 0
 
 
 # ===================================================================
@@ -382,3 +417,26 @@ class TestCollapseContentToPageRows:
         """Non-DataFrame input is returned as-is."""
         result = collapse_content_to_page_rows(None)
         assert result is None
+
+    def test_collapse_resolves_uri_when_b64_stripped(self, tmp_path):
+        page_b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "hello",
+                    "page_image": {"image_b64": page_b64, "encoding": "png"},
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                }
+            ]
+        )
+
+        stored = store_extracted_images(df, storage_uri=str(tmp_path))
+        assert stored.iloc[0]["page_image"]["image_b64"] is None
+
+        result = collapse_content_to_page_rows(stored, modality="text_image")
+        loaded_b64 = result["_image_b64"].iloc[0]
+        assert isinstance(loaded_b64, str) and len(loaded_b64) > 0
