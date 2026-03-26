@@ -233,7 +233,7 @@ def store_extracted_images(
         return df
 
     logger.info("Storing extracted images to %s", storage_uri)
-    storage_root = UPath(storage_uri, **(storage_options or {}))
+    storage_root = UPath(storage_uri, **(storage_options or {})).resolve()
     ext = _normalize_image_format(image_format)
     if strip_base64:
         logger.debug("strip_base64=True: image payloads will be cleared after writing.")
