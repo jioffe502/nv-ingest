@@ -11,15 +11,25 @@ import sys
 import time
 from typing import Any, Optional, TextIO
 
+from pydantic import BaseModel, ConfigDict
+
 from nemo_retriever.ingest_modes.lancedb_utils import lancedb_schema
 from nemo_retriever.model import resolve_embed_model
 from nemo_retriever.recall.beir import BeirConfig, evaluate_lancedb_beir
 from nemo_retriever.recall.core import RecallConfig, retrieve_and_score
+from nemo_retriever.utils.detection_summary import write_detection_summary
+from nemo_retriever.utils.input_files import resolve_input_patterns
 
 DEFAULT_LANCEDB_URI = "lancedb"
 DEFAULT_LANCEDB_TABLE = "nv-ingest"
 
 logger = logging.getLogger(__name__)
+
+
+class ModePipelineConfigModel(BaseModel):
+    """Strict config base for mode pipeline runners."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class _TeeStream:
@@ -193,6 +203,53 @@ def resolve_input_pages(input_type: str, input_files: list[Path]) -> int | None:
     if counted_any:
         return total_pages
     return None
+
+
+def resolve_mode_file_patterns(*, input_path: str | Path, input_type: str, file_patterns: list[str]) -> list[str]:
+    if file_patterns:
+        return list(file_patterns)
+    return resolve_input_patterns(Path(input_path), input_type)
+
+
+def resolve_lancedb_target(
+    *,
+    artifacts_lancedb_uri: str | None,
+    artifacts_lancedb_table: str | None,
+    vdb_lancedb_uri: str | None = None,
+    vdb_lancedb_table: str | None = None,
+) -> tuple[str, str]:
+    uri = str(Path(vdb_lancedb_uri or artifacts_lancedb_uri or DEFAULT_LANCEDB_URI).expanduser().resolve())
+    table = str(vdb_lancedb_table or artifacts_lancedb_table or DEFAULT_LANCEDB_TABLE)
+    return uri, table
+
+
+def persist_detection_summary_artifact(
+    *,
+    detection_summary_file: str | None,
+    detection_payload: dict[str, Any] | None,
+) -> str | None:
+    if detection_summary_file is None:
+        return None
+    detection_path = Path(detection_summary_file).expanduser().resolve()
+    write_detection_summary(detection_path, detection_payload)
+    return str(detection_path)
+
+
+def print_evaluation_metrics(*, label: str, metrics: dict[str, float]) -> None:
+    if not metrics:
+        return
+    print(f"\n{label} metrics:")
+    for key, value in sorted(metrics.items()):
+        print(f"  {key}: {value:.4f}")
+
+
+def shutdown_ray_safely() -> None:
+    try:
+        import ray
+
+        ray.shutdown()
+    except Exception:
+        pass
 
 
 def evaluate_lancedb_metrics(

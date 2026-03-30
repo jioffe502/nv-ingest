@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from dataclasses import dataclass
@@ -90,6 +91,60 @@ def _safe_str(x: Any) -> str:
     return "" if x is None else str(x)
 
 
+def _parse_metadata_dict(raw_metadata: Any) -> Dict[str, Any]:
+    if isinstance(raw_metadata, dict):
+        return dict(raw_metadata)
+    if not isinstance(raw_metadata, str):
+        return {}
+    text = raw_metadata.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    try:
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+
+def _extract_detection_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+
+    pe_num = row.get("page_elements_v3_num_detections")
+    if pe_num is not None:
+        try:
+            out["page_elements_v3_num_detections"] = int(pe_num)
+        except Exception:
+            pass
+
+    pe_counts = row.get("page_elements_v3_counts_by_label")
+    if isinstance(pe_counts, dict):
+        normalized_counts: Dict[str, int] = {}
+        for label, count in pe_counts.items():
+            if count is None:
+                continue
+            try:
+                normalized_counts[str(label)] = int(count)
+            except Exception:
+                continue
+        if normalized_counts:
+            out["page_elements_v3_counts_by_label"] = normalized_counts
+
+    for field in ("table", "chart", "infographic"):
+        entries = row.get(field)
+        if isinstance(entries, list):
+            out[f"ocr_{field}_detections"] = len(entries)
+
+    return out
+
+
 def _extract_source_path_and_id(meta: Dict[str, Any]) -> Tuple[str, str]:
     """
     Extract a stable source path/id from metadata.
@@ -135,11 +190,11 @@ def _build_lancedb_rows_from_df(rows: List[Dict[str, Any]]) -> List[Dict[str, An
     out: List[Dict[str, Any]] = []
 
     for row in rows:
-        meta = row.get("metadata")
-        if not isinstance(meta, dict):
+        metadata = _parse_metadata_dict(row.get("metadata"))
+        if not metadata:
             continue
 
-        embedding = meta.get("embedding")
+        embedding = metadata.get("embedding")
         if embedding is None:
             continue
 
@@ -149,10 +204,11 @@ def _build_lancedb_rows_from_df(rows: List[Dict[str, Any]]) -> List[Dict[str, An
                 embedding = list(embedding)  # type: ignore[arg-type]
             except Exception:
                 continue
-        meta.pop("embedding", None)  # Remove embedding from metadata to save space in LanceDB.
+        metadata.pop("embedding", None)  # Remove embedding from metadata to save space in LanceDB.
+        metadata.update(_extract_detection_metadata(row))
         # path, source_id = _extract_source_path_and_id(meta)
         path = row.get("path", "")
-        source_id = meta.get("source_path", path)
+        source_id = metadata.get("source_path", path)
         # page_number = _extract_page_number(meta)
         page_number = row.get("page_number", -1)
         p = Path(path) if path else None
@@ -174,7 +230,7 @@ def _build_lancedb_rows_from_df(rows: List[Dict[str, Any]]) -> List[Dict[str, An
                 "source_id": source_id,
                 "path": path,
                 "text": row.get("text", ""),
-                "metadata": str(meta),
+                "metadata": json.dumps(metadata, ensure_ascii=False, default=str),
             }
         )
 

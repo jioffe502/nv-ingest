@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+"""Batch-mode orchestration with structured run report artifacts."""
+
 import json
 from pathlib import Path
 import time
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from nemo_retriever.ingest_modes.batch import BatchIngestor
 from nemo_retriever.params import EmbedParams
@@ -16,8 +18,8 @@ from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import TextChunkParams
-from nemo_retriever.utils.detection_summary import print_detection_summary, print_run_summary, write_detection_summary
-from nemo_retriever.utils.input_files import resolve_input_files, resolve_input_patterns
+from nemo_retriever.utils.detection_summary import print_detection_summary, print_run_summary
+from nemo_retriever.utils.input_files import resolve_input_files
 from nemo_retriever.vector_store.lancedb_store import handle_lancedb
 
 from .executor import run_mode_ingest
@@ -32,18 +34,19 @@ from .reports import (
 from .shared import (
     DEFAULT_LANCEDB_TABLE,
     DEFAULT_LANCEDB_URI,
+    ModePipelineConfigModel,
     ensure_lancedb_table,
     estimate_processed_pages,
     evaluate_lancedb_metrics,
+    persist_detection_summary_artifact,
+    resolve_lancedb_target,
+    resolve_mode_file_patterns,
     resolve_input_pages,
+    shutdown_ray_safely,
 )
 
 
-class _RunnerConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class BatchPipelineConfig(_RunnerConfigModel):
+class BatchPipelineConfig(ModePipelineConfigModel):
     input_path: str
     input_type: str = "pdf"
     file_patterns: list[str] = Field(default_factory=list)
@@ -58,16 +61,14 @@ class BatchPipelineConfig(_RunnerConfigModel):
     hybrid: bool = False
 
 
-def _resolve_file_patterns(cfg: BatchPipelineConfig) -> list[str]:
-    if cfg.file_patterns:
-        return list(cfg.file_patterns)
-    return resolve_input_patterns(Path(cfg.input_path), cfg.input_type)
-
-
 def _build_ingestor(cfg: BatchPipelineConfig):
     from nemo_retriever.ingestor import create_ingestor
 
-    file_patterns = _resolve_file_patterns(cfg)
+    file_patterns = resolve_mode_file_patterns(
+        input_path=cfg.input_path,
+        input_type=cfg.input_type,
+        file_patterns=cfg.file_patterns,
+    )
     ingestor = create_ingestor(run_mode="batch", params=cfg.create_params)
     chunk_params = cfg.text_chunk_params or TextChunkParams()
 
@@ -111,8 +112,10 @@ def run_batch_pipeline(cfg: BatchPipelineConfig) -> RunReport:
         input_path = Path(cfg.input_path).expanduser().resolve()
         input_files = resolve_input_files(input_path, cfg.input_type)
         resolved_input_pages = resolve_input_pages(cfg.input_type, input_files)
-        lancedb_uri = str(Path(cfg.artifacts.lancedb_uri or DEFAULT_LANCEDB_URI).expanduser().resolve())
-        lancedb_table = str(cfg.artifacts.lancedb_table or DEFAULT_LANCEDB_TABLE)
+        lancedb_uri, lancedb_table = resolve_lancedb_target(
+            artifacts_lancedb_uri=cfg.artifacts.lancedb_uri,
+            artifacts_lancedb_table=cfg.artifacts.lancedb_table,
+        )
 
         ensure_lancedb_table(lancedb_uri, lancedb_table)
         ingestor, file_patterns = _build_ingestor(cfg)
@@ -148,12 +151,10 @@ def run_batch_pipeline(cfg: BatchPipelineConfig) -> RunReport:
         from nemo_retriever.utils.detection_summary import collect_detection_summary_from_lancedb
 
         detection_payload = collect_detection_summary_from_lancedb(lancedb_uri, lancedb_table)
-        if cfg.artifacts.detection_summary_file is not None:
-            detection_path = Path(cfg.artifacts.detection_summary_file).expanduser().resolve()
-            write_detection_summary(detection_path, detection_payload)
-            detection_summary_file = str(detection_path)
-        else:
-            detection_summary_file = None
+        detection_summary_file = persist_detection_summary_artifact(
+            detection_summary_file=cfg.artifacts.detection_summary_file,
+            detection_payload=detection_payload,
+        )
 
         processed_pages = (
             detection_payload.get("pages_seen")
@@ -192,12 +193,7 @@ def run_batch_pipeline(cfg: BatchPipelineConfig) -> RunReport:
             prefix=cfg.execute_params.runtime_metrics_prefix,
         )
     finally:
-        try:
-            import ray
-
-            ray.shutdown()
-        except Exception:
-            pass
+        shutdown_ray_safely()
 
 
 def render_batch_run_report(report: RunReport, *, hybrid: bool) -> None:

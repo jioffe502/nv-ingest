@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+"""Fused-mode orchestration with structured run report artifacts."""
+
 from pathlib import Path
 import time
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from nemo_retriever.params import EmbedParams
 from nemo_retriever.params import ExtractParams
@@ -17,9 +19,8 @@ from nemo_retriever.params import VdbUploadParams
 from nemo_retriever.utils.detection_summary import (
     print_detection_summary,
     print_pages_per_second,
-    write_detection_summary,
 )
-from nemo_retriever.utils.input_files import resolve_input_files, resolve_input_patterns
+from nemo_retriever.utils.input_files import resolve_input_files
 
 from .executor import run_mode_ingest
 from .reports import (
@@ -31,21 +32,21 @@ from .reports import (
     persist_run_report_artifacts,
 )
 from .shared import (
-    DEFAULT_LANCEDB_TABLE,
-    DEFAULT_LANCEDB_URI,
+    ModePipelineConfigModel,
     count_lancedb_rows,
     ensure_lancedb_table,
     estimate_processed_pages,
     evaluate_lancedb_metrics,
+    persist_detection_summary_artifact,
+    print_evaluation_metrics,
+    resolve_lancedb_target,
+    resolve_mode_file_patterns,
     resolve_input_pages,
+    shutdown_ray_safely,
 )
 
 
-class _RunnerConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class FusedPipelineConfig(_RunnerConfigModel):
+class FusedPipelineConfig(ModePipelineConfigModel):
     input_path: str
     input_type: str = "pdf"
     file_patterns: list[str] = Field(default_factory=list)
@@ -58,12 +59,6 @@ class FusedPipelineConfig(_RunnerConfigModel):
     artifacts: RunArtifactConfig = Field(default_factory=RunArtifactConfig)
 
 
-def _resolve_file_patterns(cfg: FusedPipelineConfig) -> list[str]:
-    if cfg.file_patterns:
-        return list(cfg.file_patterns)
-    return resolve_input_patterns(Path(cfg.input_path), cfg.input_type)
-
-
 def run_fused_pipeline(cfg: FusedPipelineConfig) -> RunReport:
     try:
         from nemo_retriever.ingestor import create_ingestor
@@ -73,14 +68,16 @@ def run_fused_pipeline(cfg: FusedPipelineConfig) -> RunReport:
 
         input_path = Path(cfg.input_path).expanduser().resolve()
         input_files = resolve_input_files(input_path, cfg.input_type)
-        file_patterns = _resolve_file_patterns(cfg)
-        lancedb_uri = str(
-            Path(cfg.vdb_upload_params.lancedb.lancedb_uri or cfg.artifacts.lancedb_uri or DEFAULT_LANCEDB_URI)
-            .expanduser()
-            .resolve()
+        file_patterns = resolve_mode_file_patterns(
+            input_path=cfg.input_path,
+            input_type=cfg.input_type,
+            file_patterns=cfg.file_patterns,
         )
-        lancedb_table = str(
-            cfg.vdb_upload_params.lancedb.table_name or cfg.artifacts.lancedb_table or DEFAULT_LANCEDB_TABLE
+        lancedb_uri, lancedb_table = resolve_lancedb_target(
+            artifacts_lancedb_uri=cfg.artifacts.lancedb_uri,
+            artifacts_lancedb_table=cfg.artifacts.lancedb_table,
+            vdb_lancedb_uri=cfg.vdb_upload_params.lancedb.lancedb_uri,
+            vdb_lancedb_table=cfg.vdb_upload_params.lancedb.table_name,
         )
 
         ensure_lancedb_table(lancedb_uri, lancedb_table)
@@ -99,12 +96,10 @@ def run_fused_pipeline(cfg: FusedPipelineConfig) -> RunReport:
         from nemo_retriever.utils.detection_summary import collect_detection_summary_from_lancedb
 
         detection_payload = collect_detection_summary_from_lancedb(lancedb_uri, lancedb_table)
-        if cfg.artifacts.detection_summary_file is not None:
-            detection_path = Path(cfg.artifacts.detection_summary_file).expanduser().resolve()
-            write_detection_summary(detection_path, detection_payload)
-            detection_summary_file = str(detection_path)
-        else:
-            detection_summary_file = None
+        detection_summary_file = persist_detection_summary_artifact(
+            detection_summary_file=cfg.artifacts.detection_summary_file,
+            detection_payload=detection_payload,
+        )
 
         evaluation_summary, evaluation_secs = evaluate_lancedb_metrics(
             cfg.evaluation,
@@ -150,12 +145,7 @@ def run_fused_pipeline(cfg: FusedPipelineConfig) -> RunReport:
             prefix=cfg.execute_params.runtime_metrics_prefix,
         )
     finally:
-        try:
-            import ray
-
-            ray.shutdown()
-        except Exception:
-            pass
+        shutdown_ray_safely()
 
 
 def render_fused_run_report(report: RunReport) -> None:
@@ -163,10 +153,7 @@ def render_fused_run_report(report: RunReport) -> None:
         print_detection_summary(report.detection_summary)
     if report.metrics.ingest_secs is not None:
         print_pages_per_second(report.metrics.processed_pages, report.metrics.ingest_secs)
-    if report.evaluation.metrics:
-        print(f"\n{report.evaluation.label} metrics:")
-        for key, value in sorted(report.evaluation.metrics.items()):
-            print(f"  {key}: {value:.4f}")
+    print_evaluation_metrics(label=report.evaluation.label, metrics=report.evaluation.metrics)
 
 
 def run_fused(
