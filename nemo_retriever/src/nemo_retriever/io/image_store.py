@@ -144,12 +144,14 @@ def _build_uri_info(
     dest: UPath,
     storage_root: UPath,
     public_base_url: Optional[str],
+    uri_key: str = "stored_image_uri",
 ) -> Dict[str, Optional[str]]:
-    """Build a dict with ``stored_image_uri`` and optionally ``stored_image_url``."""
+    """Build a dict with a stored URI and optionally a public URL."""
     relative_key = dest.relative_to(storage_root).as_posix()
-    info: Dict[str, Optional[str]] = {"stored_image_uri": dest.as_uri()}
+    url_key = uri_key.replace("_uri", "_url")
+    info: Dict[str, Optional[str]] = {uri_key: dest.as_uri()}
     if public_base_url:
-        info["stored_image_url"] = f"{public_base_url.rstrip('/')}/{relative_key}"
+        info[url_key] = f"{public_base_url.rstrip('/')}/{relative_key}"
     return info
 
 
@@ -178,6 +180,7 @@ def store_extracted_images(
     store_charts: bool = True,
     store_infographics: bool = True,
     store_images: bool = True,
+    store_text: bool = False,
     image_format: str = "png",
     strip_base64: bool = True,
 ) -> pd.DataFrame:
@@ -215,6 +218,10 @@ def store_extracted_images(
         Save infographic crops.
     store_images : bool
         Save natural sub-page images from the ``images`` column.
+    store_text : bool
+        Save page text to ``.txt`` files.  Also writes text from structured
+        content items (tables, charts, infographics) when present.
+        Disabled by default.
     image_format : str
         Output image format for generated crops (default ``"png"``).
         Direct-write payloads preserve their source encoding and file extension.
@@ -342,6 +349,32 @@ def store_extracted_images(
                                     img_item.update(_build_uri_info(dest, storage_root, public_base_url))
                                     img_item["encoding"] = ext
                     df.at[idx, "images"] = images_list
+
+            # -- Page text --
+            if store_text:
+                page_text = row.get("text")
+                if isinstance(page_text, str) and page_text.strip():
+                    text_dest = storage_root / stem / f"page_{page_num}.txt"
+                    _write_bytes(text_dest, page_text.encode("utf-8"))
+                    uri_info = _build_uri_info(text_dest, storage_root, public_base_url, uri_key="stored_text_uri")
+                    df.at[idx, "stored_text_uri"] = uri_info["stored_text_uri"]
+
+                # Structured content text (tables, charts, infographics)
+                for col_name in ("table", "chart", "infographic"):
+                    content_list = row.get(col_name)
+                    if not isinstance(content_list, list):
+                        continue
+                    for item_idx, item in enumerate(content_list):
+                        if not isinstance(item, dict):
+                            continue
+                        item_text = item.get("text")
+                        if isinstance(item_text, str) and item_text.strip():
+                            text_dest = storage_root / stem / f"page_{page_num}_{col_name}_{item_idx}.txt"
+                            _write_bytes(text_dest, item_text.encode("utf-8"))
+                            item.update(
+                                _build_uri_info(text_dest, storage_root, public_base_url, uri_key="stored_text_uri")
+                            )
+                    df.at[idx, col_name] = content_list
 
         except Exception as exc:
             logger.exception("Failed to store images for row %s: %s", idx, exc)

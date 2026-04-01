@@ -279,6 +279,7 @@ class StoreParams(_ParamsModel):
     store_charts: bool = True
     store_infographics: bool = True
     store_images: bool = True
+    store_text: bool = False
     image_format: str = "png"
     strip_base64: bool = True
 

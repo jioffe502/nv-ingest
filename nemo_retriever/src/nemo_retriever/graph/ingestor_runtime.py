@@ -11,7 +11,7 @@ from typing import Any
 
 from nemo_retriever.caption.caption import CaptionActor
 from nemo_retriever.chart.chart_detection import GraphicElementsActor
-from nemo_retriever.graph import Graph, UDFOperator
+from nemo_retriever.graph import Graph, StoreOperator, UDFOperator
 from nemo_retriever.graph.content_transforms import (
     _CONTENT_COLUMNS,
     collapse_content_to_page_rows,
@@ -47,6 +47,7 @@ def build_batch_graph(
     embed_params: Any | None = None,
     split_params: Any | None = None,
     caption_params: Any | None = None,
+    store_params: Any | None = None,
 ) -> Graph:
     if extraction_mode in {"text", "html", "audio", "image", "auto"}:
         graph = Graph() >> MultiTypeExtractOperator(
@@ -153,6 +154,12 @@ def build_batch_graph(
     if caption_params is not None:
         graph = graph >> CaptionActor(caption_params)
 
+    # Store runs after all content extraction (OCR, caption) so it sees every
+    # content type, and before content reshape / embed so strip_base64 can
+    # free image payloads before they're carried through embedding.
+    if store_params is not None:
+        graph = graph >> StoreOperator(params=store_params)
+
     needs_content_reshape = extraction_mode in {"pdf", "image", "auto"}
 
     if embed_params is not None and needs_content_reshape:
@@ -194,6 +201,7 @@ def build_inprocess_graph(
     embed_params: Any | None = None,
     split_params: Any | None = None,
     caption_params: Any | None = None,
+    store_params: Any | None = None,
 ) -> Graph:
     graph = Graph() >> PDFSplitActor()
 
@@ -244,6 +252,12 @@ def build_inprocess_graph(
 
     if caption_params is not None:
         graph = graph >> CaptionActor(caption_params)
+
+    # Store runs after all content extraction (OCR, caption) so it sees every
+    # content type, and before content reshape / embed so strip_base64 can
+    # free image payloads before they're carried through embedding.
+    if store_params is not None:
+        graph = graph >> StoreOperator(params=store_params)
 
     if embed_params is not None:
         content_columns = (_CONTENT_COLUMNS + ("images",)) if caption_params is not None else _CONTENT_COLUMNS

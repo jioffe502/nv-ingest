@@ -1377,6 +1377,7 @@ class GraphBatchIngestor(_LegacyBatchIngestor):
         self._graph_embed_params: EmbedParams | None = None
         self._graph_split_params: TextChunkParams | None = None
         self._graph_caption_params: CaptionParams | None = None
+        self._graph_store_params: StoreParams | None = None
 
     def files(self, documents: Union[str, List[str]]) -> "GraphBatchIngestor":
         super().files(documents)
@@ -1464,6 +1465,12 @@ class GraphBatchIngestor(_LegacyBatchIngestor):
             resolved = resolved.model_copy(update={"api_key": resolve_remote_api_key()})
         super().caption(params=resolved)
         self._graph_caption_params = resolved
+        return self
+
+    def store(self, params: StoreParams | None = None, **kwargs: Any) -> "GraphBatchIngestor":
+        resolved = _coerce_params(params, StoreParams, kwargs)
+        super().store(params=resolved)
+        self._graph_store_params = resolved
         return self
 
     def embed(
@@ -1647,6 +1654,8 @@ class GraphBatchIngestor(_LegacyBatchIngestor):
                 "num_cpus": 1,
                 "num_gpus": 0.0 if caption_params.endpoint_url else (caption_params.gpu_memory_utilization or 1.0),
             }
+        if self._graph_store_params is not None:
+            overrides["StoreOperator"] = {"batch_size": 1, "num_cpus": 1, "num_gpus": 0.0}
         if embed_params is not None:
             overrides["_BatchEmbedActor"] = {
                 "batch_size": embed_batch_size,
@@ -1674,6 +1683,7 @@ class GraphBatchIngestor(_LegacyBatchIngestor):
             embed_params=self._graph_embed_params,
             split_params=self._graph_split_params,
             caption_params=self._graph_caption_params,
+            store_params=self._graph_store_params,
         )
         executor = RayDataExecutor(
             graph, ray_address=None, batch_size=1, node_overrides=self._build_graph_node_overrides()

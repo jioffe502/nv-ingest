@@ -513,6 +513,94 @@ class TestLoadImageB64FromUri:
 
 
 # ---------------------------------------------------------------------------
+# store_extracted_images — text storage
+# ---------------------------------------------------------------------------
+
+
+class TestStoreText:
+    def test_writes_page_text(self, tmp_path: Path):
+        b64 = _make_tiny_png_b64()
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "Hello world",
+                    "page_image": {"image_b64": b64},
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                }
+            ]
+        )
+        result = store_extracted_images(df, storage_uri=str(tmp_path), store_text=True)
+        text_file = tmp_path / "test" / "page_1.txt"
+        assert text_file.exists()
+        assert text_file.read_text(encoding="utf-8") == "Hello world"
+        assert "stored_text_uri" in result.columns
+        assert result.iloc[0]["stored_text_uri"].endswith("/test/page_1.txt")
+
+    def test_writes_structured_content_text(self, tmp_path: Path):
+        b64 = _make_tiny_png_b64(width=100, height=100)
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "",
+                    "page_image": {"image_b64": b64},
+                    "table": [{"text": "col1|col2", "bbox_xyxy_norm": [0.1, 0.1, 0.9, 0.9]}],
+                    "chart": [{"text": "chart data", "bbox_xyxy_norm": [0.1, 0.1, 0.9, 0.9]}],
+                    "infographic": [],
+                    "images": [],
+                }
+            ]
+        )
+        result = store_extracted_images(df, storage_uri=str(tmp_path), store_text=True)
+        assert (tmp_path / "test" / "page_1_table_0.txt").read_text(encoding="utf-8") == "col1|col2"
+        assert (tmp_path / "test" / "page_1_chart_0.txt").read_text(encoding="utf-8") == "chart data"
+        assert result.iloc[0]["table"][0]["stored_text_uri"].endswith("/test/page_1_table_0.txt")
+        assert result.iloc[0]["chart"][0]["stored_text_uri"].endswith("/test/page_1_chart_0.txt")
+
+    def test_disabled_by_default(self, tmp_path: Path):
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "Should not be stored",
+                    "page_image": None,
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                }
+            ]
+        )
+        store_extracted_images(df, storage_uri=str(tmp_path))
+        assert not list(tmp_path.rglob("*.txt"))
+
+    def test_skips_empty_text(self, tmp_path: Path):
+        df = pd.DataFrame(
+            [
+                {
+                    "path": "/docs/test.pdf",
+                    "page_number": 1,
+                    "text": "   ",
+                    "page_image": None,
+                    "table": [],
+                    "chart": [],
+                    "infographic": [],
+                    "images": [],
+                }
+            ]
+        )
+        store_extracted_images(df, storage_uri=str(tmp_path), store_text=True)
+        assert not list(tmp_path.rglob("*.txt"))
+
+
+# ---------------------------------------------------------------------------
 # StoreParams model
 # ---------------------------------------------------------------------------
 
