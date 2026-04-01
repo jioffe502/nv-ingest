@@ -1,8 +1,10 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from nemo_retriever.harness.cli import app as harness_app
+from nemo_retriever.harness import artifacts as harness_artifacts
 from nemo_retriever.harness.artifacts import create_run_artifact_dir
 from nemo_retriever.harness.config import HarnessConfig
 from nemo_retriever.harness import run as harness_run
@@ -42,6 +44,61 @@ def test_evaluate_run_outcome_uses_subprocess_error_code() -> None:
 def test_create_run_artifact_dir_defaults_to_dataset_label(tmp_path: Path) -> None:
     out = create_run_artifact_dir("jp20", run_name=None, base_dir=str(tmp_path))
     assert out.name.startswith("jp20_")
+
+
+def test_last_commit_fallback_reads_gitdir_ref_file(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    nemo_root = repo_root / "nemo_retriever"
+    nemo_root.mkdir()
+    git_dir = repo_root / "git-meta" / "worktrees" / "nr-dev"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (repo_root / ".git").write_text("gitdir: git-meta/worktrees/nr-dev\n", encoding="utf-8")
+    (git_dir / "HEAD").write_text("ref: refs/heads/fix/harness_metrics\n", encoding="utf-8")
+    (git_dir / "refs" / "heads" / "fix").mkdir(parents=True)
+    (git_dir / "refs" / "heads" / "fix" / "harness_metrics").write_text(
+        "abc1234def5678abc1234def5678abc1234def\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(harness_artifacts, "NEMO_RETRIEVER_ROOT", nemo_root)
+    monkeypatch.setattr(
+        harness_artifacts.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
+
+    assert harness_artifacts.last_commit() == "abc1234"
+
+
+def test_last_commit_fallback_reads_packed_refs(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    nemo_root = repo_root / "nemo_retriever"
+    nemo_root.mkdir()
+    git_dir = repo_root / "git-meta" / "worktrees" / "nr-dev"
+    git_dir.mkdir(parents=True)
+    (repo_root / ".git").write_text("gitdir: git-meta/worktrees/nr-dev\n", encoding="utf-8")
+    (git_dir / "HEAD").write_text("ref: refs/heads/fix/harness_metrics\n", encoding="utf-8")
+    (git_dir / "packed-refs").write_text(
+        "\n".join(
+            [
+                "# pack-refs with: peeled fully-peeled sorted",
+                "def5678abc1234def5678abc1234def5678abc refs/heads/fix/harness_metrics",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(harness_artifacts, "NEMO_RETRIEVER_ROOT", nemo_root)
+    monkeypatch.setattr(
+        harness_artifacts.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
+
+    assert harness_artifacts.last_commit() == "def5678"
 
 
 def test_build_command_uses_hidden_detection_file_by_default(tmp_path: Path) -> None:
@@ -212,38 +269,6 @@ def test_build_command_supports_inprocess_run_mode(tmp_path: Path) -> None:
     assert cmd[cmd.index("--max-workers") + 1] == "8"
     assert "--gpu-devices" in cmd
     assert cmd[cmd.index("--gpu-devices") + 1] == "0,1"
-    assert "--query-csv" in cmd
-    assert str(effective_query_csv) in cmd
-
-
-def test_build_command_supports_fused_run_mode(tmp_path: Path) -> None:
-    dataset_dir = tmp_path / "dataset"
-    dataset_dir.mkdir()
-    query_csv = tmp_path / "query.csv"
-    query_csv.write_text("query,pdf_page\nq,doc_1\n", encoding="utf-8")
-
-    cfg = HarnessConfig(
-        dataset_dir=str(dataset_dir),
-        dataset_label="jp20",
-        preset="single_gpu",
-        run_mode="fused",
-        query_csv=str(query_csv),
-        fused_workers=2,
-        fused_batch_size=32,
-        fused_cpus_per_actor=2.0,
-        fused_gpus_per_actor=1.0,
-    )
-    cmd, runtime_dir, detection_file, effective_query_csv = _build_command(cfg, tmp_path, run_id="r1")
-
-    assert "nemo_retriever.examples.fused_pipeline" in cmd
-    assert "--fused-workers" in cmd
-    assert cmd[cmd.index("--fused-workers") + 1] == "2"
-    assert "--fused-batch-size" in cmd
-    assert cmd[cmd.index("--fused-batch-size") + 1] == "32"
-    assert "--runtime-metrics-dir" in cmd
-    assert str(runtime_dir) in cmd
-    assert "--detection-summary-file" in cmd
-    assert str(detection_file) in cmd
     assert "--query-csv" in cmd
     assert str(effective_query_csv) in cmd
 

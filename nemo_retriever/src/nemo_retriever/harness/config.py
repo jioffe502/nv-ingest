@@ -15,7 +15,7 @@ NEMO_RETRIEVER_ROOT = Path(__file__).resolve().parents[3]
 REPO_ROOT = NEMO_RETRIEVER_ROOT.parent
 DEFAULT_TEST_CONFIG_PATH = NEMO_RETRIEVER_ROOT / "harness" / "test_configs.yaml"
 DEFAULT_NIGHTLY_CONFIG_PATH = NEMO_RETRIEVER_ROOT / "harness" / "nightly_config.yaml"
-VALID_RUN_MODES = {"batch", "inprocess", "fused"}
+VALID_RUN_MODES = {"batch", "inprocess"}
 VALID_EVALUATION_MODES = {"recall", "beir"}
 VALID_RECALL_ADAPTERS = {"none", "page_plus_one", "financebench_json"}
 VALID_BEIR_LOADERS = {"vidore_hf"}
@@ -52,24 +52,11 @@ INPROCESS_TUNING_FIELDS = {
     "max_workers",
     "gpu_devices",
 }
-FUSED_TUNING_FIELDS = {
-    "pdf_extract_workers",
-    "pdf_extract_num_cpus",
-    "pdf_extract_batch_size",
-    "pdf_split_batch_size",
-    "fused_workers",
-    "fused_batch_size",
-    "fused_cpus_per_actor",
-    "fused_gpus_per_actor",
-}
-TUNING_FIELDS = BATCH_TUNING_FIELDS
 
 
 def tuning_fields_for_run_mode(run_mode: str) -> set[str]:
     if run_mode == "inprocess":
         return set(INPROCESS_TUNING_FIELDS)
-    if run_mode == "fused":
-        return set(FUSED_TUNING_FIELDS)
     return set(BATCH_TUNING_FIELDS)
 
 
@@ -122,10 +109,6 @@ class HarnessConfig:
     gpu_page_elements: float = 0.1
     gpu_ocr: float = 0.1
     gpu_embed: float = 0.25
-    fused_workers: int = 1
-    fused_batch_size: int = 64
-    fused_cpus_per_actor: float = 1.0
-    fused_gpus_per_actor: float = 1.0
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -148,9 +131,6 @@ class HarnessConfig:
 
         if self.input_type not in {"pdf", "txt", "html", "doc"}:
             errors.append(f"input_type must be one of pdf/txt/html/doc, got '{self.input_type}'")
-
-        if self.run_mode == "fused" and self.input_type != "pdf":
-            errors.append("fused run_mode currently supports only input_type=pdf")
 
         if self.evaluation_mode == "recall":
             if self.recall_match_mode not in {"pdf_page", "pdf_only"}:
@@ -193,7 +173,7 @@ class HarnessConfig:
                 errors.append(f"{name} must be >= 0.0")
             elif name.endswith("_workers") and int(val) < 1:
                 errors.append(f"{name} must be >= 1")
-            elif name in {"max_workers", "fused_batch_size"} and int(val) < 1:
+            elif name == "max_workers" and int(val) < 1:
                 errors.append(f"{name} must be >= 1")
 
         return errors
@@ -311,10 +291,6 @@ def _apply_env_overrides(config_dict: dict[str, Any]) -> None:
         "HARNESS_EXTRACT_PAGE_AS_IMAGE": ("extract_page_as_image", _parse_bool),
         "HARNESS_EXTRACT_INFOGRAPHICS": ("extract_infographics", _parse_bool),
         "HARNESS_WRITE_DETECTION_FILE": ("write_detection_file", _parse_bool),
-        "HARNESS_FUSED_WORKERS": ("fused_workers", _parse_number),
-        "HARNESS_FUSED_BATCH_SIZE": ("fused_batch_size", _parse_number),
-        "HARNESS_FUSED_CPUS_PER_ACTOR": ("fused_cpus_per_actor", _parse_number),
-        "HARNESS_FUSED_GPUS_PER_ACTOR": ("fused_gpus_per_actor", _parse_number),
     }
 
     for key in BATCH_TUNING_FIELDS:

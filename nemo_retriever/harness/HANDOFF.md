@@ -9,7 +9,7 @@ It captures what exists now, what was intentionally chosen, and what to iterate 
 ## Current Scope and Intent
 
 - Harness is standalone under `nemo_retriever` (not based on `tools/harness`).
-- It wraps `nemo_retriever.examples.batch_pipeline`.
+- It orchestrates structured `batch`/`inprocess` mode runners and also writes equivalent example CLI commands for replay.
 - Primary use case is benchmark orchestration for local/cluster runs without Docker orchestration.
 - Vector DB is LanceDB only.
 - Recall gating is supported and enforced by config (`recall_required`).
@@ -17,7 +17,7 @@ It captures what exists now, what was intentionally chosen, and what to iterate 
 ## Key Files
 
 - `nemo_retriever/src/nemo_retriever/harness/run.py`
-  - CLI run/sweep/nightly orchestration, subprocess execution, metrics extraction, artifact writes.
+  - CLI run/sweep/nightly orchestration, runner execution, metrics extraction, artifact writes.
 - `nemo_retriever/src/nemo_retriever/harness/config.py`
   - YAML + CLI/env merge logic and `HarnessConfig`.
 - `nemo_retriever/src/nemo_retriever/harness/parsers.py`
@@ -147,8 +147,8 @@ The payload shape is defined by `nemo_retriever/harness/run.py` and the `RunRepo
    - Kept `session_summary.json`.
    - Removed `sweep_results.json` generation.
 
-3. **TTY-backed subprocess retained**
-   - Harness runs batch pipeline through a PTY so Ray progress remains rich/pretty by default.
+3. **Command replay artifact retained**
+   - Harness writes `command.txt` as a reproducible CLI equivalent for debugging/handoffs, while execution uses structured runner configs.
 
 ## Known Behavior to Remember
 

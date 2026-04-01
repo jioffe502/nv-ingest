@@ -21,7 +21,6 @@ from nemo_retriever.application.modes.reports import (
     normalize_metric_key,
 )
 from nemo_retriever.application.modes.run_batch import BatchPipelineConfig, run_batch_pipeline
-from nemo_retriever.application.modes.run_fused import FusedPipelineConfig, run_fused_pipeline
 from nemo_retriever.application.modes.run_inprocess import InProcessPipelineConfig, run_inprocess_pipeline
 from nemo_retriever.application.modes.shared import DEFAULT_LANCEDB_TABLE
 from nemo_retriever.harness.artifacts import (
@@ -236,7 +235,6 @@ def _build_command(
     module_name = {
         "batch": "nemo_retriever.examples.batch_pipeline",
         "inprocess": "nemo_retriever.examples.inprocess_pipeline",
-        "fused": "nemo_retriever.examples.fused_pipeline",
     }[cfg.run_mode]
     cmd = [sys.executable, "-m", module_name, str(Path(cfg.dataset_dir).resolve())]
 
@@ -329,36 +327,7 @@ def _build_command(
             cmd += ["--hybrid"]
         cmd += ["--embed-modality", cfg.embed_modality, "--embed-granularity", cfg.embed_granularity]
     else:
-        cmd += [
-            "--pdf-extract-tasks",
-            str(cfg.pdf_extract_workers),
-            "--pdf-extract-cpus-per-task",
-            str(cfg.pdf_extract_num_cpus),
-            "--pdf-extract-batch-size",
-            str(cfg.pdf_extract_batch_size),
-            "--pdf-split-batch-size",
-            str(cfg.pdf_split_batch_size),
-            "--fused-workers",
-            str(cfg.fused_workers),
-            "--fused-batch-size",
-            str(cfg.fused_batch_size),
-            "--fused-cpus-per-actor",
-            str(cfg.fused_cpus_per_actor),
-            "--fused-gpus-per-actor",
-            str(cfg.fused_gpus_per_actor),
-            "--lancedb-uri",
-            lancedb_uri,
-            "--runtime-metrics-dir",
-            str(runtime_dir),
-            "--runtime-metrics-prefix",
-            run_id,
-        ]
-        if effective_query_csv is not None:
-            cmd += ["--query-csv", str(effective_query_csv)]
-        if detection_summary_file is not None:
-            cmd += ["--detection-summary-file", str(detection_summary_file)]
-        if cfg.ray_address:
-            cmd += ["--ray-address", cfg.ray_address]
+        raise ValueError(f"Unsupported run_mode: {cfg.run_mode}")
 
     return cmd, runtime_dir, detection_summary_file, effective_query_csv
 
@@ -394,7 +363,6 @@ def _common_embed_params(
     cfg: HarnessConfig,
     *,
     batch_tuning: dict[str, Any] | None = None,
-    fused_tuning: dict[str, Any] | None = None,
     model_name: str | None = None,
 ) -> EmbedParams:
     kwargs: dict[str, Any] = {
@@ -404,8 +372,6 @@ def _common_embed_params(
     }
     if batch_tuning is not None:
         kwargs["batch_tuning"] = batch_tuning
-    if fused_tuning is not None:
-        kwargs["fused_tuning"] = fused_tuning
     return EmbedParams(**kwargs)
 
 
@@ -496,48 +462,7 @@ def _build_runner_config(
             artifacts=artifacts,
         )
 
-    fused_model_name = cfg.embed_model_name
-    if fused_model_name == "nvidia/llama-nemotron-embed-1b-v2":
-        fused_model_name = "nemo_retriever_v1"
-    return FusedPipelineConfig(
-        input_path=cfg.dataset_dir,
-        input_type=cfg.input_type,
-        create_params=IngestorCreateParams(ray_address=cfg.ray_address, ray_log_to_driver=True),
-        execute_params=IngestExecuteParams(
-            runtime_metrics_dir=runtime_metrics_dir,
-            runtime_metrics_prefix=run_id,
-        ),
-        extract_params=_common_extract_params(
-            cfg,
-            batch_tuning={
-                "pdf_extract_workers": cfg.pdf_extract_workers,
-                "pdf_extract_num_cpus": cfg.pdf_extract_num_cpus,
-                "pdf_extract_batch_size": cfg.pdf_extract_batch_size,
-                "pdf_split_batch_size": cfg.pdf_split_batch_size,
-            },
-        ),
-        embed_params=_common_embed_params(
-            cfg,
-            fused_tuning={
-                "fused_workers": cfg.fused_workers,
-                "fused_batch_size": cfg.fused_batch_size,
-                "fused_cpus_per_actor": cfg.fused_cpus_per_actor,
-                "fused_gpus_per_actor": cfg.fused_gpus_per_actor,
-            },
-            model_name=fused_model_name,
-        ),
-        vdb_upload_params=VdbUploadParams(
-            lancedb={
-                "lancedb_uri": lancedb_uri,
-                "table_name": DEFAULT_LANCEDB_TABLE,
-                "overwrite": True,
-                "create_index": True,
-                "hybrid": cfg.hybrid,
-            }
-        ),
-        evaluation=evaluation,
-        artifacts=artifacts,
-    )
+    raise ValueError(f"Unsupported run_mode: {cfg.run_mode}")
 
 
 def _execute_runner(cfg: HarnessConfig, runner_cfg):
@@ -545,7 +470,7 @@ def _execute_runner(cfg: HarnessConfig, runner_cfg):
         return run_batch_pipeline(runner_cfg)
     if cfg.run_mode == "inprocess":
         return run_inprocess_pipeline(runner_cfg)
-    return run_fused_pipeline(runner_cfg)
+    raise ValueError(f"Unsupported run_mode: {cfg.run_mode}")
 
 
 def _evaluate_run_outcome(
@@ -573,6 +498,8 @@ def _evaluate_run_outcome(
 def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[str] | None = None) -> dict[str, Any]:
     cmd, runtime_dir, detection_summary_file, effective_query_csv = _build_command(cfg, artifact_dir, run_id)
     command_text = " ".join(shlex.quote(token) for token in cmd)
+    # Persist a reproducible CLI equivalent for debugging and handoff notes.
+    # The harness executes below via the structured runner config.
     (artifact_dir / "command.txt").write_text(command_text + "\n", encoding="utf-8")
 
     typer.echo(f"\n=== Running {run_id} ===")

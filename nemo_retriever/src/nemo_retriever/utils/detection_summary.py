@@ -130,10 +130,9 @@ def compute_detection_summary(
 
 def iter_lancedb_rows(uri: str, table_name: str):
     """Yield ``(page_key, meta, row_dict)`` tuples from a LanceDB table."""
-    import lancedb  # type: ignore
+    from nemo_retriever.vector_store.lancedb_store import open_lancedb_table_with_retry
 
-    db = lancedb.connect(uri)
-    table = db.open_table(table_name)
+    table = open_lancedb_table_with_retry(uri, table_name, retries=1, sleep_seconds=0.0)
     df = table.to_pandas()[["source_id", "page_number", "metadata"]]
 
     for row in df.itertuples(index=False):

@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_retriever.params import RunMode
+from nemo_retriever.utils.detection_summary import print_detection_summary, print_pages_per_second
 
 
 class _ReportModel(BaseModel):
@@ -133,6 +134,22 @@ def project_summary_metrics(report: RunReport) -> dict[str, Any]:
         "recall_5": flat.get("recall_5"),
         "ndcg_10": flat.get("ndcg_10"),
     }
+
+
+def render_evaluation_metrics(evaluation: EvaluationSummary) -> None:
+    if not evaluation.metrics:
+        return
+    print(f"\n{evaluation.label} metrics:")
+    for key, value in sorted(evaluation.metrics.items()):
+        print(f"  {key}: {value:.4f}")
+
+
+def render_run_report(report: RunReport, *, include_ingest_summary: bool = True) -> None:
+    if include_ingest_summary and report.detection_summary is not None:
+        print_detection_summary(report.detection_summary)
+    if include_ingest_summary and report.metrics.ingest_secs is not None:
+        print_pages_per_second(canonical_pages(report), report.metrics.ingest_secs)
+    render_evaluation_metrics(report.evaluation)
 
 
 def build_runtime_summary(report: RunReport) -> dict[str, Any]:

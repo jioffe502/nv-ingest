@@ -18,9 +18,12 @@ from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import TextChunkParams
-from nemo_retriever.utils.detection_summary import print_detection_summary, print_run_summary
 from nemo_retriever.utils.input_files import resolve_input_files
-from nemo_retriever.vector_store.lancedb_store import handle_lancedb
+from nemo_retriever.vector_store.lancedb_store import (
+    ensure_lancedb_table,
+    estimate_processed_pages,
+    handle_lancedb,
+)
 
 from .executor import run_mode_ingest
 from .reports import (
@@ -29,14 +32,11 @@ from .reports import (
     RunEvaluationConfig,
     RunMetrics,
     RunReport,
+    render_run_report,
     persist_run_report_artifacts,
 )
 from .shared import (
-    DEFAULT_LANCEDB_TABLE,
-    DEFAULT_LANCEDB_URI,
     ModePipelineConfigModel,
-    ensure_lancedb_table,
-    estimate_processed_pages,
     evaluate_lancedb_metrics,
     persist_detection_summary_artifact,
     resolve_lancedb_target,
@@ -197,28 +197,8 @@ def run_batch_pipeline(cfg: BatchPipelineConfig) -> RunReport:
 
 
 def render_batch_run_report(report: RunReport, *, hybrid: bool) -> None:
-    if report.detection_summary is not None:
-        print_detection_summary(report.detection_summary)
-
-    processed_pages = report.metrics.processed_pages or report.metrics.input_pages
-    if processed_pages is None or report.metrics.ingest_secs is None or report.metrics.total_secs is None:
-        return
-
-    print_run_summary(
-        processed_pages,
-        Path(report.input_path),
-        hybrid,
-        str(report.artifacts.lancedb_uri or DEFAULT_LANCEDB_URI),
-        str(report.artifacts.lancedb_table or DEFAULT_LANCEDB_TABLE),
-        report.metrics.total_secs,
-        report.metrics.ingest_secs,
-        float(report.metrics.materialize_secs or 0.0),
-        float(report.metrics.vdb_write_secs or 0.0),
-        float(report.metrics.evaluation_secs or 0.0),
-        report.evaluation.metrics,
-        evaluation_label=report.evaluation.label,
-        evaluation_count=report.evaluation.query_count,
-    )
+    _ = hybrid
+    render_run_report(report)
 
 
 def run_batch(

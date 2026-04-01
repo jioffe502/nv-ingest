@@ -18,12 +18,9 @@ from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import TextChunkParams
 from nemo_retriever.params import VdbUploadParams
-from nemo_retriever.utils.detection_summary import (
-    collect_detection_summary_from_df,
-    print_detection_summary,
-    print_pages_per_second,
-)
+from nemo_retriever.utils.detection_summary import collect_detection_summary_from_df
 from nemo_retriever.utils.input_files import resolve_input_files
+from nemo_retriever.vector_store.lancedb_store import ensure_lancedb_table
 
 from .executor import run_mode_ingest
 from .reports import (
@@ -32,14 +29,13 @@ from .reports import (
     RunEvaluationConfig,
     RunMetrics,
     RunReport,
+    render_run_report,
     persist_run_report_artifacts,
 )
 from .shared import (
     ModePipelineConfigModel,
-    ensure_lancedb_table,
     evaluate_lancedb_metrics,
     persist_detection_summary_artifact,
-    print_evaluation_metrics,
     resolve_lancedb_target,
     resolve_mode_file_patterns,
     resolve_input_pages,
@@ -157,11 +153,7 @@ def run_inprocess_pipeline(cfg: InProcessPipelineConfig) -> RunReport:
 
 
 def render_inprocess_run_report(report: RunReport, *, include_ingest_summary: bool = True) -> None:
-    if include_ingest_summary and report.detection_summary is not None:
-        print_detection_summary(report.detection_summary)
-    if include_ingest_summary and report.metrics.ingest_secs is not None:
-        print_pages_per_second(report.metrics.processed_pages, report.metrics.ingest_secs)
-    print_evaluation_metrics(label=report.evaluation.label, metrics=report.evaluation.metrics)
+    render_run_report(report, include_ingest_summary=include_ingest_summary)
 
 
 def run_inprocess(

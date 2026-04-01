@@ -4,16 +4,13 @@
 
 from __future__ import annotations
 
-from importlib import import_module
 import logging
 from pathlib import Path
-import sys
 import time
-from typing import Any, Optional, TextIO
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_retriever.ingest_modes.lancedb_utils import lancedb_schema
 from nemo_retriever.model import resolve_embed_model
 from nemo_retriever.recall.beir import BeirConfig, evaluate_lancedb_beir
 from nemo_retriever.recall.core import RecallConfig, retrieve_and_score
@@ -30,140 +27,6 @@ class ModePipelineConfigModel(BaseModel):
     """Strict config base for mode pipeline runners."""
 
     model_config = ConfigDict(extra="forbid")
-
-
-class _TeeStream:
-    """Write stream output to the terminal and an optional file."""
-
-    def __init__(self, primary: TextIO, mirror: TextIO) -> None:
-        self._primary = primary
-        self._mirror = mirror
-
-    def write(self, data: str) -> int:
-        self._primary.write(data)
-        self._mirror.write(data)
-        return len(data)
-
-    def flush(self) -> None:
-        self._primary.flush()
-        self._mirror.flush()
-
-    def isatty(self) -> bool:
-        return bool(getattr(self._primary, "isatty", lambda: False)())
-
-    def fileno(self) -> int:
-        return int(getattr(self._primary, "fileno")())
-
-    def writable(self) -> bool:
-        return bool(getattr(self._primary, "writable", lambda: True)())
-
-    @property
-    def encoding(self) -> str:
-        return str(getattr(self._primary, "encoding", "utf-8"))
-
-
-def configure_cli_logging(log_file: Optional[Path], *, debug: bool = False) -> tuple[Optional[TextIO], TextIO, TextIO]:
-    """Configure root logging and optionally tee stdout/stderr to a file."""
-
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    log_level = logging.DEBUG if debug else logging.INFO
-    if log_file is None:
-        logging.basicConfig(
-            level=log_level,
-            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-            force=True,
-        )
-        return None, original_stdout, original_stderr
-
-    target = Path(log_file).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(target, "a", encoding="utf-8", buffering=1)
-
-    sys.stdout = _TeeStream(sys.__stdout__, handle)
-    sys.stderr = _TeeStream(sys.__stderr__, handle)
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
-        force=True,
-    )
-    logging.getLogger(__name__).info("Writing combined pipeline logs to %s", str(target))
-    return handle, original_stdout, original_stderr
-
-
-def restore_cli_logging(
-    handle: Optional[TextIO],
-    original_stdout: TextIO,
-    original_stderr: TextIO,
-) -> None:
-    sys.stdout = original_stdout
-    sys.stderr = original_stderr
-    if handle is not None:
-        try:
-            handle.flush()
-        finally:
-            handle.close()
-
-
-def lancedb_module() -> Any:
-    return import_module("lancedb")
-
-
-def ensure_lancedb_table(uri: str, table_name: str) -> None:
-    """Ensure the LanceDB URI exists and the target table can be opened."""
-
-    Path(uri).mkdir(parents=True, exist_ok=True)
-    db = lancedb_module().connect(uri)
-    try:
-        db.open_table(table_name)
-        return
-    except Exception:
-        pass
-
-    import pyarrow as pa  # type: ignore
-
-    schema = lancedb_schema()
-    empty = pa.table({field.name: [] for field in schema}, schema=schema)
-    db.create_table(table_name, data=empty, schema=schema, mode="create")
-
-
-def open_lancedb_table_with_retry(
-    uri: str,
-    table_name: str,
-    *,
-    retries: int = 3,
-    sleep_seconds: float = 2.0,
-) -> Any:
-    db = lancedb_module().connect(uri)
-    open_err: Exception | None = None
-    for _ in range(max(1, retries)):
-        try:
-            return db.open_table(table_name)
-        except Exception as exc:
-            open_err = exc
-            ensure_lancedb_table(uri, table_name)
-            time.sleep(sleep_seconds)
-    raise RuntimeError(f"Could not open LanceDB table {table_name!r} at {uri!r}") from open_err
-
-
-def count_lancedb_rows(uri: str, table_name: str) -> int | None:
-    try:
-        table = open_lancedb_table_with_retry(uri, table_name, retries=1, sleep_seconds=0.0)
-        return int(table.count_rows())
-    except Exception:
-        return None
-
-
-def estimate_processed_pages(uri: str, table_name: str) -> int | None:
-    """Estimate processed pages from unique `(source_id, page_number)` pairs."""
-
-    try:
-        table = open_lancedb_table_with_retry(uri, table_name, retries=1, sleep_seconds=0.0)
-        df = table.to_pandas()[["source_id", "page_number"]]
-        return int(df.dropna(subset=["source_id", "page_number"]).drop_duplicates().shape[0])
-    except Exception:
-        return count_lancedb_rows(uri, table_name)
 
 
 def safe_pdf_page_count(path: Path) -> int | None:
@@ -235,14 +98,6 @@ def persist_detection_summary_artifact(
     return str(detection_path)
 
 
-def print_evaluation_metrics(*, label: str, metrics: dict[str, float]) -> None:
-    if not metrics:
-        return
-    print(f"\n{label} metrics:")
-    for key, value in sorted(metrics.items()):
-        print(f"  {key}: {value:.4f}")
-
-
 def shutdown_ray_safely() -> None:
     try:
         import ray
@@ -263,6 +118,7 @@ def evaluate_lancedb_metrics(
     hybrid: bool,
 ):
     from .reports import EvaluationSummary
+    from nemo_retriever.vector_store.lancedb_store import open_lancedb_table_with_retry
 
     if evaluation_cfg.evaluation_mode not in {"recall", "beir"}:
         raise ValueError(f"Unsupported evaluation mode: {evaluation_cfg.evaluation_mode}")
