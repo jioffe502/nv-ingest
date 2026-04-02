@@ -229,7 +229,9 @@ def main(
     caption_context_text_max_chars: int = typer.Option(0, "--caption-context-text-max-chars"),
     caption_gpu_memory_utilization: float = typer.Option(0.5, "--caption-gpu-memory-utilization"),
     # Text chunking
-    store_images_uri: Optional[str] = typer.Option(None, "--store-images-uri", help="Store extracted images to this URI."),
+    store_images_uri: Optional[str] = typer.Option(
+        None, "--store-images-uri", help="Store extracted images to this URI."
+    ),
     store_text: bool = typer.Option(False, "--store-text/--no-store-text", help="Also store extracted text."),
     strip_base64: bool = typer.Option(True, "--strip-base64/--no-strip-base64", help="Strip base64 after storing."),
     text_chunk: bool = typer.Option(False, "--text-chunk"),

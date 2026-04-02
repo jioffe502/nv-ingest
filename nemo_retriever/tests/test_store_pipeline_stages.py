@@ -8,13 +8,11 @@ from __future__ import annotations
 
 import base64
 import io
-from functools import partial
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
-from nemo_retriever.graph import Graph, InprocessExecutor, StoreOperator, UDFOperator
+from nemo_retriever.graph import InprocessExecutor, StoreOperator, UDFOperator
 from nemo_retriever.params import StoreParams
 
 
