@@ -107,6 +107,11 @@ def _post_with_retries(
                 attempt += 1
                 continue
 
+            if 400 <= status_code < 500:
+                raise requests.HTTPError(
+                    f"HTTP {status_code} from {invoke_url}: {response.text}",
+                    response=response,
+                )
             response.raise_for_status()
             return response.json()
 
@@ -125,6 +130,9 @@ def _post_with_retries(
             time.sleep(backoff_time)
             attempt += 1
         except requests.RequestException as exc:
+            resp = getattr(exc, "response", None)
+            if resp is not None and 400 <= resp.status_code < 500:
+                raise  # client errors are not retryable
             if attempt == int(max_retries) - 1:
                 raise
             backoff_time = base_delay * (2**attempt)

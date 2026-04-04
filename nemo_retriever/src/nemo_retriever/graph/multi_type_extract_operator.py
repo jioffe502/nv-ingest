@@ -21,7 +21,8 @@ from nemo_retriever.graph.operator_archetype import ArchetypeOperator
 from nemo_retriever.html.ray_data import HtmlSplitActor
 from nemo_retriever.image.ray_data import ImageLoadActor
 from nemo_retriever.image.load import SUPPORTED_IMAGE_EXTENSIONS
-from nemo_retriever.ocr.ocr import NemotronParseActor, OCRActor
+from nemo_retriever.ocr.ocr import OCRActor
+from nemo_retriever.parse.nemotron_parse import NemotronParseActor
 from nemo_retriever.page_elements.page_elements import PageElementDetectionActor
 from nemo_retriever.params import ASRParams
 from nemo_retriever.params import AudioChunkParams
