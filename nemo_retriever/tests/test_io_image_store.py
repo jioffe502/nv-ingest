@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from nemo_retriever.io.image_store import _safe_stem, load_image_b64_from_uri, store_extracted_images
+from nemo_retriever.io.image_store import _safe_stem, load_image_b64_from_uri, store_extracted
 from nemo_retriever.params import StoreParams
 
 
@@ -64,7 +64,7 @@ class TestSafeStem:
 
 
 # ---------------------------------------------------------------------------
-# store_extracted_images — page images
+# store_extracted — page images
 # ---------------------------------------------------------------------------
 
 
@@ -86,7 +86,7 @@ class TestStorePageImages:
             ]
         )
 
-        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        result = store_extracted(df, storage_uri=str(tmp_path))
         expected_file = tmp_path / "test" / "page_1.png"
         assert expected_file.exists()
         assert expected_file.stat().st_size > 0
@@ -110,7 +110,7 @@ class TestStorePageImages:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        result = store_extracted(df, storage_uri=str(tmp_path))
         assert not any(tmp_path.rglob("*.png"))
         assert result.iloc[0]["page_image"] is None
 
@@ -130,12 +130,12 @@ class TestStorePageImages:
                 }
             ]
         )
-        store_extracted_images(df, storage_uri=str(tmp_path), store_page_images=False)
+        store_extracted(df, storage_uri=str(tmp_path), store_page_images=False)
         assert not any(tmp_path.rglob("page_*.png"))
 
 
 # ---------------------------------------------------------------------------
-# store_extracted_images — structured content crops
+# store_extracted — structured content crops
 # ---------------------------------------------------------------------------
 
 
@@ -159,7 +159,7 @@ class TestStoreStructuredContent:
             ]
         )
 
-        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        result = store_extracted(df, storage_uri=str(tmp_path))
         expected_file = tmp_path / "report" / "page_2_table_0.png"
         assert expected_file.exists()
 
@@ -185,7 +185,7 @@ class TestStoreStructuredContent:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        result = store_extracted(df, storage_uri=str(tmp_path))
         table_item = result.iloc[0]["table"][0]
         assert "stored_image_uri" in table_item
 
@@ -209,7 +209,7 @@ class TestStoreStructuredContent:
                 }
             ]
         )
-        store_extracted_images(df, storage_uri=str(tmp_path), store_tables=False)
+        store_extracted(df, storage_uri=str(tmp_path), store_tables=False)
         files = list(tmp_path.rglob("*.png"))
         names = [f.name for f in files]
         assert not any("table" in n for n in names)
@@ -217,7 +217,7 @@ class TestStoreStructuredContent:
 
 
 # ---------------------------------------------------------------------------
-# store_extracted_images — natural sub-page images
+# store_extracted — natural sub-page images
 # ---------------------------------------------------------------------------
 
 
@@ -238,14 +238,14 @@ class TestStoreNaturalImages:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        result = store_extracted(df, storage_uri=str(tmp_path))
         expected_file = tmp_path / "test" / "page_1_image_0.png"
         assert expected_file.exists()
         assert result.iloc[0]["images"][0].get("stored_image_uri") is not None
 
 
 # ---------------------------------------------------------------------------
-# store_extracted_images — format consistency
+# store_extracted — format consistency
 # ---------------------------------------------------------------------------
 
 
@@ -267,7 +267,7 @@ class TestFormatConsistency:
             ]
         )
 
-        result = store_extracted_images(df, storage_uri=str(tmp_path), image_format="png")
+        result = store_extracted(df, storage_uri=str(tmp_path), image_format="png")
         expected_file = tmp_path / "test" / "page_1.jpeg"
         assert expected_file.exists()
         assert not (tmp_path / "test" / "page_1.png").exists()
@@ -291,7 +291,7 @@ class TestFormatConsistency:
             ]
         )
 
-        result = store_extracted_images(df, storage_uri=str(tmp_path), image_format="jpeg")
+        result = store_extracted(df, storage_uri=str(tmp_path), image_format="jpeg")
         expected_file = tmp_path / "test" / "page_1_table_0.png"
         assert expected_file.exists()
         assert not (tmp_path / "test" / "page_1_table_0.jpeg").exists()
@@ -315,7 +315,7 @@ class TestFormatConsistency:
             ]
         )
 
-        result = store_extracted_images(df, storage_uri=str(tmp_path), image_format="jpeg")
+        result = store_extracted(df, storage_uri=str(tmp_path), image_format="jpeg")
         expected_file = tmp_path / "report" / "page_2_table_0.jpeg"
         assert expected_file.exists()
         assert expected_file.read_bytes().startswith(b"\xff\xd8\xff")
@@ -323,7 +323,7 @@ class TestFormatConsistency:
 
 
 # ---------------------------------------------------------------------------
-# store_extracted_images — base64 stripping
+# store_extracted — base64 stripping
 # ---------------------------------------------------------------------------
 
 
@@ -344,7 +344,7 @@ class TestBase64Stripping:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        result = store_extracted(df, storage_uri=str(tmp_path))
         page_img = result.iloc[0]["page_image"]
         assert page_img["image_b64"] is None
         assert "stored_image_uri" in page_img
@@ -365,7 +365,7 @@ class TestBase64Stripping:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=False)
+        result = store_extracted(df, storage_uri=str(tmp_path), strip_base64=False)
         page_img = result.iloc[0]["page_image"]
         assert page_img["image_b64"] == b64
         assert "stored_image_uri" in page_img
@@ -386,7 +386,7 @@ class TestBase64Stripping:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
+        result = store_extracted(df, storage_uri=str(tmp_path), strip_base64=True)
         page_img = result.iloc[0]["page_image"]
         assert page_img["image_b64"] is None
         assert "stored_image_uri" in page_img
@@ -408,7 +408,7 @@ class TestBase64Stripping:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
+        result = store_extracted(df, storage_uri=str(tmp_path), strip_base64=True)
         assert result.iloc[0]["table"][0]["image_b64"] is None
         assert "stored_image_uri" in result.iloc[0]["table"][0]
 
@@ -428,20 +428,20 @@ class TestBase64Stripping:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path), strip_base64=True)
+        result = store_extracted(df, storage_uri=str(tmp_path), strip_base64=True)
         assert result.iloc[0]["images"][0]["image_b64"] is None
         assert "stored_image_uri" in result.iloc[0]["images"][0]
 
 
 # ---------------------------------------------------------------------------
-# store_extracted_images — edge cases
+# store_extracted — edge cases
 # ---------------------------------------------------------------------------
 
 
 class TestStoreEdgeCases:
     def test_empty_dataframe(self, tmp_path: Path):
         df = pd.DataFrame()
-        result = store_extracted_images(df, storage_uri=str(tmp_path))
+        result = store_extracted(df, storage_uri=str(tmp_path))
         assert result.empty
 
     def test_public_base_url(self, tmp_path: Path):
@@ -460,7 +460,7 @@ class TestStoreEdgeCases:
                 }
             ]
         )
-        result = store_extracted_images(
+        result = store_extracted(
             df,
             storage_uri=str(tmp_path),
             public_base_url="https://cdn.example.com/assets",
@@ -485,7 +485,7 @@ class TestStoreEdgeCases:
                 for i in range(1, 4)
             ]
         )
-        store_extracted_images(df, storage_uri=str(tmp_path))
+        store_extracted(df, storage_uri=str(tmp_path))
         for i in range(1, 4):
             assert (tmp_path / "test" / f"page_{i}.png").exists()
 
@@ -513,7 +513,7 @@ class TestLoadImageB64FromUri:
 
 
 # ---------------------------------------------------------------------------
-# store_extracted_images — text storage
+# store_extracted — text storage
 # ---------------------------------------------------------------------------
 
 
@@ -534,7 +534,7 @@ class TestStoreText:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path), store_text=True)
+        result = store_extracted(df, storage_uri=str(tmp_path), store_text=True)
         text_file = tmp_path / "test" / "page_1.txt"
         assert text_file.exists()
         assert text_file.read_text(encoding="utf-8") == "Hello world"
@@ -557,7 +557,7 @@ class TestStoreText:
                 }
             ]
         )
-        result = store_extracted_images(df, storage_uri=str(tmp_path), store_text=True)
+        result = store_extracted(df, storage_uri=str(tmp_path), store_text=True)
         assert (tmp_path / "test" / "page_1_table_0.txt").read_text(encoding="utf-8") == "col1|col2"
         assert (tmp_path / "test" / "page_1_chart_0.txt").read_text(encoding="utf-8") == "chart data"
         assert result.iloc[0]["table"][0]["stored_text_uri"].endswith("/test/page_1_table_0.txt")
@@ -578,7 +578,7 @@ class TestStoreText:
                 }
             ]
         )
-        store_extracted_images(df, storage_uri=str(tmp_path))
+        store_extracted(df, storage_uri=str(tmp_path))
         assert not list(tmp_path.rglob("*.txt"))
 
     def test_skips_empty_text(self, tmp_path: Path):
@@ -596,7 +596,7 @@ class TestStoreText:
                 }
             ]
         )
-        store_extracted_images(df, storage_uri=str(tmp_path), store_text=True)
+        store_extracted(df, storage_uri=str(tmp_path), store_text=True)
         assert not list(tmp_path.rglob("*.txt"))
 
 

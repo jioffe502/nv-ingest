@@ -33,10 +33,10 @@ class StoreOperator(AbstractOperator, CPUOperator):
         return data
 
     def process(self, data: Any, **kwargs: Any) -> Any:
-        from nemo_retriever.io.image_store import store_extracted_images
+        from nemo_retriever.io.image_store import store_extracted
 
         store_kwargs = self._params.model_dump(mode="python") if self._params else {}
-        return store_extracted_images(data, **store_kwargs)
+        return store_extracted(data, **store_kwargs)
 
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data

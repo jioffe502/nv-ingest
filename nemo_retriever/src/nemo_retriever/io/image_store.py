@@ -2,7 +2,7 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Store extracted images to disk or cloud storage via fsspec."""
+"""Store extracted content to disk or cloud storage via fsspec."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import io
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Sequence
 
 import pandas as pd
@@ -169,7 +170,122 @@ def load_image_b64_from_uri(uri: str) -> Optional[str]:
         return None
 
 
-def store_extracted_images(
+# ---------------------------------------------------------------------------
+# Per-row context and helpers for store_extracted
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _RowCtx:
+    """Bundles shared state for a single row so helpers take one argument."""
+
+    storage_root: UPath
+    ext: str
+    strip_base64: bool
+    public_base_url: str | None
+    stem: str
+    page_num: int
+    page_image: dict | None
+    page_image_b64: str | None
+    _page_pil: Image.Image | None = field(default=None, init=False, repr=False)
+    _page_pil_attempted: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def page_dir(self) -> UPath:
+        return self.storage_root / self.stem
+
+    def get_page_pil(self) -> Image.Image | None:
+        if self._page_pil_attempted:
+            return self._page_pil
+        self._page_pil_attempted = True
+        if isinstance(self.page_image_b64, str) and self.page_image_b64:
+            self._page_pil = _decode_page_image(self.page_image_b64)
+        return self._page_pil
+
+
+def _store_page_image(ctx: _RowCtx) -> dict | None:
+    """Store the full page image. Returns the updated page_image dict, or ``None`` if skipped."""
+    if not (isinstance(ctx.page_image_b64, str) and ctx.page_image_b64):
+        return None
+    raw = _decode_image_bytes(ctx.page_image_b64)
+    if raw is None:
+        return None
+    direct_ext = _resolve_direct_write_encoding(ctx.page_image, raw, ctx.ext)
+    dest = ctx.page_dir / f"page_{ctx.page_num}.{direct_ext}"
+    _write_bytes(dest, raw)
+    ctx.page_image.update(_build_uri_info(dest, ctx.storage_root, ctx.public_base_url))
+    ctx.page_image["encoding"] = direct_ext
+    if ctx.strip_base64:
+        ctx.page_image["image_b64"] = None
+    return ctx.page_image
+
+
+def _store_content_items(ctx: _RowCtx, items: list, type_label: str) -> None:
+    """Store image items via direct-write (from ``image_b64``) or crop from the page image."""
+    for item_idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        item_b64 = item.get("image_b64")
+        if isinstance(item_b64, str) and item_b64:
+            raw = _decode_image_bytes(item_b64)
+            if raw is not None:
+                direct_ext = _resolve_direct_write_encoding(item, raw, ctx.ext)
+                dest = ctx.page_dir / f"page_{ctx.page_num}_{type_label}_{item_idx}.{direct_ext}"
+                _write_bytes(dest, raw)
+                item.update(_build_uri_info(dest, ctx.storage_root, ctx.public_base_url))
+                item["encoding"] = direct_ext
+                if ctx.strip_base64:
+                    item["image_b64"] = None
+        else:
+            page_pil = ctx.get_page_pil()
+            if page_pil is not None:
+                bbox = item.get("bbox_xyxy_norm")
+                if bbox and len(bbox) == 4:
+                    dest = ctx.page_dir / f"page_{ctx.page_num}_{type_label}_{item_idx}.{ctx.ext}"
+                    if _crop_and_write(dest, page_pil, bbox, image_format=ctx.ext):
+                        item.update(_build_uri_info(dest, ctx.storage_root, ctx.public_base_url))
+                        item["encoding"] = ctx.ext
+
+
+def _store_text(ctx: _RowCtx, row: pd.Series) -> dict[str, Any]:
+    """Store page text and structured-content text to ``.txt`` files.
+
+    Returns a dict of column updates to apply to the DataFrame row.
+    """
+    updates: dict[str, Any] = {}
+
+    page_text = row.get("text")
+    if isinstance(page_text, str) and page_text.strip():
+        text_dest = ctx.page_dir / f"page_{ctx.page_num}.txt"
+        _write_bytes(text_dest, page_text.encode("utf-8"))
+        uri_info = _build_uri_info(text_dest, ctx.storage_root, ctx.public_base_url, uri_key="stored_text_uri")
+        updates["stored_text_uri"] = uri_info["stored_text_uri"]
+
+    for col_name in ("table", "chart", "infographic"):
+        content_list = row.get(col_name)
+        if not isinstance(content_list, list):
+            continue
+        for item_idx, item in enumerate(content_list):
+            if not isinstance(item, dict):
+                continue
+            item_text = item.get("text")
+            if isinstance(item_text, str) and item_text.strip():
+                text_dest = ctx.page_dir / f"page_{ctx.page_num}_{col_name}_{item_idx}.txt"
+                _write_bytes(text_dest, item_text.encode("utf-8"))
+                item.update(
+                    _build_uri_info(text_dest, ctx.storage_root, ctx.public_base_url, uri_key="stored_text_uri")
+                )
+        updates[col_name] = content_list
+
+    return updates
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def store_extracted(
     df: pd.DataFrame,
     *,
     storage_uri: str = "stored_images",
@@ -184,7 +300,7 @@ def store_extracted_images(
     image_format: str = "png",
     strip_base64: bool = True,
 ) -> pd.DataFrame:
-    """Pipeline task: store extracted images to disk or cloud storage.
+    """Pipeline task: store extracted content to disk or cloud storage.
 
     For each row in the DataFrame:
 
@@ -239,7 +355,7 @@ def store_extracted_images(
     if not isinstance(df, pd.DataFrame) or df.empty:
         return df
 
-    logger.info("Storing extracted images to %s", storage_uri)
+    logger.info("Storing extracted content to %s", storage_uri)
     storage_root = UPath(storage_uri, **(storage_options or {})).resolve()
     ext = _normalize_image_format(image_format)
     if strip_base64:
@@ -256,127 +372,45 @@ def store_extracted_images(
     for idx, row in df.iterrows():
         try:
             source_path = row.get("path") or ""
-            stem = _safe_stem(source_path)
-            page_num = row.get("page_number", 1)
-
             page_image = row.get("page_image")
-            page_image_b64: str | None = None
-            if isinstance(page_image, dict):
-                page_image_b64 = page_image.get("image_b64")
 
-            # Decode the page image lazily and reuse for all crops in this row.
-            page_pil: Image.Image | None = None
-            page_pil_decode_attempted = False
+            ctx = _RowCtx(
+                storage_root=storage_root,
+                ext=ext,
+                strip_base64=strip_base64,
+                public_base_url=public_base_url,
+                stem=_safe_stem(source_path),
+                page_num=row.get("page_number", 1),
+                page_image=page_image,
+                page_image_b64=page_image.get("image_b64") if isinstance(page_image, dict) else None,
+            )
 
-            def _get_page_pil() -> Image.Image | None:
-                nonlocal page_pil, page_pil_decode_attempted
-                if page_pil_decode_attempted:
-                    return page_pil
-                page_pil_decode_attempted = True
-                if isinstance(page_image_b64, str) and page_image_b64:
-                    page_pil = _decode_page_image(page_image_b64)
-                return page_pil
+            # Full page image
+            if store_page_images:
+                updated = _store_page_image(ctx)
+                if updated is not None:
+                    df.at[idx, "page_image"] = updated
 
-            # -- Full page image --
-            if store_page_images and isinstance(page_image_b64, str) and page_image_b64:
-                raw = _decode_image_bytes(page_image_b64)
-                if raw is not None:
-                    direct_ext = _resolve_direct_write_encoding(page_image, raw, ext)
-                    dest = storage_root / stem / f"page_{page_num}.{direct_ext}"
-                    _write_bytes(dest, raw)
-                    uri_info = _build_uri_info(dest, storage_root, public_base_url)
-                    page_image.update(uri_info)
-                    page_image["encoding"] = direct_ext
-                    if strip_base64:
-                        page_image["image_b64"] = None
-                    df.at[idx, "page_image"] = page_image
-
-            # -- Structured content (tables / charts / infographics) --
+            # Structured content (tables / charts / infographics)
             for col_name, type_label in col_flags.items():
                 content_list = row.get(col_name)
-                if not isinstance(content_list, list):
-                    continue
-                for item_idx, item in enumerate(content_list):
-                    if not isinstance(item, dict):
-                        continue
-                    item_b64 = item.get("image_b64")
-                    if isinstance(item_b64, str) and item_b64:
-                        raw = _decode_image_bytes(item_b64)
-                        if raw is not None:
-                            direct_ext = _resolve_direct_write_encoding(item, raw, ext)
-                            dest = storage_root / stem / f"page_{page_num}_{type_label}_{item_idx}.{direct_ext}"
-                            _write_bytes(dest, raw)
-                            item.update(_build_uri_info(dest, storage_root, public_base_url))
-                            item["encoding"] = direct_ext
-                            if strip_base64:
-                                item["image_b64"] = None
-                    else:
-                        page_pil = _get_page_pil()
-                    if page_pil is not None and not (isinstance(item_b64, str) and item_b64):
-                        bbox = item.get("bbox_xyxy_norm")
-                        if bbox and len(bbox) == 4:
-                            dest = storage_root / stem / f"page_{page_num}_{type_label}_{item_idx}.{ext}"
-                            if _crop_and_write(dest, page_pil, bbox, image_format=ext):
-                                item.update(_build_uri_info(dest, storage_root, public_base_url))
-                                item["encoding"] = ext
-                df.at[idx, col_name] = content_list
+                if isinstance(content_list, list):
+                    _store_content_items(ctx, content_list, type_label)
+                    df.at[idx, col_name] = content_list
 
-            # -- Natural sub-page images --
+            # Natural sub-page images
             if store_images:
                 images_list = row.get("images")
                 if isinstance(images_list, list):
-                    for img_idx, img_item in enumerate(images_list):
-                        if not isinstance(img_item, dict):
-                            continue
-                        img_b64 = img_item.get("image_b64")
-                        if isinstance(img_b64, str) and img_b64:
-                            raw = _decode_image_bytes(img_b64)
-                            if raw is not None:
-                                direct_ext = _resolve_direct_write_encoding(img_item, raw, ext)
-                                dest = storage_root / stem / f"page_{page_num}_image_{img_idx}.{direct_ext}"
-                                _write_bytes(dest, raw)
-                                img_item.update(_build_uri_info(dest, storage_root, public_base_url))
-                                img_item["encoding"] = direct_ext
-                                if strip_base64:
-                                    img_item["image_b64"] = None
-                        else:
-                            page_pil = _get_page_pil()
-                        if page_pil is not None and not (isinstance(img_b64, str) and img_b64):
-                            bbox = img_item.get("bbox_xyxy_norm")
-                            if bbox and len(bbox) == 4:
-                                dest = storage_root / stem / f"page_{page_num}_image_{img_idx}.{ext}"
-                                if _crop_and_write(dest, page_pil, bbox, image_format=ext):
-                                    img_item.update(_build_uri_info(dest, storage_root, public_base_url))
-                                    img_item["encoding"] = ext
+                    _store_content_items(ctx, images_list, "image")
                     df.at[idx, "images"] = images_list
 
-            # -- Page text --
+            # Page text
             if store_text:
-                page_text = row.get("text")
-                if isinstance(page_text, str) and page_text.strip():
-                    text_dest = storage_root / stem / f"page_{page_num}.txt"
-                    _write_bytes(text_dest, page_text.encode("utf-8"))
-                    uri_info = _build_uri_info(text_dest, storage_root, public_base_url, uri_key="stored_text_uri")
-                    df.at[idx, "stored_text_uri"] = uri_info["stored_text_uri"]
-
-                # Structured content text (tables, charts, infographics)
-                for col_name in ("table", "chart", "infographic"):
-                    content_list = row.get(col_name)
-                    if not isinstance(content_list, list):
-                        continue
-                    for item_idx, item in enumerate(content_list):
-                        if not isinstance(item, dict):
-                            continue
-                        item_text = item.get("text")
-                        if isinstance(item_text, str) and item_text.strip():
-                            text_dest = storage_root / stem / f"page_{page_num}_{col_name}_{item_idx}.txt"
-                            _write_bytes(text_dest, item_text.encode("utf-8"))
-                            item.update(
-                                _build_uri_info(text_dest, storage_root, public_base_url, uri_key="stored_text_uri")
-                            )
-                    df.at[idx, col_name] = content_list
+                for col, val in _store_text(ctx, row).items():
+                    df.at[idx, col] = val
 
         except Exception as exc:
-            logger.exception("Failed to store images for row %s: %s", idx, exc)
+            logger.exception("Failed to store content for row %s: %s", idx, exc)
 
     return df
