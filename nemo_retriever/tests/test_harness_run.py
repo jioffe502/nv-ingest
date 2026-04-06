@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from nemo_retriever.harness.cli import app as harness_app
+from nemo_retriever.harness import artifacts as harness_artifacts
 from nemo_retriever.harness.artifacts import create_run_artifact_dir
 from nemo_retriever.harness.config import HarnessConfig
 from nemo_retriever.harness import run as harness_run
@@ -43,6 +46,66 @@ def test_evaluate_run_outcome_uses_subprocess_error_code() -> None:
 def test_create_run_artifact_dir_defaults_to_dataset_label(tmp_path: Path) -> None:
     out = create_run_artifact_dir("jp20", run_name=None, base_dir=str(tmp_path))
     assert out.name.startswith("jp20_")
+
+
+@pytest.mark.parametrize(
+    ("ref_commit", "packed_refs_line", "expected_short_sha"),
+    [
+        (
+            "abc1234def5678abc1234def5678abc1234def",
+            None,
+            "abc1234",
+        ),
+        (
+            None,
+            "def5678abc1234def5678abc1234def5678abc refs/heads/fix/harness_metrics",
+            "def5678",
+        ),
+    ],
+    ids=["loose-ref-file", "packed-refs"],
+)
+def test_last_commit_fallback_reads_git_metadata(
+    monkeypatch,
+    tmp_path: Path,
+    ref_commit: str | None,
+    packed_refs_line: str | None,
+    expected_short_sha: str,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    nemo_root = repo_root / "nemo_retriever"
+    nemo_root.mkdir()
+
+    git_dir = repo_root / "git-meta" / "worktrees" / "nr-dev"
+    git_dir.mkdir(parents=True)
+    (repo_root / ".git").write_text("gitdir: git-meta/worktrees/nr-dev\n", encoding="utf-8")
+    (git_dir / "HEAD").write_text("ref: refs/heads/fix/harness_metrics\n", encoding="utf-8")
+
+    if ref_commit is not None:
+        ref_path = git_dir / "refs" / "heads" / "fix" / "harness_metrics"
+        ref_path.parent.mkdir(parents=True, exist_ok=True)
+        ref_path.write_text(ref_commit + "\n", encoding="utf-8")
+
+    if packed_refs_line is not None:
+        (git_dir / "packed-refs").write_text(
+            "\n".join(
+                [
+                    "# pack-refs with: peeled fully-peeled sorted",
+                    packed_refs_line,
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(harness_artifacts, "NEMO_RETRIEVER_ROOT", nemo_root)
+    monkeypatch.setattr(
+        harness_artifacts.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
+
+    assert harness_artifacts.last_commit() == expected_short_sha
 
 
 def test_build_command_uses_hidden_detection_file_by_default(tmp_path: Path) -> None:
@@ -545,6 +608,11 @@ def test_run_single_writes_results_with_run_metadata(monkeypatch, tmp_path: Path
 
     result = harness_run._run_single(cfg, artifact_dir, run_id="jp20_single")
     payload = json.loads((artifact_dir / "results.json").read_text(encoding="utf-8"))
+    expected_tuning = {field: getattr(cfg, field) for field in sorted(harness_run.TUNING_FIELDS)}
+    expected_effective_tuning = {
+        "resolution": "configured_values",
+        "graph_pipeline_flags": harness_run._resolve_effective_tuning(cfg),
+    }
 
     expected = {
         "timestamp": "20260305_120000_UTC",
@@ -580,7 +648,8 @@ def test_run_single_writes_results_with_run_metadata(monkeypatch, tmp_path: Path
             "extract_infographics": cfg.extract_infographics,
             "write_detection_file": True,
             "lancedb_uri": str((artifact_dir / "lancedb").resolve()),
-            "tuning": {field: getattr(cfg, field) for field in sorted(harness_run.TUNING_FIELDS)},
+            "tuning": expected_tuning,
+            "effective_tuning": expected_effective_tuning,
         },
         "metrics": {
             "files": None,
@@ -624,6 +693,82 @@ def test_run_single_writes_results_with_run_metadata(monkeypatch, tmp_path: Path
 
     assert result == expected
     assert payload == expected
+
+
+def test_run_single_records_effective_tuning_for_auto_tuning(monkeypatch, tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "run_artifacts"
+    artifact_dir.mkdir()
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    query_csv = tmp_path / "query.csv"
+    query_csv.write_text("q,s,p\nx,y,1\n", encoding="utf-8")
+
+    runtime_dir = artifact_dir / "runtime_metrics"
+    runtime_dir.mkdir()
+    detection_file = runtime_dir / ".detection_summary.json"
+    runtime_summary_file = runtime_dir / "jp20_single.runtime.summary.json"
+    runtime_summary_file.write_text(
+        json.dumps(
+            {
+                "run_mode": "batch",
+                "num_pages": 10,
+                "num_rows": 20,
+                "ingestion_only_secs": 2.0,
+                "evaluation_mode": "recall",
+                "evaluation_metrics": {},
+                "resolved_tuning": {
+                    "strategy": "ray_resource_heuristics",
+                    "requested_graph_flags": {
+                        "pdf_extract_tasks": 0,
+                        "page_elements_actors": 0,
+                        "ocr_actors": 0,
+                        "embed_actors": 0,
+                    },
+                    "resolved_graph_flags": {
+                        "pdf_extract_tasks": 12,
+                        "page_elements_actors": 6,
+                        "ocr_actors": 6,
+                        "embed_actors": 2,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = HarnessConfig(
+        dataset_dir=str(dataset_dir),
+        dataset_label="jp20",
+        preset="single_gpu",
+        query_csv=str(query_csv),
+        write_detection_file=False,
+        recall_required=False,
+        auto_tuning=True,
+    )
+
+    monkeypatch.setattr(
+        harness_run,
+        "_build_command",
+        lambda _cfg, _artifact_dir, _run_id: (
+            ["python", "-m", "nemo_retriever.examples.graph_pipeline", str(dataset_dir)],
+            runtime_dir,
+            detection_file,
+            query_csv,
+        ),
+    )
+    monkeypatch.setattr(harness_run, "_run_subprocess_with_tty", lambda _cmd: 0)
+    monkeypatch.setattr(harness_run, "_collect_run_metadata", lambda: {"host": "builder-01"})
+
+    result = harness_run._run_single(cfg, artifact_dir, run_id="jp20_single")
+    effective_tuning = result["test_config"]["effective_tuning"]
+    graph_flags = effective_tuning["graph_pipeline_flags"]
+
+    assert effective_tuning["resolution"] == "auto_heuristics"
+    assert effective_tuning["strategy"] == "ray_resource_heuristics"
+    assert graph_flags["pdf_extract_tasks"] == 12
+    assert graph_flags["page_elements_actors"] == 6
+    assert graph_flags["ocr_actors"] == 6
+    assert graph_flags["embed_actors"] == 2
 
 
 def test_run_single_allows_missing_optional_summary_files(monkeypatch, tmp_path: Path) -> None:
@@ -674,6 +819,10 @@ def test_run_single_allows_missing_optional_summary_files(monkeypatch, tmp_path:
     assert result["metrics"]["rows_processed"] is None
     assert result["metrics"]["rows_per_sec_ingest"] is None
     assert result["metrics"]["pages"] is None
+    assert result["test_config"]["effective_tuning"]["resolution"] == "configured_values"
+    assert result["test_config"]["effective_tuning"]["graph_pipeline_flags"] == harness_run._resolve_effective_tuning(
+        cfg
+    )
     assert result["summary_metrics"] == {
         "pages": None,
         "ingest_secs": None,
