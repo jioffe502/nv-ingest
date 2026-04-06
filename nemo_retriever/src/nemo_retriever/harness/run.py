@@ -9,7 +9,6 @@ from importlib import metadata
 import json
 import os
 import pty
-import re
 import select
 import shlex
 import socket
@@ -35,11 +34,8 @@ from nemo_retriever.harness.config import (
     load_harness_config,
     load_nightly_config,
 )
-from nemo_retriever.harness.parsers import StreamMetrics
 from nemo_retriever.harness.recall_adapters import prepare_recall_query_file
 from nemo_retriever.utils.input_files import resolve_input_files
-
-ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 def _collect_gpu_metadata() -> tuple[int | None, str | None]:
@@ -110,6 +106,87 @@ def _normalize_recall_metric_key(key: str) -> str:
     return metric.replace("@", "_").replace("-", "_")
 
 
+def _to_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_evaluation_metrics(runtime_summary: dict[str, Any] | None) -> dict[str, float]:
+    if not isinstance(runtime_summary, dict):
+        return {}
+
+    raw_metrics = runtime_summary.get("evaluation_metrics")
+    if not isinstance(raw_metrics, dict):
+        return {}
+
+    metrics: dict[str, float] = {}
+    for key, value in raw_metrics.items():
+        metric_name = str(key).strip().lower()
+        metric_value = _to_float(value)
+        if not metric_name or metric_value is None:
+            continue
+        metrics[metric_name] = metric_value
+    return metrics
+
+
+def _build_structured_metrics_payload(
+    runtime_summary: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, float], dict[str, float]]:
+    evaluation_metrics = _extract_evaluation_metrics(runtime_summary)
+    recall_metrics = {name: value for name, value in evaluation_metrics.items() if name.startswith("recall@")}
+    normalized_metrics = {_normalize_recall_metric_key(name): value for name, value in evaluation_metrics.items()}
+
+    pages: int | None = None
+    ingest_secs: float | None = None
+    rows_processed: int | None = None
+    if isinstance(runtime_summary, dict):
+        pages = _to_int(runtime_summary.get("processed_pages"))
+        if pages is None:
+            pages = _to_int(runtime_summary.get("num_pages"))
+        if pages is None:
+            pages = _to_int(runtime_summary.get("input_pages"))
+
+        ingest_secs = _to_float(runtime_summary.get("ingestion_only_secs"))
+        if ingest_secs is None:
+            ingest_secs = _to_float(runtime_summary.get("ingest_secs"))
+
+        rows_processed = _to_int(runtime_summary.get("num_rows"))
+        if rows_processed is None:
+            rows_processed = _to_int(runtime_summary.get("rows_processed"))
+
+    pages_per_sec_ingest: float | None = None
+    if pages is not None and ingest_secs not in {None, 0, 0.0}:
+        pages_per_sec_ingest = round(float(pages) / float(ingest_secs), 2)
+
+    rows_per_sec_ingest: float | None = None
+    if rows_processed is not None and ingest_secs not in {None, 0, 0.0}:
+        rows_per_sec_ingest = round(float(rows_processed) / float(ingest_secs), 2)
+
+    metrics_payload: dict[str, Any] = {
+        "files": None,
+        "pages": pages,
+        "ingest_secs": ingest_secs,
+        "pages_per_sec_ingest": pages_per_sec_ingest,
+        "rows_processed": rows_processed,
+        "rows_per_sec_ingest": rows_per_sec_ingest,
+        **normalized_metrics,
+    }
+    return metrics_payload, recall_metrics, evaluation_metrics
+
+
 def _safe_pdf_page_count(path: Path) -> int | None:
     try:
         import pypdfium2 as pdfium  # type: ignore
@@ -144,7 +221,9 @@ def _resolve_summary_metrics(
     }
 
     if summary_metrics["pages"] is None and isinstance(runtime_summary, dict):
-        runtime_pages = runtime_summary.get("num_pages")
+        runtime_pages = runtime_summary.get("processed_pages")
+        if runtime_pages is None:
+            runtime_pages = runtime_summary.get("num_pages")
         if runtime_pages is None:
             runtime_pages = runtime_summary.get("input_pages")
         if runtime_pages is not None:
@@ -196,48 +275,65 @@ def _build_command(cfg: HarnessConfig, artifact_dir: Path, run_id: str) -> tuple
         # Keep detection summary out of top-level artifacts unless explicitly requested.
         detection_summary_file = runtime_dir / ".detection_summary.json"
     effective_query_csv: Path | None = None
+    batch_workers = 0 if cfg.auto_tuning else cfg.pdf_extract_workers
+    batch_extract_cpus = 0.0 if cfg.auto_tuning else cfg.pdf_extract_num_cpus
+    batch_extract_batch = 0 if cfg.auto_tuning else cfg.pdf_extract_batch_size
+    batch_page_elements_batch = 0 if cfg.auto_tuning else cfg.page_elements_batch_size
+    batch_page_elements_workers = 0 if cfg.auto_tuning else cfg.page_elements_workers
+    batch_ocr_workers = 0 if cfg.auto_tuning else cfg.ocr_workers
+    batch_ocr_batch = 0 if cfg.auto_tuning else cfg.ocr_batch_size
+    batch_embed_workers = 0 if cfg.auto_tuning else cfg.embed_workers
+    batch_embed_batch = 0 if cfg.auto_tuning else cfg.embed_batch_size
+    batch_page_elements_cpus = 0.0 if cfg.auto_tuning else cfg.page_elements_cpus_per_actor
+    batch_ocr_cpus = 0.0 if cfg.auto_tuning else cfg.ocr_cpus_per_actor
+    batch_embed_cpus = 0.0 if cfg.auto_tuning else cfg.embed_cpus_per_actor
+    batch_page_elements_gpus = 0.0 if cfg.auto_tuning else cfg.gpu_page_elements
+    batch_ocr_gpus = 0.0 if cfg.auto_tuning else cfg.gpu_ocr
+    batch_embed_gpus = 0.0 if cfg.auto_tuning else cfg.gpu_embed
 
     cmd = [
         sys.executable,
         "-m",
         "nemo_retriever.examples.graph_pipeline",
         str(Path(cfg.dataset_dir).resolve()),
+        "--run-mode",
+        cfg.run_mode,
         "--input-type",
         cfg.input_type,
         "--evaluation-mode",
         cfg.evaluation_mode,
         "--pdf-extract-tasks",
-        str(cfg.pdf_extract_workers),
+        str(batch_workers),
         "--pdf-extract-cpus-per-task",
-        str(cfg.pdf_extract_num_cpus),
+        str(batch_extract_cpus),
         "--pdf-extract-batch-size",
-        str(cfg.pdf_extract_batch_size),
+        str(batch_extract_batch),
         "--pdf-split-batch-size",
         str(cfg.pdf_split_batch_size),
         "--page-elements-batch-size",
-        str(cfg.page_elements_batch_size),
+        str(batch_page_elements_batch),
         "--page-elements-actors",
-        str(cfg.page_elements_workers),
+        str(batch_page_elements_workers),
         "--ocr-actors",
-        str(cfg.ocr_workers),
+        str(batch_ocr_workers),
         "--ocr-batch-size",
-        str(cfg.ocr_batch_size),
+        str(batch_ocr_batch),
         "--embed-actors",
-        str(cfg.embed_workers),
+        str(batch_embed_workers),
         "--embed-batch-size",
-        str(cfg.embed_batch_size),
+        str(batch_embed_batch),
         "--page-elements-cpus-per-actor",
-        str(cfg.page_elements_cpus_per_actor),
+        str(batch_page_elements_cpus),
         "--ocr-cpus-per-actor",
-        str(cfg.ocr_cpus_per_actor),
+        str(batch_ocr_cpus),
         "--embed-cpus-per-actor",
-        str(cfg.embed_cpus_per_actor),
+        str(batch_embed_cpus),
         "--page-elements-gpus-per-actor",
-        str(cfg.gpu_page_elements),
+        str(batch_page_elements_gpus),
         "--ocr-gpus-per-actor",
-        str(cfg.gpu_ocr),
+        str(batch_ocr_gpus),
         "--embed-gpus-per-actor",
-        str(cfg.gpu_embed),
+        str(batch_embed_gpus),
         "--embed-model-name",
         cfg.embed_model_name,
         "--embed-modality",
@@ -325,22 +421,12 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
     return data
 
 
-def _consume_parseable_output(metrics: StreamMetrics, parse_buffer: str) -> str:
-    while "\n" in parse_buffer:
-        line, parse_buffer = parse_buffer.split("\n", 1)
-        cleaned = ANSI_ESCAPE_RE.sub("", line)
-        metrics.consume(cleaned + "\n")
-    return parse_buffer
-
-
-def _run_subprocess_with_tty(cmd: list[str], metrics: StreamMetrics) -> int:
+def _run_subprocess_with_tty(cmd: list[str]) -> int:
     """
-    Run command in a pseudo-terminal so Ray renders rich progress.
-
-    We still parse lines from the PTY stream to extract benchmark metrics.
+    Run command in a pseudo-terminal so Ray renders rich progress while still
+    streaming child process output to the current terminal.
     """
     master_fd, slave_fd = pty.openpty()
-    parse_buffer = ""
     try:
         proc = subprocess.Popen(
             cmd,
@@ -375,13 +461,6 @@ def _run_subprocess_with_tty(cmd: list[str], metrics: StreamMetrics) -> int:
             sys.stdout.write(text)
             sys.stdout.flush()
 
-            parse_buffer += text.replace("\r", "\n")
-            parse_buffer = _consume_parseable_output(metrics, parse_buffer)
-
-        if parse_buffer:
-            cleaned_tail = ANSI_ESCAPE_RE.sub("", parse_buffer)
-            metrics.consume(cleaned_tail)
-
         return proc.wait()
     finally:
         os.close(master_fd)
@@ -395,8 +474,7 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
     typer.echo(f"\n=== Running {run_id} ===")
     typer.echo(command_text)
 
-    metrics = StreamMetrics()
-    process_rc = _run_subprocess_with_tty(cmd, metrics)
+    process_rc = _run_subprocess_with_tty(cmd)
     run_metadata = _collect_run_metadata()
     runtime_summary_path = runtime_dir / f"{run_id}.runtime.summary.json"
     runtime_summary = _read_json_if_exists(runtime_summary_path)
@@ -404,29 +482,16 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
     if not cfg.write_detection_file and detection_summary_file.exists():
         detection_summary_file.unlink()
 
-    recall_metrics_normalized: dict[str, float] = {}
-    for key, val in metrics.recall_metrics.items():
-        recall_metrics_normalized[_normalize_recall_metric_key(key)] = val
-    evaluation_metrics_normalized: dict[str, float] = {}
-    for key, val in metrics.evaluation_metrics.items():
-        evaluation_metrics_normalized[_normalize_recall_metric_key(key)] = val
+    metrics_payload, recall_metrics, evaluation_metrics = _build_structured_metrics_payload(runtime_summary)
 
     effective_rc, failure_reason, success = _evaluate_run_outcome(
         process_rc=process_rc,
         evaluation_mode=cfg.evaluation_mode,
         recall_required=bool(cfg.recall_required),
-        recall_metrics=metrics.recall_metrics,
-        evaluation_metrics=metrics.evaluation_metrics,
+        recall_metrics=recall_metrics,
+        evaluation_metrics=evaluation_metrics,
     )
 
-    metrics_payload = {
-        "files": metrics.files,
-        "pages": metrics.pages,
-        "ingest_secs": metrics.ingest_secs,
-        "pages_per_sec_ingest": metrics.pages_per_sec_ingest,
-        **recall_metrics_normalized,
-        **evaluation_metrics_normalized,
-    }
     summary_metrics = _resolve_summary_metrics(cfg, metrics_payload, runtime_summary)
 
     result_payload: dict[str, Any] = {
@@ -439,6 +504,8 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
             "dataset_label": cfg.dataset_label,
             "dataset_dir": cfg.dataset_dir,
             "preset": cfg.preset,
+            "run_mode": cfg.run_mode,
+            "auto_tuning": cfg.auto_tuning,
             "query_csv": cfg.query_csv,
             "effective_query_csv": str(effective_query_csv) if effective_query_csv is not None else None,
             "input_type": cfg.input_type,
@@ -464,14 +531,7 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
             "tuning": {field: getattr(cfg, field) for field in sorted(TUNING_FIELDS)},
         },
         "metrics": {
-            "files": metrics.files,
-            "pages": metrics.pages,
-            "ingest_secs": metrics.ingest_secs,
-            "pages_per_sec_ingest": metrics.pages_per_sec_ingest,
-            "rows_processed": metrics.rows_processed,
-            "rows_per_sec_ingest": metrics.rows_per_sec_ingest,
-            **recall_metrics_normalized,
-            **evaluation_metrics_normalized,
+            **metrics_payload,
         },
         "summary_metrics": summary_metrics,
         "run_metadata": run_metadata,
