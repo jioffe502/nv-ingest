@@ -534,7 +534,7 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
     if runtime_resolved_tuning is not None:
         resolved_graph_flags = runtime_resolved_tuning.get("resolved_graph_flags")
         if isinstance(resolved_graph_flags, dict):
-            final_graph_flags = dict(resolved_graph_flags)
+            final_graph_flags = {**final_graph_flags, **dict(resolved_graph_flags)}
             effective_tuning["graph_pipeline_flags"] = final_graph_flags
         strategy = runtime_resolved_tuning.get("strategy")
         if isinstance(strategy, str) and strategy:

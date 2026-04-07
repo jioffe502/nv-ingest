@@ -843,6 +843,9 @@ def test_run_single_records_effective_tuning_for_auto_tuning(monkeypatch, tmp_pa
     assert graph_flags["page_elements_actors"] == 6
     assert graph_flags["ocr_actors"] == 6
     assert graph_flags["embed_actors"] == 2
+    assert graph_flags["page_elements_cpus_per_actor"] == 0.0
+    assert graph_flags["ocr_cpus_per_actor"] == 0.0
+    assert graph_flags["embed_cpus_per_actor"] == 0.0
 
 
 def test_run_single_allows_missing_optional_summary_files(monkeypatch, tmp_path: Path) -> None:
