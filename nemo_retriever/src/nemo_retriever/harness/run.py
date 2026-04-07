@@ -191,6 +191,10 @@ def _resolve_store_uri(cfg: HarnessConfig, artifact_dir: Path) -> str | None:
     raw = cfg.store_images_uri
     if raw is None:
         return None
+    # Pass URIs with a scheme (e.g. s3://, gcs://, minio://) through unchanged;
+    # pathlib.is_absolute() does not understand URI schemes.
+    if "://" in raw:
+        return raw
     p = Path(raw).expanduser()
     if not p.is_absolute():
         p = (artifact_dir / p).resolve()
