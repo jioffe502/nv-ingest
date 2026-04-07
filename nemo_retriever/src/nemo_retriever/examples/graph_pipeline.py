@@ -35,7 +35,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional, TextIO
+from typing import Optional, TextIO
 
 import typer
 
@@ -49,7 +49,6 @@ from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import StoreParams
 from nemo_retriever.params import TextChunkParams
 from nemo_retriever.params.models import BatchTuningParams
-from nemo_retriever.utils.ray_resource_hueristics import gather_cluster_resources, resolve_requested_plan
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 from nemo_retriever.vector_store.lancedb_store import handle_lancedb
 
@@ -150,154 +149,6 @@ def _write_runtime_summary(
     prefix = (runtime_metrics_prefix or "run").strip() or "run"
     target = target_dir / f"{prefix}.runtime.summary.json"
     target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _positive_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _positive_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _build_requested_tuning_flags(
-    *,
-    pdf_extract_tasks: Optional[int],
-    pdf_extract_cpus_per_task: Optional[float],
-    pdf_extract_batch_size: Optional[int],
-    pdf_split_batch_size: int,
-    page_elements_actors: Optional[int],
-    page_elements_batch_size: Optional[int],
-    page_elements_gpus_per_actor: Optional[float],
-    ocr_actors: Optional[int],
-    ocr_batch_size: Optional[int],
-    ocr_gpus_per_actor: Optional[float],
-    embed_actors: Optional[int],
-    embed_batch_size: Optional[int],
-    embed_gpus_per_actor: Optional[float],
-    nemotron_parse_actors: Optional[int],
-    nemotron_parse_batch_size: Optional[int],
-    nemotron_parse_gpus_per_actor: Optional[float],
-) -> dict[str, int | float]:
-    return {
-        "pdf_extract_tasks": int(pdf_extract_tasks or 0),
-        "pdf_extract_cpus_per_task": float(pdf_extract_cpus_per_task or 0.0),
-        "pdf_extract_batch_size": int(pdf_extract_batch_size or 0),
-        "pdf_split_batch_size": int(pdf_split_batch_size),
-        "page_elements_actors": int(page_elements_actors or 0),
-        "page_elements_batch_size": int(page_elements_batch_size or 0),
-        "page_elements_gpus_per_actor": float(page_elements_gpus_per_actor or 0.0),
-        "ocr_actors": int(ocr_actors or 0),
-        "ocr_batch_size": int(ocr_batch_size or 0),
-        "ocr_gpus_per_actor": float(ocr_gpus_per_actor or 0.0),
-        "embed_actors": int(embed_actors or 0),
-        "embed_batch_size": int(embed_batch_size or 0),
-        "embed_gpus_per_actor": float(embed_gpus_per_actor or 0.0),
-        "nemotron_parse_actors": int(nemotron_parse_actors or 0),
-        "nemotron_parse_batch_size": int(nemotron_parse_batch_size or 0),
-        "nemotron_parse_gpus_per_actor": float(nemotron_parse_gpus_per_actor or 0.0),
-    }
-
-
-def _resolve_runtime_tuning_summary(
-    *,
-    run_mode: str,
-    requested_flags: dict[str, int | float],
-) -> dict[str, object]:
-    summary: dict[str, object] = {"requested_graph_flags": dict(requested_flags)}
-    if run_mode != "batch":
-        summary["strategy"] = "inprocess_no_ray_heuristics"
-        summary["resolved_graph_flags"] = dict(requested_flags)
-        return summary
-
-    try:
-        import ray
-
-        cluster_resources = gather_cluster_resources(ray)
-
-        embed_actor_override = _positive_int(requested_flags.get("embed_actors"))
-        ocr_actor_override = _positive_int(requested_flags.get("ocr_actors"))
-        page_actor_override = _positive_int(requested_flags.get("page_elements_actors"))
-        parse_actor_override = _positive_int(requested_flags.get("nemotron_parse_actors"))
-
-        plan = resolve_requested_plan(
-            cluster_resources=cluster_resources,
-            override_embed_initial_actors=embed_actor_override,
-            override_embed_min_actors=embed_actor_override,
-            override_embed_max_actors=embed_actor_override,
-            override_embed_gpus_per_actor=_positive_float(requested_flags.get("embed_gpus_per_actor")),
-            override_embed_batch_size=_positive_int(requested_flags.get("embed_batch_size")),
-            override_nemotron_parse_initial_actors=parse_actor_override,
-            override_nemotron_parse_min_actors=parse_actor_override,
-            override_nemotron_parse_max_actors=parse_actor_override,
-            override_nemotron_parse_gpus_per_actor=_positive_float(
-                requested_flags.get("nemotron_parse_gpus_per_actor")
-            ),
-            override_nemotron_parse_batch_size=_positive_int(requested_flags.get("nemotron_parse_batch_size")),
-            override_ocr_initial_actors=ocr_actor_override,
-            override_ocr_min_actors=ocr_actor_override,
-            override_ocr_max_actors=ocr_actor_override,
-            override_ocr_gpus_per_actor=_positive_float(requested_flags.get("ocr_gpus_per_actor")),
-            override_ocr_batch_size=_positive_int(requested_flags.get("ocr_batch_size")),
-            override_page_elements_initial_actors=page_actor_override,
-            override_page_elements_min_actors=page_actor_override,
-            override_page_elements_max_actors=page_actor_override,
-            override_page_elements_gpus_per_actor=_positive_float(requested_flags.get("page_elements_gpus_per_actor")),
-            override_page_elements_batch_size=_positive_int(requested_flags.get("page_elements_batch_size")),
-            override_pdf_extract_batch_size=_positive_int(requested_flags.get("pdf_extract_batch_size")),
-            override_pdf_extract_cpus_per_task=_positive_float(requested_flags.get("pdf_extract_cpus_per_task")),
-            override_pdf_extract_tasks=_positive_int(requested_flags.get("pdf_extract_tasks")),
-            allow_no_gpu=True,
-        )
-    except Exception as exc:
-        summary["strategy"] = "runtime_unavailable"
-        summary["error"] = f"{type(exc).__name__}: {exc}"
-        return summary
-
-    resolved_graph_flags = {
-        "pdf_extract_tasks": int(plan.pdf_extract_tasks),
-        "pdf_extract_cpus_per_task": float(plan.pdf_extract_cpus_per_task),
-        "pdf_extract_batch_size": int(plan.pdf_extract_batch_size),
-        "pdf_split_batch_size": int(requested_flags.get("pdf_split_batch_size", 1)),
-        "page_elements_actors": int(plan.page_elements_max_actors),
-        "page_elements_batch_size": int(plan.page_elements_batch_size),
-        "page_elements_gpus_per_actor": float(plan.page_elements_gpus_per_actor),
-        "ocr_actors": int(plan.ocr_max_actors),
-        "ocr_batch_size": int(plan.ocr_batch_size),
-        "ocr_gpus_per_actor": float(plan.ocr_gpus_per_actor),
-        "embed_actors": int(plan.embed_max_actors),
-        "embed_batch_size": int(plan.embed_batch_size),
-        "embed_gpus_per_actor": float(plan.embed_gpus_per_actor),
-        "nemotron_parse_actors": int(plan.nemotron_parse_max_actors),
-        "nemotron_parse_batch_size": int(plan.nemotron_parse_batch_size),
-        "nemotron_parse_gpus_per_actor": float(plan.nemotron_parse_gpus_per_actor),
-    }
-
-    summary.update(
-        {
-            "strategy": "ray_resource_heuristics",
-            "cluster_resources": {
-                "total_cpu_count": int(cluster_resources.total_cpu_count()),
-                "total_gpu_count": int(cluster_resources.total_gpu_count()),
-                "available_cpu_count": int(cluster_resources.available_cpu_count()),
-                "available_gpu_count": int(cluster_resources.available_gpu_count()),
-            },
-            "resolved_graph_flags": resolved_graph_flags,
-        }
-    )
-    return summary
 
 
 def _count_input_units(result_df) -> int:
@@ -687,29 +538,6 @@ def main(
             ray_download_time = 0.0
             num_rows = _count_input_units(result_df)
 
-        requested_tuning_flags = _build_requested_tuning_flags(
-            pdf_extract_tasks=pdf_extract_tasks,
-            pdf_extract_cpus_per_task=pdf_extract_cpus_per_task,
-            pdf_extract_batch_size=pdf_extract_batch_size,
-            pdf_split_batch_size=pdf_split_batch_size,
-            page_elements_actors=page_elements_actors,
-            page_elements_batch_size=page_elements_batch_size,
-            page_elements_gpus_per_actor=page_elements_gpus_per_actor,
-            ocr_actors=ocr_actors,
-            ocr_batch_size=ocr_batch_size,
-            ocr_gpus_per_actor=ocr_gpus_per_actor,
-            embed_actors=embed_actors,
-            embed_batch_size=embed_batch_size,
-            embed_gpus_per_actor=embed_gpus_per_actor,
-            nemotron_parse_actors=nemotron_parse_actors,
-            nemotron_parse_batch_size=nemotron_parse_batch_size,
-            nemotron_parse_gpus_per_actor=nemotron_parse_gpus_per_actor,
-        )
-        resolved_tuning = _resolve_runtime_tuning_summary(
-            run_mode=run_mode,
-            requested_flags=requested_tuning_flags,
-        )
-
         if detection_summary_file is not None:
             from nemo_retriever.utils.detection_summary import (
                 collect_detection_summary_from_df,
@@ -757,7 +585,6 @@ def main(
                     "recall_details": bool(recall_details),
                     "lancedb_uri": str(lancedb_uri),
                     "lancedb_table": str(LANCEDB_TABLE),
-                    "resolved_tuning": resolved_tuning,
                 },
             )
             if run_mode == "batch":
@@ -825,7 +652,6 @@ def main(
                         "recall_details": bool(recall_details),
                         "lancedb_uri": str(lancedb_uri),
                         "lancedb_table": str(LANCEDB_TABLE),
-                        "resolved_tuning": resolved_tuning,
                     },
                 )
                 if run_mode == "batch":
@@ -876,7 +702,6 @@ def main(
                 "recall_details": bool(recall_details),
                 "lancedb_uri": str(lancedb_uri),
                 "lancedb_table": str(LANCEDB_TABLE),
-                "resolved_tuning": resolved_tuning,
             },
         )
 

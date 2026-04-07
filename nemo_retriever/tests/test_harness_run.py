@@ -678,10 +678,6 @@ def test_run_single_writes_results_with_run_metadata(monkeypatch, tmp_path: Path
     result = harness_run._run_single(cfg, artifact_dir, run_id="jp20_single")
     payload = json.loads((artifact_dir / "results.json").read_text(encoding="utf-8"))
     expected_tuning = {field: getattr(cfg, field) for field in sorted(harness_run.TUNING_FIELDS)}
-    expected_effective_tuning = {
-        "resolution": "configured_values",
-        "graph_pipeline_flags": harness_run._resolve_effective_tuning(cfg),
-    }
 
     expected = {
         "timestamp": "20260305_120000_UTC",
@@ -723,7 +719,6 @@ def test_run_single_writes_results_with_run_metadata(monkeypatch, tmp_path: Path
             "use_heuristics": cfg.use_heuristics,
             "lancedb_uri": str((artifact_dir / "lancedb").resolve()),
             "tuning": expected_tuning,
-            "effective_tuning": expected_effective_tuning,
         },
         "metrics": {
             "files": None,
@@ -767,85 +762,6 @@ def test_run_single_writes_results_with_run_metadata(monkeypatch, tmp_path: Path
 
     assert result == expected
     assert payload == expected
-
-
-def test_run_single_records_effective_tuning_for_auto_tuning(monkeypatch, tmp_path: Path) -> None:
-    artifact_dir = tmp_path / "run_artifacts"
-    artifact_dir.mkdir()
-    dataset_dir = tmp_path / "dataset"
-    dataset_dir.mkdir()
-    query_csv = tmp_path / "query.csv"
-    query_csv.write_text("q,s,p\nx,y,1\n", encoding="utf-8")
-
-    runtime_dir = artifact_dir / "runtime_metrics"
-    runtime_dir.mkdir()
-    detection_file = runtime_dir / ".detection_summary.json"
-    runtime_summary_file = runtime_dir / "jp20_single.runtime.summary.json"
-    runtime_summary_file.write_text(
-        json.dumps(
-            {
-                "run_mode": "batch",
-                "num_pages": 10,
-                "num_rows": 20,
-                "ingestion_only_secs": 2.0,
-                "evaluation_mode": "recall",
-                "evaluation_metrics": {},
-                "resolved_tuning": {
-                    "strategy": "ray_resource_heuristics",
-                    "requested_graph_flags": {
-                        "pdf_extract_tasks": 0,
-                        "page_elements_actors": 0,
-                        "ocr_actors": 0,
-                        "embed_actors": 0,
-                    },
-                    "resolved_graph_flags": {
-                        "pdf_extract_tasks": 12,
-                        "page_elements_actors": 6,
-                        "ocr_actors": 6,
-                        "embed_actors": 2,
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    cfg = HarnessConfig(
-        dataset_dir=str(dataset_dir),
-        dataset_label="jp20",
-        preset="single_gpu",
-        query_csv=str(query_csv),
-        write_detection_file=False,
-        recall_required=False,
-        auto_tuning=True,
-    )
-
-    monkeypatch.setattr(
-        harness_run,
-        "_build_command",
-        lambda _cfg, _artifact_dir, _run_id: (
-            ["python", "-m", "nemo_retriever.examples.graph_pipeline", str(dataset_dir)],
-            runtime_dir,
-            detection_file,
-            query_csv,
-        ),
-    )
-    monkeypatch.setattr(harness_run, "_run_subprocess_with_tty", lambda _cmd: 0)
-    monkeypatch.setattr(harness_run, "_collect_run_metadata", lambda: {"host": "builder-01"})
-
-    result = harness_run._run_single(cfg, artifact_dir, run_id="jp20_single")
-    effective_tuning = result["test_config"]["effective_tuning"]
-    graph_flags = effective_tuning["graph_pipeline_flags"]
-
-    assert effective_tuning["resolution"] == "auto_heuristics"
-    assert effective_tuning["strategy"] == "ray_resource_heuristics"
-    assert graph_flags["pdf_extract_tasks"] == 12
-    assert graph_flags["page_elements_actors"] == 6
-    assert graph_flags["ocr_actors"] == 6
-    assert graph_flags["embed_actors"] == 2
-    assert graph_flags["page_elements_cpus_per_actor"] == 0.0
-    assert graph_flags["ocr_cpus_per_actor"] == 0.0
-    assert graph_flags["embed_cpus_per_actor"] == 0.0
 
 
 def test_run_single_allows_missing_optional_summary_files(monkeypatch, tmp_path: Path) -> None:
@@ -896,10 +812,7 @@ def test_run_single_allows_missing_optional_summary_files(monkeypatch, tmp_path:
     assert result["metrics"]["rows_processed"] is None
     assert result["metrics"]["rows_per_sec_ingest"] is None
     assert result["metrics"]["pages"] is None
-    assert result["test_config"]["effective_tuning"]["resolution"] == "configured_values"
-    assert result["test_config"]["effective_tuning"]["graph_pipeline_flags"] == harness_run._resolve_effective_tuning(
-        cfg
-    )
+    assert "effective_tuning" not in result["test_config"]
     assert result["summary_metrics"] == {
         "pages": None,
         "ingest_secs": None,

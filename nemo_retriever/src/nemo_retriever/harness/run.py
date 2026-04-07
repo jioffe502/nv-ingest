@@ -288,15 +288,6 @@ def _resolve_effective_tuning(cfg: HarnessConfig) -> dict[str, int | float]:
     }
 
 
-def _extract_runtime_resolved_tuning(runtime_summary: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(runtime_summary, dict):
-        return None
-    raw = runtime_summary.get("resolved_tuning")
-    if not isinstance(raw, dict):
-        return None
-    return raw
-
-
 def _build_command(cfg: HarnessConfig, artifact_dir: Path, run_id: str) -> tuple[list[str], Path, Path, Path | None]:
     runtime_dir = artifact_dir / "runtime_metrics"
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -524,27 +515,6 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
 
     summary_metrics = _resolve_summary_metrics(cfg, metrics_payload, runtime_summary)
     configured_tuning = {field: getattr(cfg, field) for field in sorted(TUNING_FIELDS)}
-    requested_graph_flags = _resolve_effective_tuning(cfg)
-    runtime_resolved_tuning = _extract_runtime_resolved_tuning(runtime_summary)
-    final_graph_flags: dict[str, Any] = dict(requested_graph_flags)
-    effective_tuning = {
-        "resolution": "auto_heuristics" if cfg.auto_tuning else "configured_values",
-        "graph_pipeline_flags": final_graph_flags,
-    }
-    if runtime_resolved_tuning is not None:
-        resolved_graph_flags = runtime_resolved_tuning.get("resolved_graph_flags")
-        if isinstance(resolved_graph_flags, dict):
-            final_graph_flags = {**final_graph_flags, **dict(resolved_graph_flags)}
-            effective_tuning["graph_pipeline_flags"] = final_graph_flags
-        strategy = runtime_resolved_tuning.get("strategy")
-        if isinstance(strategy, str) and strategy:
-            effective_tuning["strategy"] = strategy
-        cluster_resources = runtime_resolved_tuning.get("cluster_resources")
-        if isinstance(cluster_resources, dict) and cluster_resources:
-            effective_tuning["cluster_resources"] = cluster_resources
-        error_message = runtime_resolved_tuning.get("error")
-        if isinstance(error_message, str) and error_message:
-            effective_tuning["warning"] = error_message
 
     result_payload: dict[str, Any] = {
         "timestamp": now_timestr(),
@@ -586,7 +556,6 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
             "use_heuristics": cfg.use_heuristics,
             "lancedb_uri": _resolve_lancedb_uri(cfg, artifact_dir),
             "tuning": configured_tuning,
-            "effective_tuning": effective_tuning,
         },
         "metrics": {
             **metrics_payload,
