@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import inspect
-from collections import deque
 from typing import Any, List, Optional, Sequence
 
 import pandas as pd
@@ -32,63 +30,16 @@ def _embed_group(
     """Embed a single modality group via ``create_text_embeddings_for_df``."""
     embedder = None
     multimodal_embedder = None
-    local_item_metadata_queue: deque[dict[str, Any] | None] = deque()
-    supports_item_metadata = False
-
-    def _extract_text_for_embedding_row(row: pd.Series, *, text_col: str) -> Optional[str]:
-        value = row.get(text_col)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        for fallback_col in ("text", "content", "chunk", "page_text"):
-            fallback_value = row.get(fallback_col)
-            if isinstance(fallback_value, str) and fallback_value.strip():
-                return fallback_value.strip()
-        return None
-
-    def _build_item_metadata(row: pd.Series) -> dict[str, Any] | None:
-        item_metadata: dict[str, Any] = {}
-        for col in ("source_id", "path", "pdf_basename", "page_number", "filename", "source"):
-            if col not in row:
-                continue
-            value = row.get(col)
-            if value is None:
-                continue
-            if isinstance(value, (str, int, float, bool)):
-                item_metadata[col] = value
-            else:
-                item_metadata[col] = str(value)
-        return item_metadata or None
 
     if endpoint is None and model is not None:
         if group_modality in IMAGE_MODALITIES:
             multimodal_embedder = model
         else:
             skip_prefix = hasattr(model, "embed_queries")
-            for _, row in group_df.iterrows():
-                text_value = _extract_text_for_embedding_row(row, text_col=text_column)
-                if text_value is None:
-                    continue
-                local_item_metadata_queue.append(_build_item_metadata(row))
-
-            try:
-                embed_sig = inspect.signature(model.embed)
-                supports_item_metadata = "item_metadata" in embed_sig.parameters
-            except (TypeError, ValueError):
-                supports_item_metadata = False
 
             def embedder(texts: Sequence[str]) -> Sequence[Sequence[float]]:  # noqa
                 batch = texts if skip_prefix else [f"passage: {text}" for text in texts]
-                if supports_item_metadata:
-                    batch_item_metadata = [
-                        local_item_metadata_queue.popleft() if local_item_metadata_queue else None for _ in batch
-                    ]
-                    vectors = model.embed(
-                        batch,
-                        batch_size=int(inference_batch_size),
-                        item_metadata=batch_item_metadata,
-                    )
-                else:
-                    vectors = model.embed(batch, batch_size=int(inference_batch_size))
+                vectors = model.embed(batch, batch_size=int(inference_batch_size))
                 tolist = getattr(vectors, "tolist", None)
                 if callable(tolist):
                     return tolist()

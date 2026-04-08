@@ -4,14 +4,9 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
 import torch
@@ -37,16 +32,6 @@ def _is_cuda_oom_like_error(exc: RuntimeError) -> bool:
             "CUDNN_STATUS_ALLOC_FAILED",
         )
     )
-
-
-def _safe_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
 
 
 def _batch_length_summary(
@@ -128,22 +113,6 @@ def _batch_length_diagnostics_from_summary(summary: dict[str, Any], *, max_lengt
     return diag
 
 
-def _sanitize_item_metadata(item_metadata: Any) -> dict[str, Any] | None:
-    if not isinstance(item_metadata, dict):
-        return None
-
-    sanitized: dict[str, Any] = {}
-    for key in ("source_id", "path", "pdf_basename", "page_number", "filename", "source"):
-        value = item_metadata.get(key)
-        if value is None:
-            continue
-        if isinstance(value, (str, int, float, bool)):
-            sanitized[key] = value
-        else:
-            sanitized[key] = str(value)
-    return sanitized or None
-
-
 @dataclass
 class LlamaNemotronEmbed1BV2Embedder:
     """
@@ -167,7 +136,6 @@ class LlamaNemotronEmbed1BV2Embedder:
         self._model = None
         self._device = None
         self._adaptive_batch_size: int | None = None
-        self._oom_capture_event_count: int = 0
 
         from transformers import AutoModel, AutoTokenizer
 
@@ -196,126 +164,15 @@ class LlamaNemotronEmbed1BV2Embedder:
     def is_remote(self) -> bool:
         return False
 
-    def _capture_oom_outlier_event(
-        self,
-        *,
-        reason: str,
-        target_batch_size: int,
-        retry_batch_size: int,
-        chunk: Sequence[str],
-        chunk_metadata: Sequence[dict[str, Any] | None] | None,
-        length_summary: dict[str, Any],
-        exc: BaseException | None = None,
-    ) -> None:
-        capture_path_raw = (os.getenv("NEMO_RETRIEVER_EMBED_OOM_CAPTURE_PATH") or "").strip()
-        if not capture_path_raw:
-            return
-
-        max_events = _safe_int_env("NEMO_RETRIEVER_EMBED_OOM_CAPTURE_MAX_EVENTS", 200)
-        if max_events > 0 and self._oom_capture_event_count >= max_events:
-            return
-
-        max_items = _safe_int_env("NEMO_RETRIEVER_EMBED_OOM_CAPTURE_MAX_ITEMS", len(chunk))
-        max_items = max(1, min(max_items, len(chunk)))
-        text_char_limit = _safe_int_env("NEMO_RETRIEVER_EMBED_OOM_CAPTURE_TEXT_CHARS", 0)
-
-        token_lengths = length_summary.get("token_lengths") or []
-        items = []
-        for idx, text in enumerate(list(chunk)[:max_items]):
-            has_passage_prefix = text.startswith("passage: ")
-            normalized_text = text[len("passage: ") :] if has_passage_prefix else text
-            if text_char_limit > 0:
-                capture_text = normalized_text[:text_char_limit]
-                text_truncated = len(normalized_text) > text_char_limit
-            else:
-                capture_text = normalized_text
-                text_truncated = False
-            token_len = token_lengths[idx] if idx < len(token_lengths) else None
-            source_metadata = None
-            if chunk_metadata is not None and idx < len(chunk_metadata):
-                source_metadata = _sanitize_item_metadata(chunk_metadata[idx])
-            items.append(
-                {
-                    "idx": idx,
-                    "sha256": hashlib.sha256(normalized_text.encode("utf-8", errors="ignore")).hexdigest(),
-                    "char_len": len(normalized_text),
-                    "token_len": token_len,
-                    "had_passage_prefix": has_passage_prefix,
-                    "text_truncated": text_truncated,
-                    "text": capture_text,
-                    "source_metadata": source_metadata,
-                }
-            )
-
-        event: dict[str, Any] = {
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "pid": os.getpid(),
-            "reason": reason,
-            "requested_batch_size": int(target_batch_size),
-            "retry_batch_size": int(retry_batch_size),
-            "max_length": int(self.max_length),
-            "length_summary": {
-                "failed_batch": length_summary.get("failed_batch"),
-                "char_max": length_summary.get("char_max"),
-                "char_p95": length_summary.get("char_p95"),
-                "tok_max": length_summary.get("tok_max"),
-                "tok_p95": length_summary.get("tok_p95"),
-            },
-            "captured_items": len(items),
-            "total_items": len(chunk),
-            "items": items,
-        }
-        if exc is not None:
-            event["error"] = {"type": exc.__class__.__name__, "message": str(exc)}
-
-        capture_path = Path(capture_path_raw).expanduser()
-        capture_is_dir = capture_path_raw.endswith("/") or (capture_path.exists() and capture_path.is_dir())
-        if capture_is_dir:
-            capture_path.mkdir(parents=True, exist_ok=True)
-            capture_file = capture_path / f"embed_oom_outliers_pid{os.getpid()}.jsonl"
-        else:
-            capture_path.parent.mkdir(parents=True, exist_ok=True)
-            capture_file = capture_path
-
-        line = json.dumps(event, ensure_ascii=True) + "\n"
-        with capture_file.open("a", encoding="utf-8") as f:
-            try:
-                import fcntl
-
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                f.write(line)
-                f.flush()
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                f.write(line)
-                f.flush()
-
-        self._oom_capture_event_count += 1
-
-    def embed(
-        self,
-        texts: Sequence[str],
-        *,
-        batch_size: int = 64,
-        item_metadata: Sequence[dict[str, Any] | None] | None = None,
-    ) -> torch.Tensor:
+    def embed(self, texts: Sequence[str], *, batch_size: int = 64) -> torch.Tensor:
         """
         Returns a CPU tensor of shape [N, D].
         """
-        pairs: list[tuple[str, dict[str, Any] | None]] = []
-        for idx, text in enumerate(texts):
-            normalized_text = str(text)
-            if not normalized_text.strip():
-                continue
-            metadata = item_metadata[idx] if item_metadata is not None and idx < len(item_metadata) else None
-            pairs.append((normalized_text, metadata))
-
-        texts_list = [text for text, _ in pairs]
-        metadata_list = [metadata for _, metadata in pairs]
+        texts_list = [str(text) for text in texts if str(text).strip()]
         if not texts_list:
             return torch.empty((0, 0), dtype=torch.float32)
 
-        return self._embed_local(texts_list, batch_size=batch_size, item_metadata=metadata_list)
+        return self._embed_local(texts_list, batch_size=batch_size)
 
     def _embed_chunk(self, chunk: List[str]) -> torch.Tensor:
         dev = self._device
@@ -351,19 +208,16 @@ class LlamaNemotronEmbed1BV2Embedder:
         texts: List[str],
         *,
         batch_size: int,
-        item_metadata: Sequence[dict[str, Any] | None] | None = None,
     ) -> torch.Tensor:
         if self._tokenizer is None or self._model is None or self._device is None:
             raise RuntimeError("Local embedder was not initialized.")
 
-        indexed_texts: list[tuple[int, str, dict[str, Any] | None]] = []
+        indexed_texts: list[tuple[int, str]] = []
         for idx, text in enumerate(texts):
-            metadata = item_metadata[idx] if item_metadata is not None and idx < len(item_metadata) else None
-            indexed_texts.append((idx, text, metadata))
+            indexed_texts.append((idx, text))
         indexed_texts.sort(key=lambda pair: len(pair[1]), reverse=True)
-        sorted_texts = [text for _, text, _ in indexed_texts]
-        sorted_to_original = [idx for idx, _, _ in indexed_texts]
-        sorted_metadata = [metadata for _, _, metadata in indexed_texts]
+        sorted_texts = [text for _, text in indexed_texts]
+        sorted_to_original = [idx for idx, _ in indexed_texts]
 
         outs: List[torch.Tensor] = []
         target_bs = max(1, int(batch_size))
@@ -376,7 +230,6 @@ class LlamaNemotronEmbed1BV2Embedder:
                 i = 0
                 while i < len(sorted_texts):
                     chunk = sorted_texts[i : i + current_bs]
-                    chunk_metadata = sorted_metadata[i : i + current_bs]
                     try:
                         outs.append(self._embed_chunk(chunk))
                         i += current_bs
@@ -403,14 +256,6 @@ class LlamaNemotronEmbed1BV2Embedder:
                             tokenizer=self._tokenizer,
                             max_length=self.max_length,
                         )
-                        self._capture_oom_outlier_event(
-                            reason="cuda_oom",
-                            target_batch_size=target_bs,
-                            retry_batch_size=current_bs,
-                            chunk=chunk,
-                            chunk_metadata=chunk_metadata,
-                            length_summary=length_summary,
-                        )
                         diag = _batch_length_diagnostics_from_summary(length_summary, max_length=self.max_length)
                         warnings.warn(
                             f"CUDA OOM during embedding; retrying with batch_size={current_bs} "
@@ -429,15 +274,6 @@ class LlamaNemotronEmbed1BV2Embedder:
                             chunk,
                             tokenizer=self._tokenizer,
                             max_length=self.max_length,
-                        )
-                        self._capture_oom_outlier_event(
-                            reason="cuda_runtime",
-                            target_batch_size=target_bs,
-                            retry_batch_size=current_bs,
-                            chunk=chunk,
-                            chunk_metadata=chunk_metadata,
-                            length_summary=length_summary,
-                            exc=exc,
                         )
                         diag = _batch_length_diagnostics_from_summary(length_summary, max_length=self.max_length)
                         warnings.warn(
