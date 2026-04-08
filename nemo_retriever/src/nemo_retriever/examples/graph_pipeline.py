@@ -262,7 +262,16 @@ def main(
     page_elements_cpus_per_actor: Optional[float] = typer.Option(0.0, "--page-elements-cpus-per-actor"),
     page_elements_gpus_per_actor: Optional[float] = typer.Option(0.0, "--page-elements-gpus-per-actor", max=1.0),
     embed_actors: Optional[int] = typer.Option(0, "--embed-actors"),
-    embed_batch_size: Optional[int] = typer.Option(0, "--embed-batch-size"),
+    embed_batch_size: Optional[int] = typer.Option(
+        0,
+        "--embed-batch-size",
+        help="Ray Data batch size for embedding stage scheduling.",
+    ),
+    embed_inference_batch_size: Optional[int] = typer.Option(
+        0,
+        "--embed-inference-batch-size",
+        help="Per-forward local embedding microbatch size (VRAM control knob).",
+    ),
     embed_cpus_per_actor: Optional[float] = typer.Option(0.0, "--embed-cpus-per-actor"),
     embed_gpus_per_actor: Optional[float] = typer.Option(0.0, "--embed-gpus-per-actor", max=1.0),
     pdf_split_batch_size: int = typer.Option(1, "--pdf-split-batch-size", min=1),
@@ -434,7 +443,8 @@ def main(
                     "structured_elements_modality": structured_elements_modality,
                     "embed_granularity": embed_granularity,
                     "batch_tuning": embed_batch_tuning,
-                    "inference_batch_size": embed_batch_size or None,
+                    "inference_batch_size": embed_inference_batch_size or embed_batch_size or None,
+                    "embed_inference_batch_size": embed_inference_batch_size or None,
                 }.items()
                 if v is not None
             }
@@ -449,7 +459,12 @@ def main(
         # ------------------------------------------------------------------
         logger.info("Building graph pipeline (run_mode=%s) for %s ...", run_mode, input_path)
 
-        ingestor = GraphIngestor(run_mode=run_mode, ray_address=ray_address)
+        ingestor = GraphIngestor(
+            run_mode=run_mode,
+            ray_address=ray_address,
+            ray_log_to_driver=ray_log_to_driver,
+            debug=bool(debug),
+        )
         ingestor = ingestor.files(file_patterns)
 
         # Extraction stage

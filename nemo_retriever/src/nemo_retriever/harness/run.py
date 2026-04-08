@@ -244,6 +244,8 @@ def _build_command(cfg: HarnessConfig, artifact_dir: Path, run_id: str) -> tuple
             str(cfg.embed_workers),
             "--embed-batch-size",
             str(cfg.embed_batch_size),
+            "--embed-inference-batch-size",
+            str(cfg.embed_inference_batch_size),
             "--page-elements-cpus-per-actor",
             str(cfg.page_elements_cpus_per_actor),
             "--ocr-cpus-per-actor",

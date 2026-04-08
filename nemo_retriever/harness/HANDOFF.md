@@ -9,10 +9,26 @@ It captures what exists now, what was intentionally chosen, and what to iterate 
 ## Current Scope and Intent
 
 - Harness is standalone under `nemo_retriever` (not based on `tools/harness`).
-- It wraps `nemo_retriever.examples.batch_pipeline`.
+- It wraps `nemo_retriever.examples.graph_pipeline`.
 - Primary use case is benchmark orchestration for local/cluster runs without Docker orchestration.
 - Vector DB is LanceDB only.
 - Recall gating is supported and enforced by config (`recall_required`).
+
+## Graph Refactor Integration (Apr 2026)
+
+- Upstream main includes `53f3a8c5` (`Refactor step (#1778)`), which removed mode-specific runtime files:
+  - removed: `nemo_retriever/src/nemo_retriever/examples/batch_pipeline.py`
+  - removed: `nemo_retriever/src/nemo_retriever/examples/inprocess_pipeline.py`
+  - removed: `nemo_retriever/src/nemo_retriever/ingest_modes/`
+  - added: `nemo_retriever/src/nemo_retriever/examples/graph_pipeline.py`
+  - added: `nemo_retriever/src/nemo_retriever/graph_ingestor.py`
+  - added/active seam: `nemo_retriever/src/nemo_retriever/graph/ingestor_runtime.py`
+- Any tuning or stability changes previously implemented in `batch_pipeline.py` or `ingest_modes/*` must now be ported to:
+  - CLI arg wiring: `examples/graph_pipeline.py`
+  - graph node override mapping: `graph/ingestor_runtime.py`
+  - embed operators/runtime: `text_embed/operators.py`, `text_embed/runtime.py`
+  - local model behavior: `model/local/llama_nemotron_embed_1b_v2_embedder.py`
+- For embed OOM stabilization specifically, old `batch/inprocess` diffs should be treated as historical evidence only; the mergeable implementation surface is graph-only.
 
 ## Key Files
 
@@ -114,7 +130,7 @@ Notes:
    - Removed `sweep_results.json` generation.
 
 3. **TTY-backed subprocess retained**
-   - Harness runs batch pipeline through a PTY so Ray progress remains rich/pretty by default.
+   - Harness runs graph pipeline through a PTY so Ray progress remains rich/pretty by default.
 
 ## Known Behavior to Remember
 
