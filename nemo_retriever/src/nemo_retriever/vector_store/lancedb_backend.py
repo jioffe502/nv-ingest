@@ -28,6 +28,17 @@ class LanceDBBackend(VectorStore):
         self._db: Any = None
         self._table: Any = None
 
+    def open_table(self) -> None:
+        """Open an existing LanceDB table without creating it.
+
+        Used by the driver to run post-pipeline finalization (e.g. index
+        creation) after distributed workers have written all rows.
+        """
+        import lancedb
+
+        self._db = lancedb.connect(uri=self._params.lancedb_uri)
+        self._table = self._db.open_table(self._params.table_name)
+
     def create_table(self, *, dim: int, **kwargs: Any) -> None:
         import lancedb
 
@@ -53,24 +64,13 @@ class LanceDBBackend(VectorStore):
         if not self._params.create_index:
             return
 
-        from nemo_retriever.vector_store.lancedb_store import LanceDBConfig, create_lancedb_index
+        from nemo_retriever.vector_store.lancedb_store import create_lancedb_index
 
-        cfg = LanceDBConfig(
-            uri=self._params.lancedb_uri,
-            table_name=self._params.table_name,
-            hybrid=self._params.hybrid,
-            fts_language=self._params.fts_language,
-            index_type=self._params.index_type,
-            metric=self._params.metric,
-            num_partitions=self._params.num_partitions,
-            num_sub_vectors=self._params.num_sub_vectors,
-        )
         try:
-            create_lancedb_index(self._table, cfg=cfg)
+            create_lancedb_index(self._table, cfg=self._params)
         except RuntimeError:
-            # KMeans cannot train when the dataset is smaller than num_partitions.
-            # This is expected for dev/test datasets; log and continue.
             logger.warning(
                 "Index creation failed (likely too few rows for %d partitions); skipping.",
                 self._params.num_partitions,
+                exc_info=True,
             )

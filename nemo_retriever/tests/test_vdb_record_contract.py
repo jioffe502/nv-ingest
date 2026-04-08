@@ -25,6 +25,7 @@ import pytest
 # Shared fixture
 # ---------------------------------------------------------------------------
 
+
 def _make_sample_dataframe() -> pd.DataFrame:
     """Build a minimal DataFrame matching the graph pipeline's post-embed output."""
     embedding = [0.1, 0.2, 0.3, 0.4]
@@ -52,6 +53,7 @@ def _make_sample_dataframe() -> pd.DataFrame:
 # Canonical record builder tests
 # ---------------------------------------------------------------------------
 
+
 class TestBuildVdbRecords:
     def test_produces_all_required_fields(self):
         from nemo_retriever.vector_store.vdb_records import build_vdb_records
@@ -61,8 +63,18 @@ class TestBuildVdbRecords:
 
         assert len(rows) == 1
         row = rows[0]
-        for field in ("vector", "text", "metadata", "source", "page_number",
-                       "pdf_page", "pdf_basename", "source_id", "path", "filename"):
+        for field in (
+            "vector",
+            "text",
+            "metadata",
+            "source",
+            "page_number",
+            "pdf_page",
+            "pdf_basename",
+            "source_id",
+            "path",
+            "filename",
+        ):
             assert field in row, f"Missing required field: {field}"
 
     def test_metadata_is_valid_json(self):
@@ -116,12 +128,16 @@ class TestBuildVdbRecords:
     def test_skips_rows_without_embedding(self):
         from nemo_retriever.vector_store.vdb_records import build_vdb_records
 
-        df = pd.DataFrame([{
-            "metadata": {"source_path": "/data/test.pdf"},
-            "text": "No embedding here",
-            "path": "/data/test.pdf",
-            "page_number": 0,
-        }])
+        df = pd.DataFrame(
+            [
+                {
+                    "metadata": {"source_path": "/data/test.pdf"},
+                    "text": "No embedding here",
+                    "path": "/data/test.pdf",
+                    "page_number": 0,
+                }
+            ]
+        )
         rows = build_vdb_records(df)
         assert len(rows) == 0
 
@@ -151,6 +167,7 @@ class TestBuildVdbRecords:
 # Transitional list[dict] builder tests
 # ---------------------------------------------------------------------------
 
+
 class TestBuildVdbRecordsFromDicts:
     def test_matches_dataframe_path(self):
         """list[dict] path should produce identical output to DataFrame path."""
@@ -177,6 +194,7 @@ class TestBuildVdbRecordsFromDicts:
 # ---------------------------------------------------------------------------
 # VectorStore ABC tests
 # ---------------------------------------------------------------------------
+
 
 class TestVectorStoreABC:
     def test_cannot_instantiate_directly(self):
@@ -206,6 +224,7 @@ class TestVectorStoreABC:
 # LanceDB backend tests
 # ---------------------------------------------------------------------------
 
+
 class TestLanceDBBackend:
     def test_write_rows_creates_table_lazily(self, tmp_path):
         from nemo_retriever.params.models import LanceDbParams
@@ -215,9 +234,20 @@ class TestLanceDBBackend:
         params = LanceDbParams(lancedb_uri=str(tmp_path / "test_db"), table_name="test_table", create_index=False)
         backend = LanceDBBackend(params)
 
-        rows = [{"vector": [0.1, 0.2, 0.3], "text": "hello", "metadata": "{}", "source": "{}",
-                 "page_number": 0, "pdf_page": "", "pdf_basename": "", "filename": "",
-                 "source_id": "", "path": ""}]
+        rows = [
+            {
+                "vector": [0.1, 0.2, 0.3],
+                "text": "hello",
+                "metadata": "{}",
+                "source": "{}",
+                "page_number": 0,
+                "pdf_page": "",
+                "pdf_basename": "",
+                "filename": "",
+                "source_id": "",
+                "path": "",
+            }
+        ]
         backend.write_rows(rows)
 
         db = lancedb.connect(str(tmp_path / "test_db"))
@@ -232,9 +262,18 @@ class TestLanceDBBackend:
         params = LanceDbParams(lancedb_uri=str(tmp_path / "test_db"), table_name="test_table", create_index=False)
         backend = LanceDBBackend(params)
 
-        row_template = {"vector": [0.1, 0.2, 0.3], "text": "hello", "metadata": "{}", "source": "{}",
-                        "page_number": 0, "pdf_page": "", "pdf_basename": "", "filename": "",
-                        "source_id": "", "path": ""}
+        row_template = {
+            "vector": [0.1, 0.2, 0.3],
+            "text": "hello",
+            "metadata": "{}",
+            "source": "{}",
+            "page_number": 0,
+            "pdf_page": "",
+            "pdf_basename": "",
+            "filename": "",
+            "source_id": "",
+            "path": "",
+        }
 
         backend.write_rows([row_template])
         backend.write_rows([row_template, row_template])
@@ -265,6 +304,7 @@ class TestLanceDBBackend:
 # ---------------------------------------------------------------------------
 # Regression: handle_lancedb now uses canonical builder
 # ---------------------------------------------------------------------------
+
 
 class TestHandleLancedbRegression:
     def test_handle_lancedb_writes_valid_json_metadata(self, tmp_path):
