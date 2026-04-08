@@ -12,7 +12,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple  # noqa:
 from datetime import timedelta
 
 from nv_ingest_client.util.vdb.lancedb import LanceDB
+from nemo_retriever.params.models import LanceDbParams
 from nemo_retriever.vector_store.lancedb_utils import lancedb_schema
+from nemo_retriever.vector_store.vdb_records import build_vdb_records, build_vdb_records_from_dicts
 import pandas as pd
 import lancedb
 
@@ -246,12 +248,29 @@ def _write_rows_to_lancedb(rows: Sequence[Dict[str, Any]], *, cfg: LanceDBConfig
 
 def write_embeddings_to_lancedb(df_with_embeddings: pd.DataFrame, *, cfg: LanceDBConfig) -> None:
     """
-    Write embeddings found in `df_with_embeddings.metadata.embedding` to LanceDB.
+    Write embeddings found in *df_with_embeddings* to LanceDB.
 
-    This is used programmatically by `nemo_retriever.text_embed.stage.embed_text_from_primitives_df(...)`.
+    This is used programmatically by ``nemo_retriever.text_embed.stage``.
     """
-    rows = _build_lancedb_rows_from_df(df_with_embeddings)
-    _write_rows_to_lancedb(rows, cfg=cfg)
+    from nemo_retriever.vector_store.lancedb_backend import LanceDBBackend
+
+    records = build_vdb_records(df_with_embeddings)
+    params = LanceDbParams(
+        lancedb_uri=cfg.uri,
+        table_name=cfg.table_name,
+        overwrite=cfg.overwrite,
+        create_index=cfg.create_index,
+        hybrid=cfg.hybrid,
+        fts_language=cfg.fts_language,
+        index_type=cfg.index_type,
+        metric=cfg.metric,
+        num_partitions=cfg.num_partitions,
+        num_sub_vectors=cfg.num_sub_vectors,
+    )
+    backend = LanceDBBackend(params)
+    backend.write_rows(records)
+    if cfg.create_index:
+        backend.create_index()
 
 
 def write_text_embeddings_dir_to_lancedb(
@@ -307,25 +326,26 @@ def write_text_embeddings_dir_to_lancedb(
 
 
 def handle_lancedb(
-    rows: Path,
+    rows: Any,
     uri: str,
     table_name: str,
     hybrid: bool = False,
     mode: str = "overwrite",
-) -> Dict[str, Any]:
-    """
-        Handle LanceDB writing for a batch pipeline run.
+) -> None:
+    """Write pipeline results to LanceDB."""
+    from nemo_retriever.vector_store.lancedb_backend import LanceDBBackend
 
-        This is used by `nemo_retriever.examples.batch_pipeline.run(...)` after the embedding stage.
+    if isinstance(rows, pd.DataFrame):
+        records = build_vdb_records(rows)
+    else:
+        records = build_vdb_records_from_dicts(rows)
 
-        Reads `*.text_embeddings.json` files from `input_dir`, extracts embeddings, and uploads to LanceDB.
+    params = LanceDbParams(
+        lancedb_uri=uri,
+        table_name=table_name,
+        hybrid=hybrid,
+        overwrite=(mode == "overwrite"),
     )
-    """
-    lancedb_config = LanceDBConfig(
-        uri=uri, table_name=table_name, hybrid=hybrid
-    )  # Use the same LanceDB config for writing and recall.
-    db = lancedb.connect(uri=lancedb_config.uri)
-    cleaned_rows = _build_lancedb_rows_from_df(rows)
-    _write_rows_to_lancedb(cleaned_rows, cfg=lancedb_config)
-    table = db.open_table(lancedb_config.table_name)  # Ensure table is open and metadata is updated before proceeding.
-    create_lancedb_index(table, cfg=lancedb_config)
+    backend = LanceDBBackend(params)
+    backend.write_rows(records)
+    backend.create_index()

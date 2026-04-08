@@ -305,10 +305,13 @@ def _hits_to_keys(raw_hits: List[List[Dict[str, Any]]]) -> List[List[str]]:
         keys: List[str] = []
         for h in hits:
             page_number = h["page_number"]
-            source = h["source"]
+            raw_source = h["source"]
+            # source may be a bare path string or a JSON object {"source_id": "..."}.
+            source_map = _parse_mapping(raw_source)
+            source = source_map.get("source_id", raw_source) if source_map else raw_source
             # Prefer explicit `pdf_page` column; fall back to derived form.
             if page_number is not None and source:
-                filename = Path(source).stem
+                filename = Path(str(source)).stem
                 keys.append(f"{filename}_{str(page_number)}")
             else:
                 logger.warning(
