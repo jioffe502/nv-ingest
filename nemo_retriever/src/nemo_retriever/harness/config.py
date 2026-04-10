@@ -56,7 +56,6 @@ class HarnessConfig:
     dataset_label: str
     preset: str
     run_mode: str = "batch"
-    auto_tuning: bool = False
 
     query_csv: str | None = None
     input_type: str = "pdf"
@@ -270,7 +269,6 @@ def _apply_env_overrides(config_dict: dict[str, Any]) -> None:
         "HARNESS_DATASET_DIR": ("dataset_dir", str),
         "HARNESS_PRESET": ("preset", str),
         "HARNESS_RUN_MODE": ("run_mode", str),
-        "HARNESS_AUTO_TUNING": ("auto_tuning", _parse_bool),
         "HARNESS_QUERY_CSV": ("query_csv", str),
         "HARNESS_INPUT_TYPE": ("input_type", str),
         "HARNESS_RECALL_REQUIRED": ("recall_required", _parse_bool),

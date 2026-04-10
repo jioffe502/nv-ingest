@@ -107,23 +107,6 @@ def test_load_harness_config_rejects_invalid_run_mode(tmp_path: Path) -> None:
         load_harness_config(config_file=str(cfg_path))
 
 
-def test_load_harness_config_supports_auto_tuning_override(tmp_path: Path) -> None:
-    dataset_dir = tmp_path / "dataset"
-    dataset_dir.mkdir()
-    query_csv = tmp_path / "query.csv"
-    query_csv.write_text("query,source,page\nq,a,1\n", encoding="utf-8")
-    cfg_path = tmp_path / "test_configs.yaml"
-    _write_harness_config(cfg_path, dataset_dir, query_csv)
-
-    cfg = load_harness_config(
-        config_file=str(cfg_path),
-        dataset="tiny",
-        preset="base",
-        cli_overrides=["auto_tuning=true"],
-    )
-    assert cfg.auto_tuning is True
-
-
 def test_load_harness_config_fails_when_recall_required_without_query(tmp_path: Path) -> None:
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()

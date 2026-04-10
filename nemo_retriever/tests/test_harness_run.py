@@ -167,29 +167,6 @@ def test_build_command_supports_inprocess_run_mode(tmp_path: Path) -> None:
     assert cmd[cmd.index("--run-mode") + 1] == "inprocess"
 
 
-def test_build_command_auto_tuning_zeros_batch_flags(tmp_path: Path) -> None:
-    dataset_dir = tmp_path / "dataset"
-    dataset_dir.mkdir()
-    query_csv = tmp_path / "query.csv"
-    query_csv.write_text("q,s,p\nx,y,1\n", encoding="utf-8")
-
-    cfg = HarnessConfig(
-        dataset_dir=str(dataset_dir),
-        dataset_label="jp20",
-        preset="single_gpu",
-        query_csv=str(query_csv),
-        auto_tuning=True,
-    )
-    cmd, _runtime_dir, _detection_file, _effective_query_csv = _build_command(cfg, tmp_path, run_id="r1")
-    assert cmd[cmd.index("--pdf-extract-tasks") + 1] == "0"
-    assert cmd[cmd.index("--page-elements-actors") + 1] == "0"
-    assert cmd[cmd.index("--ocr-actors") + 1] == "0"
-    assert cmd[cmd.index("--embed-actors") + 1] == "0"
-    assert cmd[cmd.index("--page-elements-gpus-per-actor") + 1] == "0.0"
-    assert cmd[cmd.index("--ocr-gpus-per-actor") + 1] == "0.0"
-    assert cmd[cmd.index("--embed-gpus-per-actor") + 1] == "0.0"
-
-
 def test_build_command_supports_beir_evaluation_mode(tmp_path: Path) -> None:
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
@@ -691,7 +668,6 @@ def test_run_single_writes_results_with_run_metadata(monkeypatch, tmp_path: Path
             "dataset_dir": str(dataset_dir),
             "preset": "single_gpu",
             "run_mode": "batch",
-            "auto_tuning": False,
             "query_csv": str(query_csv),
             "effective_query_csv": str(query_csv),
             "input_type": cfg.input_type,

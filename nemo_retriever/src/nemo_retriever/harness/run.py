@@ -266,28 +266,6 @@ def _resolve_lancedb_uri(cfg: HarnessConfig, artifact_dir: Path) -> str:
     return str(p)
 
 
-def _resolve_effective_tuning(cfg: HarnessConfig) -> dict[str, int | float]:
-    use_auto = bool(cfg.auto_tuning)
-    return {
-        "pdf_extract_tasks": 0 if use_auto else cfg.pdf_extract_workers,
-        "pdf_extract_cpus_per_task": 0.0 if use_auto else cfg.pdf_extract_num_cpus,
-        "pdf_extract_batch_size": 0 if use_auto else cfg.pdf_extract_batch_size,
-        "pdf_split_batch_size": cfg.pdf_split_batch_size,
-        "page_elements_batch_size": 0 if use_auto else cfg.page_elements_batch_size,
-        "page_elements_actors": 0 if use_auto else cfg.page_elements_workers,
-        "ocr_actors": 0 if use_auto else cfg.ocr_workers,
-        "ocr_batch_size": 0 if use_auto else cfg.ocr_batch_size,
-        "embed_actors": 0 if use_auto else cfg.embed_workers,
-        "embed_batch_size": 0 if use_auto else cfg.embed_batch_size,
-        "page_elements_cpus_per_actor": 0.0 if use_auto else cfg.page_elements_cpus_per_actor,
-        "ocr_cpus_per_actor": 0.0 if use_auto else cfg.ocr_cpus_per_actor,
-        "embed_cpus_per_actor": 0.0 if use_auto else cfg.embed_cpus_per_actor,
-        "page_elements_gpus_per_actor": 0.0 if use_auto else cfg.gpu_page_elements,
-        "ocr_gpus_per_actor": 0.0 if use_auto else cfg.gpu_ocr,
-        "embed_gpus_per_actor": 0.0 if use_auto else cfg.gpu_embed,
-    }
-
-
 def _resolve_store_uri(cfg: HarnessConfig, artifact_dir: Path) -> str | None:
     raw = cfg.store_images_uri
     if raw is None:
@@ -311,7 +289,6 @@ def _build_command(cfg: HarnessConfig, artifact_dir: Path, run_id: str) -> tuple
         # Keep detection summary out of top-level artifacts unless explicitly requested.
         detection_summary_file = runtime_dir / ".detection_summary.json"
     effective_query_csv: Path | None = None
-    effective_tuning = _resolve_effective_tuning(cfg)
 
     cmd = [
         sys.executable,
@@ -329,37 +306,37 @@ def _build_command(cfg: HarnessConfig, artifact_dir: Path, run_id: str) -> tuple
     if not cfg.use_heuristics:
         cmd += [
             "--pdf-extract-tasks",
-            str(effective_tuning["pdf_extract_tasks"]),
+            str(cfg.pdf_extract_workers),
             "--pdf-extract-cpus-per-task",
-            str(effective_tuning["pdf_extract_cpus_per_task"]),
+            str(cfg.pdf_extract_num_cpus),
             "--pdf-extract-batch-size",
-            str(effective_tuning["pdf_extract_batch_size"]),
+            str(cfg.pdf_extract_batch_size),
             "--pdf-split-batch-size",
-            str(effective_tuning["pdf_split_batch_size"]),
+            str(cfg.pdf_split_batch_size),
             "--page-elements-batch-size",
-            str(effective_tuning["page_elements_batch_size"]),
+            str(cfg.page_elements_batch_size),
             "--page-elements-actors",
-            str(effective_tuning["page_elements_actors"]),
+            str(cfg.page_elements_workers),
             "--ocr-actors",
-            str(effective_tuning["ocr_actors"]),
+            str(cfg.ocr_workers),
             "--ocr-batch-size",
-            str(effective_tuning["ocr_batch_size"]),
+            str(cfg.ocr_batch_size),
             "--embed-actors",
-            str(effective_tuning["embed_actors"]),
+            str(cfg.embed_workers),
             "--embed-batch-size",
-            str(effective_tuning["embed_batch_size"]),
+            str(cfg.embed_batch_size),
             "--page-elements-cpus-per-actor",
-            str(effective_tuning["page_elements_cpus_per_actor"]),
+            str(cfg.page_elements_cpus_per_actor),
             "--ocr-cpus-per-actor",
-            str(effective_tuning["ocr_cpus_per_actor"]),
+            str(cfg.ocr_cpus_per_actor),
             "--embed-cpus-per-actor",
-            str(effective_tuning["embed_cpus_per_actor"]),
+            str(cfg.embed_cpus_per_actor),
             "--page-elements-gpus-per-actor",
-            str(effective_tuning["page_elements_gpus_per_actor"]),
+            str(cfg.gpu_page_elements),
             "--ocr-gpus-per-actor",
-            str(effective_tuning["ocr_gpus_per_actor"]),
+            str(cfg.gpu_ocr),
             "--embed-gpus-per-actor",
-            str(effective_tuning["embed_gpus_per_actor"]),
+            str(cfg.gpu_embed),
         ]
 
     cmd += [
@@ -548,7 +525,6 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
             "dataset_dir": cfg.dataset_dir,
             "preset": cfg.preset,
             "run_mode": cfg.run_mode,
-            "auto_tuning": cfg.auto_tuning,
             "query_csv": cfg.query_csv,
             "effective_query_csv": str(effective_query_csv) if effective_query_csv is not None else None,
             "input_type": cfg.input_type,
