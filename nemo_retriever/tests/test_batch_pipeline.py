@@ -20,6 +20,9 @@ class _FakeDataset:
     def take_all(self):
         return []
 
+    def count(self):
+        return 1
+
     def groupby(self, _key):
         class _FakeGrouped:
             @staticmethod
@@ -80,6 +83,18 @@ class _FakeIngestor:
         self.embed_params = params
         return self
 
+    def vdb_upload(self, params=None):
+        return self
+
+    def store(self, params=None):
+        return self
+
+    def caption(self, params=None):
+        return self
+
+    def dedup(self, params=None):
+        return self
+
     def ingest(self, params=None):
         return _FakeDataset()
 
@@ -108,8 +123,6 @@ def test_batch_pipeline_accepts_multimodal_embed_and_page_image_flags(tmp_path, 
 
     fake_ingestor = _FakeIngestor()
     monkeypatch.setattr(batch_pipeline, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
-    monkeypatch.setattr(batch_pipeline, "_ensure_lancedb_table", lambda *args, **kwargs: None)
-    monkeypatch.setattr(batch_pipeline, "handle_lancedb", lambda *args, **kwargs: None)
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(shutdown=lambda: None))
 
     class _FakeTable:
@@ -154,8 +167,6 @@ def test_batch_pipeline_routes_audio_input_to_audio_ingestor(tmp_path, monkeypat
 
     fake_ingestor = _FakeIngestor()
     monkeypatch.setattr(batch_pipeline, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
-    monkeypatch.setattr(batch_pipeline, "_ensure_lancedb_table", lambda *args, **kwargs: None)
-    monkeypatch.setattr(batch_pipeline, "handle_lancedb", lambda *args, **kwargs: None)
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(shutdown=lambda: None))
     monkeypatch.setattr(
         batch_pipeline, "asr_params_from_env", lambda: SimpleNamespace(model_copy=lambda update: update)
@@ -206,8 +217,6 @@ def test_batch_pipeline_routes_beir_mode_to_evaluator(tmp_path, monkeypatch) -> 
 
     fake_ingestor = _FakeIngestor()
     monkeypatch.setattr(batch_pipeline, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
-    monkeypatch.setattr(batch_pipeline, "_ensure_lancedb_table", lambda *args, **kwargs: None)
-    monkeypatch.setattr(batch_pipeline, "handle_lancedb", lambda *args, **kwargs: None)
     monkeypatch.setattr(detection_summary_module, "print_run_summary", lambda *args, **kwargs: None)
 
     class _FakeTable:
@@ -267,8 +276,6 @@ def test_batch_pipeline_accepts_harness_runtime_metric_flags(tmp_path, monkeypat
 
     fake_ingestor = _FakeIngestor()
     monkeypatch.setattr(batch_pipeline, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
-    monkeypatch.setattr(batch_pipeline, "_ensure_lancedb_table", lambda *args, **kwargs: None)
-    monkeypatch.setattr(batch_pipeline, "handle_lancedb", lambda *args, **kwargs: None)
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(shutdown=lambda: None))
 
     class _FakeTable:
