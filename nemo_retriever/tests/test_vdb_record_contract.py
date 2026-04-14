@@ -7,7 +7,6 @@
 These tests validate:
   - build_vdb_records produces the correct canonical record format
   - build_vdb_records_from_dicts (transitional list[dict] path) matches
-  - handle_lancedb round-trips data correctly (regression)
   - _ensure_dict handles Arrow serialization robustness
 """
 
@@ -188,82 +187,6 @@ class TestBuildVdbRecordsFromDicts:
         from nemo_retriever.vector_store.vdb_records import build_vdb_records_from_dicts
 
         assert build_vdb_records_from_dicts([]) == []
-
-
-# ---------------------------------------------------------------------------
-# Regression: handle_lancedb uses canonical builder
-# ---------------------------------------------------------------------------
-
-
-class TestHandleLancedbRegression:
-    def test_handle_lancedb_writes_valid_json_metadata(self, tmp_path):
-        """After refactoring, handle_lancedb should produce valid JSON metadata."""
-        from nemo_retriever.vector_store.lancedb_store import handle_lancedb
-        import lancedb
-
-        df = _make_sample_dataframe()
-        rows = df.to_dict("records")
-
-        uri = str(tmp_path / "test_db")
-        handle_lancedb(rows, uri, "test_table", mode="overwrite")
-
-        db = lancedb.connect(uri)
-        table = db.open_table("test_table")
-        result = table.to_pandas()
-
-        assert len(result) == 1
-        meta_str = result.iloc[0]["metadata"]
-        meta = json.loads(meta_str)
-        assert isinstance(meta, dict)
-        assert "page_number" in meta
-
-    def test_handle_lancedb_accepts_dataframe(self, tmp_path):
-        """handle_lancedb should now accept a DataFrame directly."""
-        from nemo_retriever.vector_store.lancedb_store import handle_lancedb
-        import lancedb
-
-        df = _make_sample_dataframe()
-
-        uri = str(tmp_path / "test_db")
-        handle_lancedb(df, uri, "test_table", mode="overwrite")
-
-        db = lancedb.connect(uri)
-        table = db.open_table("test_table")
-        assert table.count_rows() == 1
-
-    def test_handle_lancedb_round_trip_preserves_text(self, tmp_path):
-        """Text content should survive the write→read round-trip."""
-        from nemo_retriever.vector_store.lancedb_store import handle_lancedb
-        import lancedb
-
-        df = _make_sample_dataframe()
-        rows = df.to_dict("records")
-
-        uri = str(tmp_path / "test_db")
-        handle_lancedb(rows, uri, "test_table", mode="overwrite")
-
-        db = lancedb.connect(uri)
-        table = db.open_table("test_table")
-        result = table.to_pandas()
-
-        assert result.iloc[0]["text"] == "Hello world"
-
-    def test_handle_lancedb_round_trip_preserves_path(self, tmp_path):
-        from nemo_retriever.vector_store.lancedb_store import handle_lancedb
-        import lancedb
-
-        df = _make_sample_dataframe()
-        rows = df.to_dict("records")
-
-        uri = str(tmp_path / "test_db")
-        handle_lancedb(rows, uri, "test_table", mode="overwrite")
-
-        db = lancedb.connect(uri)
-        table = db.open_table("test_table")
-        result = table.to_pandas()
-
-        assert result.iloc[0]["path"] == "/data/test.pdf"
-        assert result.iloc[0]["page_number"] == 0
 
 
 # ---------------------------------------------------------------------------

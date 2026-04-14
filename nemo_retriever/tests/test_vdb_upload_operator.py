@@ -211,16 +211,22 @@ class TestVDBUploadMilvus:
     def _make_milvus_params(self):
         return VdbUploadParams(backend="milvus", client_vdb_kwargs={"collection_name": "test"})
 
+    def _make_mock_client(self):
+        mock_client = MagicMock()
+        mock_client.collection_name = "test"
+        mock_client.get_connection_params.return_value = ("test", {"milvus_uri": "http://localhost:19530"})
+        mock_client.get_write_params.return_value = ("test", {"collection_name": "test"})
+        return mock_client
+
     @patch("nemo_retriever.graph.vdb_upload_operator.get_vdb_op_cls", create=True)
     def test_delegates_to_client_write_to_index(self, mock_get_cls):
-        mock_client = MagicMock()
+        mock_client = self._make_mock_client()
         mock_get_cls.return_value = lambda **kwargs: mock_client
 
         params = self._make_milvus_params()
         op = VDBUploadOperator(params=params)
         df = _make_embedded_df(3)
 
-        # Patch get_vdb_op_cls at the right location
         with patch("nv_ingest_client.util.vdb.get_vdb_op_cls", return_value=lambda **kw: mock_client):
             op.run(df)
 
@@ -234,7 +240,7 @@ class TestVDBUploadMilvus:
 
     @patch("nemo_retriever.graph.vdb_upload_operator.get_vdb_op_cls", create=True)
     def test_multiple_batches_call_write_per_batch(self, mock_get_cls):
-        mock_client = MagicMock()
+        mock_client = self._make_mock_client()
         mock_get_cls.return_value = lambda **kwargs: mock_client
 
         params = self._make_milvus_params()

@@ -203,14 +203,21 @@ class VDBUploadOperator(AbstractOperator, CPUOperator):
     # ------------------------------------------------------------------
 
     def _write_via_client(self, records: List[Dict[str, Any]]) -> None:
-        """Convert canonical records to NV-Ingest format and delegate to the client VDB."""
+        """Convert canonical records to NV-Ingest format and delegate to the client VDB.
+
+        Client VDB classes split their config into connection params
+        (for ``create_index``) and write params (for ``write_to_index``)
+        via ``get_connection_params()`` / ``get_write_params()``.  We
+        mirror the same dispatch that ``Milvus.run()`` uses.
+        """
         nvingest_records = _canonical_to_nvingest(records)
         if not nvingest_records:
             return
 
         if self._table is None:
-            # First batch — create collection schema.
-            self._client_vdb.create_index()
+            collection_name, create_params = self._client_vdb.get_connection_params()
+            self._client_vdb.create_index(collection_name=collection_name, **create_params)
             self._table = True  # sentinel: schema created
 
-        self._client_vdb.write_to_index(nvingest_records)
+        _, write_params = self._client_vdb.get_write_params()
+        self._client_vdb.write_to_index(nvingest_records, **write_params)
