@@ -490,6 +490,9 @@ def _build_command(
             "--no-recall-details",
         ]
 
+    cmd += ["--extract-text" if cfg.extract_text else "--no-extract-text"]
+    cmd += ["--extract-tables" if cfg.extract_tables else "--no-extract-tables"]
+    cmd += ["--extract-charts" if cfg.extract_charts else "--no-extract-charts"]
     cmd += ["--extract-page-as-image" if cfg.extract_page_as_image else "--no-extract-page-as-image"]
     if cfg.input_type == "audio":
         cmd += ["--segment-audio" if cfg.segment_audio else "--no-segment-audio"]
@@ -497,6 +500,12 @@ def _build_command(
         cmd += ["--audio-split-interval", str(cfg.audio_split_interval)]
     if cfg.extract_infographics:
         cmd += ["--extract-infographics"]
+    if cfg.use_graphic_elements:
+        cmd += ["--use-graphic-elements"]
+    if cfg.use_table_structure:
+        cmd += ["--use-table-structure"]
+    if cfg.table_output_format:
+        cmd += ["--table-output-format", cfg.table_output_format]
     if cfg.embed_modality:
         cmd += ["--structured-elements-modality", cfg.embed_modality]
     if cfg.page_elements_invoke_url:
