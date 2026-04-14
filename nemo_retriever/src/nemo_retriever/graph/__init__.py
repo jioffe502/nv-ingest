@@ -16,6 +16,7 @@ from nemo_retriever.graph.gpu_operator import GPUOperator
 from nemo_retriever.graph.graph_pipeline_registry import GraphPipelineRegistry, default_registry
 from nemo_retriever.graph.pipeline_graph import Graph, Node
 from nemo_retriever.graph.store_operator import StoreOperator
+from nemo_retriever.graph.vdb_upload_operator import VDBUploadOperator
 
 __all__ = [
     "AbstractExecutor",
@@ -32,6 +33,7 @@ __all__ = [
     "RayDataExecutor",
     "StoreOperator",
     "UDFOperator",
+    "VDBUploadOperator",
     "default_registry",
 ]
 

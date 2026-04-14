@@ -4,15 +4,16 @@
 
 from .__main__ import app
 from .lancedb_store import (
-    LanceDBConfig,
     create_lancedb_index,
     write_embeddings_to_lancedb,
     write_text_embeddings_dir_to_lancedb,
 )
+from .vdb_records import build_vdb_records, build_vdb_records_from_dicts
 
 __all__ = [
     "app",
-    "LanceDBConfig",
+    "build_vdb_records",
+    "build_vdb_records_from_dicts",
     "create_lancedb_index",
     "write_embeddings_to_lancedb",
     "write_text_embeddings_dir_to_lancedb",

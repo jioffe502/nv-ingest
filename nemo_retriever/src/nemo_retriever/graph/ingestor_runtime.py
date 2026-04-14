@@ -15,7 +15,7 @@ from nemo_retriever.chart.chart_detection import GraphicElementsActor
 from nemo_retriever.audio import ASRActor
 from nemo_retriever.audio import MediaChunkActor
 from nemo_retriever.dedup.dedup import dedup_images
-from nemo_retriever.graph import Graph, StoreOperator, UDFOperator
+from nemo_retriever.graph import Graph, StoreOperator, UDFOperator, VDBUploadOperator
 from nemo_retriever.graph.content_transforms import (
     _CONTENT_COLUMNS,
     collapse_content_to_page_rows,
@@ -243,9 +243,11 @@ def _resolve_execution_inputs(
     caption_params: Any | None,
     store_params: Any | None,
     embed_params: Any | None,
+    vdb_upload_params: Any | None,
     stage_order: tuple[str, ...],
 ) -> tuple[
     str,
+    Any | None,
     Any | None,
     Any | None,
     Any | None,
@@ -273,10 +275,12 @@ def _resolve_execution_inputs(
             caption_params,
             store_params,
             embed_params,
+            vdb_upload_params,
             stage_order,
         )
 
     stage_map = {stage.name: stage.params for stage in execution_plan.stages}
+    sink_map = {sink.name: sink.params for sink in execution_plan.sinks}
     return (
         execution_plan.extraction_mode,
         execution_plan.extract_params,
@@ -289,7 +293,8 @@ def _resolve_execution_inputs(
         stage_map.get("caption"),
         stage_map.get("store"),
         stage_map.get("embed"),
-        tuple(stage.name for stage in execution_plan.stages),
+        sink_map.get("vdb_upload"),
+        tuple(stage.name for stage in execution_plan.stages) + tuple(sink.name for sink in execution_plan.sinks),
     )
 
 
@@ -315,6 +320,7 @@ def _append_ordered_transform_stages(
     caption_params: Any | None,
     store_params: Any | None,
     embed_params: Any | None,
+    vdb_upload_params: Any | None,
     stage_order: tuple[str, ...],
     supports_dedup: bool,
     reshape_for_modal_content: bool,
@@ -324,7 +330,8 @@ def _append_ordered_transform_stages(
     pending_stages = [
         stage
         for stage in stage_order
-        if stage in {"dedup", "split", "caption", "store", "embed"} and (supports_dedup or stage != "dedup")
+        if stage in {"dedup", "split", "caption", "store", "embed", "vdb_upload"}
+        and (supports_dedup or stage != "dedup")
     ]
     if not pending_stages:
         if supports_dedup and dedup_params is not None:
@@ -337,6 +344,8 @@ def _append_ordered_transform_stages(
             pending_stages.append("split")
         if embed_params is not None:
             pending_stages.append("embed")
+        if vdb_upload_params is not None:
+            pending_stages.append("vdb_upload")
 
     for stage_name in pending_stages:
         if stage_name == "store" and store_params is not None:
@@ -374,6 +383,8 @@ def _append_ordered_transform_stages(
                         name="ExplodeContentToRows",
                     )
             graph = graph >> _BatchEmbedActor(params=embed_params)
+        elif stage_name == "vdb_upload" and vdb_upload_params is not None:
+            graph = graph >> VDBUploadOperator(params=vdb_upload_params)
 
     return graph
 
@@ -392,6 +403,7 @@ def build_graph(
     split_params: Any | None = None,
     caption_params: Any | None = None,
     store_params: Any | None = None,
+    vdb_upload_params: Any | None = None,
     stage_order: tuple[str, ...] = (),
 ) -> Graph:
     """Build a batch graph from explicit params or a shared execution plan."""
@@ -408,6 +420,7 @@ def build_graph(
         caption_params,
         store_params,
         embed_params,
+        vdb_upload_params,
         stage_order,
     ) = _resolve_execution_inputs(
         execution_plan=execution_plan,
@@ -422,6 +435,7 @@ def build_graph(
         caption_params=caption_params,
         store_params=store_params,
         embed_params=embed_params,
+        vdb_upload_params=vdb_upload_params,
         stage_order=stage_order,
     )
 
@@ -552,6 +566,7 @@ def build_graph(
         caption_params=caption_params,
         store_params=store_params,
         embed_params=embed_params,
+        vdb_upload_params=vdb_upload_params,
         stage_order=stage_order,
         supports_dedup=True,
         reshape_for_modal_content=True,

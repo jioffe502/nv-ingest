@@ -14,7 +14,8 @@ from nv_ingest_api.internal.schemas.transform.transform_text_embedding_schema im
 from nv_ingest_api.internal.transform.embed_text import transform_create_text_embeddings_internal
 
 from nemo_retriever.io.dataframe import validate_primitives_dataframe
-from nemo_retriever.vector_store.lancedb_store import LanceDBConfig, write_embeddings_to_lancedb
+from nemo_retriever.params.models import LanceDbParams
+from nemo_retriever.vector_store.lancedb_store import write_embeddings_to_lancedb
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def embed_text_from_primitives_df(
     *,
     transform_config: TextEmbeddingSchema,
     task_config: Optional[Dict[str, Any]] = None,
-    lancedb: Optional[LanceDBConfig] = None,
+    lancedb: Optional[LanceDbParams] = None,
     trace_info: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Generate embeddings for supported content types and write to metadata."""

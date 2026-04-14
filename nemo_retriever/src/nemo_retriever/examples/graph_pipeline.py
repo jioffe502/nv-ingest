@@ -48,9 +48,9 @@ from nemo_retriever.params import EmbedParams
 from nemo_retriever.params import ExtractParams
 from nemo_retriever.params import StoreParams
 from nemo_retriever.params import TextChunkParams
-from nemo_retriever.params.models import BatchTuningParams
+from nemo_retriever.params import VdbUploadParams
+from nemo_retriever.params.models import BatchTuningParams, LanceDbParams
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
-from nemo_retriever.vector_store.lancedb_store import handle_lancedb
 
 logger = logging.getLogger(__name__)
 app = typer.Typer()
@@ -117,23 +117,6 @@ def _configure_logging(log_file: Optional[Path], *, debug: bool = False) -> tupl
     )
     logger.info("Writing combined pipeline logs to %s", str(target))
     return fh, original_stdout, original_stderr
-
-
-def _ensure_lancedb_table(uri: str, table_name: str) -> None:
-    from nemo_retriever.vector_store.lancedb_utils import lancedb_schema
-    import lancedb
-    import pyarrow as pa
-
-    Path(uri).mkdir(parents=True, exist_ok=True)
-    db = lancedb.connect(uri)
-    try:
-        db.open_table(table_name)
-        return
-    except Exception:
-        pass
-    schema = lancedb_schema()
-    empty = pa.table({f.name: [] for f in schema}, schema=schema)
-    db.create_table(table_name, data=empty, schema=schema, mode="create")
 
 
 def _write_runtime_summary(
@@ -314,7 +297,6 @@ def main(
             os.environ["RAY_LOG_TO_DRIVER"] = "1" if ray_log_to_driver else "0"
 
         lancedb_uri = str(Path(lancedb_uri).expanduser().resolve())
-        _ensure_lancedb_table(lancedb_uri, LANCEDB_TABLE)
 
         remote_api_key = resolve_remote_api_key(api_key)
         extract_remote_api_key = remote_api_key
@@ -502,6 +484,21 @@ def main(
 
         ingestor = ingestor.embed(embed_params)
 
+        # VDB upload runs inside the graph — rows stream to LanceDB as they
+        # are produced, so we never need to collect the entire result set on
+        # the driver just for the LanceDB write.  Index creation happens
+        # automatically in GraphIngestor._finalize_vdb() after the pipeline.
+        ingestor = ingestor.vdb_upload(
+            VdbUploadParams(
+                lancedb=LanceDbParams(
+                    lancedb_uri=lancedb_uri,
+                    table_name=LANCEDB_TABLE,
+                    hybrid=hybrid,
+                    overwrite=True,
+                ),
+            )
+        )
+
         # ------------------------------------------------------------------
         # Execute the graph via the executor
         # ------------------------------------------------------------------
@@ -509,7 +506,7 @@ def main(
         ingest_start = time.perf_counter()
 
         # GraphIngestor.ingest() builds the Graph, creates the executor,
-        # and calls executor.ingest(file_patterns) returning:
+        # calls executor.ingest(file_patterns), and finalizes the VDB index.
         #   batch mode     -> materialized ray.data.Dataset
         #   inprocess mode -> pandas.DataFrame
         result = ingestor.ingest()
@@ -517,28 +514,32 @@ def main(
         ingestion_only_total_time = time.perf_counter() - ingest_start
 
         # ------------------------------------------------------------------
-        # Collect results
+        # Collect results (only when needed for detection summary / counting)
         # ------------------------------------------------------------------
         if run_mode == "batch":
             import ray
 
-            ray_download_start = time.perf_counter()
-            ingest_local_results = result.take_all()
-            ray_download_time = time.perf_counter() - ray_download_start
+            if detection_summary_file is not None:
+                ray_download_start = time.perf_counter()
+                ingest_local_results = result.take_all()
+                ray_download_time = time.perf_counter() - ray_download_start
 
-            import pandas as pd
+                import pandas as pd
 
-            result_df = pd.DataFrame(ingest_local_results)
-            num_rows = _count_input_units(result_df)
+                result_df = pd.DataFrame(ingest_local_results)
+                num_rows = _count_input_units(result_df)
+            else:
+                ray_download_time = 0.0
+                result_df = None
+                num_rows = result.count()
         else:
             import pandas as pd
 
             result_df = result
-            ingest_local_results = result_df.to_dict("records")
             ray_download_time = 0.0
             num_rows = _count_input_units(result_df)
 
-        if detection_summary_file is not None:
+        if detection_summary_file is not None and result_df is not None:
             from nemo_retriever.utils.detection_summary import (
                 collect_detection_summary_from_df,
                 write_detection_summary,
@@ -548,13 +549,6 @@ def main(
                 Path(detection_summary_file),
                 collect_detection_summary_from_df(result_df),
             )
-
-        # ------------------------------------------------------------------
-        # Write to LanceDB
-        # ------------------------------------------------------------------
-        lancedb_write_start = time.perf_counter()
-        handle_lancedb(ingest_local_results, lancedb_uri, LANCEDB_TABLE, hybrid=hybrid, mode="overwrite")
-        lancedb_write_time = time.perf_counter() - lancedb_write_start
 
         # ------------------------------------------------------------------
         # Recall / BEIR evaluation
@@ -574,10 +568,10 @@ def main(
                     "input_path": str(Path(input_path).resolve()),
                     "input_pages": int(num_rows),
                     "num_pages": int(num_rows),
-                    "num_rows": int(len(result_df.index)),
+                    "num_rows": int(num_rows),
                     "ingestion_only_secs": float(ingestion_only_total_time),
                     "ray_download_secs": float(ray_download_time),
-                    "lancedb_write_secs": float(lancedb_write_time),
+                    "lancedb_write_secs": 0.0,
                     "evaluation_secs": 0.0,
                     "total_secs": float(time.perf_counter() - ingest_start),
                     "evaluation_mode": evaluation_mode,
@@ -641,10 +635,10 @@ def main(
                         "input_path": str(Path(input_path).resolve()),
                         "input_pages": int(num_rows),
                         "num_pages": int(num_rows),
-                        "num_rows": int(len(result_df.index)),
+                        "num_rows": int(num_rows),
                         "ingestion_only_secs": float(ingestion_only_total_time),
                         "ray_download_secs": float(ray_download_time),
-                        "lancedb_write_secs": float(lancedb_write_time),
+                        "lancedb_write_secs": 0.0,
                         "evaluation_secs": 0.0,
                         "total_secs": float(time.perf_counter() - ingest_start),
                         "evaluation_mode": evaluation_mode,
@@ -690,10 +684,10 @@ def main(
                 "input_path": str(Path(input_path).resolve()),
                 "input_pages": int(num_rows),
                 "num_pages": int(num_rows),
-                "num_rows": int(len(result_df.index)),
+                "num_rows": int(num_rows),
                 "ingestion_only_secs": float(ingestion_only_total_time),
                 "ray_download_secs": float(ray_download_time),
-                "lancedb_write_secs": float(lancedb_write_time),
+                "lancedb_write_secs": 0.0,
                 "evaluation_secs": float(evaluation_total_time),
                 "total_secs": float(total_time),
                 "evaluation_mode": evaluation_mode,
@@ -717,7 +711,7 @@ def main(
             total_time,
             ingestion_only_total_time,
             ray_download_time,
-            lancedb_write_time,
+            0.0,
             evaluation_total_time,
             evaluation_metrics,
             evaluation_label=evaluation_label,

@@ -10,7 +10,8 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from nemo_retriever.vector_store.lancedb_store import LanceDBConfig, write_text_embeddings_dir_to_lancedb
+from nemo_retriever.params.models import LanceDbParams
+from nemo_retriever.vector_store.lancedb_store import write_text_embeddings_dir_to_lancedb
 
 console = Console()
 app = typer.Typer(help="Vector store stage: upload stage5 embeddings to a vector DB (LanceDB).")
@@ -54,8 +55,8 @@ def run(
       - `page_number`: page number from `metadata.content_metadata.page_number`
       - `path` / `source_id`: source identifiers
     """
-    cfg = LanceDBConfig(
-        uri=str(lancedb_uri),
+    cfg = LanceDbParams(
+        lancedb_uri=str(lancedb_uri),
         table_name=str(table_name),
         overwrite=bool(overwrite),
         create_index=bool(create_index),
@@ -73,7 +74,7 @@ def run(
     )
     console.print(
         f"[green]Done[/green] files={info['n_files']} processed={info['processed']} skipped={info['skipped']} "
-        f"failed={info['failed']} lancedb_uri={cfg.uri} table={cfg.table_name}"
+        f"failed={info['failed']} lancedb_uri={cfg.lancedb_uri} table={cfg.table_name}"
     )
 
 

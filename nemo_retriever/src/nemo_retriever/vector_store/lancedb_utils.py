@@ -11,6 +11,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def _ensure_dict(value: Any) -> Optional[Dict[str, Any]]:
+    """Coerce *value* to a dict, parsing JSON strings if needed.
+
+    Arrow serialization between Ray actors can convert dict columns to
+    strings.  This helper lets downstream code handle both forms.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
 def extract_embedding_from_row(
     row: Any,
     *,
@@ -18,14 +35,14 @@ def extract_embedding_from_row(
     embedding_key: str = "embedding",
 ) -> Optional[List[float]]:
     """Extract an embedding vector from a row."""
-    meta = getattr(row, "metadata", None)
-    if isinstance(meta, dict):
+    meta = _ensure_dict(getattr(row, "metadata", None))
+    if meta is not None:
         emb = meta.get("embedding")
         if isinstance(emb, list) and emb:
             return emb  # type: ignore[return-value]
 
-    payload = getattr(row, embedding_column, None)
-    if isinstance(payload, dict):
+    payload = _ensure_dict(getattr(row, embedding_column, None))
+    if payload is not None:
         emb = payload.get(embedding_key)
         if isinstance(emb, list) and emb:
             return emb  # type: ignore[return-value]
@@ -48,8 +65,8 @@ def extract_source_path_and_page(row: Any) -> Tuple[str, int]:
     except Exception:
         pass
 
-    meta = getattr(row, "metadata", None)
-    if isinstance(meta, dict):
+    meta = _ensure_dict(getattr(row, "metadata", None))
+    if meta is not None:
         source_path = meta.get("source_path")
         if isinstance(source_path, str) and source_path.strip():
             path = source_path.strip()
@@ -116,8 +133,8 @@ def build_lancedb_row(
         metadata_obj["pdf_page"] = pdf_page
     metadata_obj.update(_build_detection_metadata(row))
 
-    orig_meta = getattr(row, "metadata", None)
-    if isinstance(orig_meta, dict):
+    orig_meta = _ensure_dict(getattr(row, "metadata", None))
+    if orig_meta is not None:
         for key in ("chunk_index", "chunk_count"):
             if key in orig_meta:
                 metadata_obj[key] = orig_meta[key]

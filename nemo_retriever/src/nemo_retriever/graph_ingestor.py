@@ -43,6 +43,7 @@ from nemo_retriever.params import (
     HtmlChunkParams,
     StoreParams,
     TextChunkParams,
+    VdbUploadParams,
 )
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 
@@ -146,6 +147,7 @@ class GraphIngestor(ingestor):
         self._caption_params: Any = None
         self._dedup_params: Any = None
         self._store_params: Any = None
+        self._vdb_upload_params: Any = None
         # Ordered list of stage names; "extract" is tracked but excluded from
         # the post-extraction stage_order passed to graph builders.
         self._stage_order: List[str] = []
@@ -239,6 +241,17 @@ class GraphIngestor(ingestor):
         self._record_stage("embed")
         return self
 
+    def vdb_upload(self, params: Optional[VdbUploadParams] = None, **kwargs: Any) -> "GraphIngestor":
+        """Record a VDB upload sink.
+
+        Writes embeddings to a vector store as data flows through the graph,
+        eliminating the need to collect all results on the driver.  Index
+        creation happens automatically after the pipeline completes.
+        """
+        self._vdb_upload_params = _coerce(params, kwargs, default_factory=VdbUploadParams)
+        self._record_stage("vdb_upload")
+        return self
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -287,6 +300,7 @@ class GraphIngestor(ingestor):
                 caption_params=self._caption_params,
                 dedup_params=self._dedup_params,
                 store_params=self._store_params,
+                vdb_upload_params=self._vdb_upload_params,
                 stage_order=post_extract_order,
             )
             # Derive per-node Ray scheduling config from BatchTuningParams plus
@@ -295,6 +309,16 @@ class GraphIngestor(ingestor):
             derived_overrides = batch_tuning_to_node_overrides(
                 self._extract_params, self._embed_params, cluster_resources=cluster_resources
             )
+            # VDBUploadOperator must run with concurrency=1 to avoid table
+            # creation races — a single actor creates the table on its first
+            # write and appends on subsequent batches.  A large batch_size
+            # amortises per-call LanceDB disk I/O across many rows.
+            if self._vdb_upload_params is not None:
+                from nemo_retriever.graph.vdb_upload_operator import VDBUploadOperator
+
+                vdb_overrides = derived_overrides.setdefault(VDBUploadOperator.__name__, {})
+                vdb_overrides["concurrency"] = 1
+                vdb_overrides["batch_size"] = 64
             merged_overrides: Dict[str, Dict[str, Any]] = {}
             for node_name in set(derived_overrides) | set(self._node_overrides):
                 merged_overrides[node_name] = {
@@ -311,6 +335,7 @@ class GraphIngestor(ingestor):
             )
             result = executor.ingest(self._documents)
             self._rd_dataset = result
+            self._finalize_vdb()
             return result
         else:
             graph = build_graph(
@@ -325,11 +350,14 @@ class GraphIngestor(ingestor):
                 caption_params=self._caption_params,
                 dedup_params=self._dedup_params,
                 store_params=self._store_params,
+                vdb_upload_params=self._vdb_upload_params,
                 stage_order=post_extract_order,
             )
             executor = InprocessExecutor(graph, show_progress=self._show_progress)
             self._rd_dataset = None
-            return executor.ingest(self._documents)
+            result = executor.ingest(self._documents)
+            self._finalize_vdb()
+            return result
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -403,6 +431,65 @@ class GraphIngestor(ingestor):
 
     def get_dataset(self) -> Any:
         return self._rd_dataset
+
+    def _finalize_vdb(self) -> None:
+        """Create VDB indices after the pipeline writes all rows.
+
+        Delegates to the client VDB class for index creation.  For LanceDB
+        the client's ``write_to_index(table=table)`` builds the ANN (and
+        optionally FTS) index.  For other backends index creation is handled
+        during streaming writes.
+        """
+        if self._vdb_upload_params is None:
+            return
+
+        from nemo_retriever.params.models import LanceDbParams, VdbUploadParams
+
+        if isinstance(self._vdb_upload_params, VdbUploadParams):
+            backend_type = self._vdb_upload_params.backend
+            lance_params = self._vdb_upload_params.lancedb
+        elif isinstance(self._vdb_upload_params, LanceDbParams):
+            backend_type = "lancedb"
+            lance_params = self._vdb_upload_params
+        else:
+            return
+
+        if backend_type != "lancedb":
+            return
+
+        if not lance_params.create_index:
+            return
+
+        import lancedb
+
+        from nv_ingest_client.util.vdb import get_vdb_op_cls
+
+        try:
+            db = lancedb.connect(uri=lance_params.lancedb_uri)
+            table = db.open_table(lance_params.table_name)
+        except Exception:
+            return
+
+        ClientLanceDB = get_vdb_op_cls("lancedb")
+        client = ClientLanceDB(
+            uri=lance_params.lancedb_uri,
+            table_name=lance_params.table_name,
+            overwrite=False,
+            index_type=lance_params.index_type,
+            metric=lance_params.metric,
+            num_partitions=lance_params.num_partitions,
+            num_sub_vectors=lance_params.num_sub_vectors,
+            hybrid=lance_params.hybrid,
+            fts_language=lance_params.fts_language,
+        )
+        try:
+            client.write_to_index(None, table=table)
+        except RuntimeError:
+            logger.warning(
+                "Index creation failed (likely too few rows for %d partitions); skipping.",
+                lance_params.num_partitions,
+                exc_info=True,
+            )
 
     def _record_stage(self, name: str) -> None:
         """Append *name* to the stage order list (deduplicated in place)."""

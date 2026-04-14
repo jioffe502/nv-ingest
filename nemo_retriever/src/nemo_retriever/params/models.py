@@ -271,6 +271,8 @@ class EmbedParams(_ParamsModel):
 class VdbUploadParams(_ParamsModel):
     purge_results_after_upload: bool = True
     lancedb: LanceDbParams = Field(default_factory=LanceDbParams)
+    backend: str = "lancedb"  # "lancedb" | "milvus" | "opensearch"
+    client_vdb_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
 class StoreParams(_ParamsModel):
