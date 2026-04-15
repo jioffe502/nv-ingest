@@ -33,13 +33,11 @@ jobs:
       - name: Build Docker image
         run: |
           SECRET_ARG=""
-          DOWNLOAD_LLAMA="False"
           if [ -s ./scripts/private_local/hf_token.txt ]; then
             SECRET_ARG="--secret id=hf_token,src=./scripts/private_local/hf_token.txt"
-            DOWNLOAD_LLAMA="True"
           fi
           docker buildx create --use
-          docker buildx build --platform linux/arm64 --load --target test --build-arg GIT_COMMIT=${GITHUB_SHA} --build-arg BASE_IMG=ubuntu --build-arg BASE_IMG_TAG=jammy-20250415.1 --build-arg DOWNLOAD_LLAMA_TOKENIZER=${DOWNLOAD_LLAMA} $SECRET_ARG -t nv-ingest:latest .
+          docker buildx build --platform linux/arm64 --load --target test --build-arg GIT_COMMIT=${GITHUB_SHA} --build-arg BASE_IMG=ubuntu --build-arg BASE_IMG_TAG=jammy-20250415.1 --build-arg DOWNLOAD_LLAMA_TOKENIZER=True $SECRET_ARG -t nv-ingest:latest .
 
       - name: Cleanup HF token file
         if: always()
@@ -48,7 +46,7 @@ jobs:
       # Only test a random subset (see --random-selection) because running pytest with QEMU emulation can be very slow.
       - name: Run Pytest inside Docker container
         run: |
-          docker run --platform=linux/arm64 nv-ingest:latest bash -lc "export PYTHONPATH=/workspace:/workspace/api:/workspace/client:/workspace/tests/service_tests:\${PYTHONPATH} && python -m pip install --disable-pip-version-check 'pymilvus[milvus_lite]' && python -m pytest -rs -m 'not integration' --random-selection 100 tests/service_tests client/client_tests api/api_tests"
+          docker run --platform=linux/arm64 nv-ingest:latest bash -lc "python -m pip install --disable-pip-version-check 'pymilvus[milvus_lite]' && pytest -rs -m 'not integration' --random-selection 100 tests/service_tests client/client_tests api/api_tests"
 
       - name: Upload test report
         uses: actions/upload-artifact@v4

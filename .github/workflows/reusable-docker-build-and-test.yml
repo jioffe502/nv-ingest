@@ -26,16 +26,6 @@ on:
         required: false
         type: string
         default: 'jammy-20250415.1'
-      source-ref:
-        description: 'Git ref or SHA to check out before building/testing'
-        required: false
-        type: string
-        default: ''
-      git-commit:
-        description: 'Value to pass to the Docker GIT_COMMIT build arg'
-        required: false
-        type: string
-        default: ''
       runner:
         description: 'GitHub runner to use'
         required: false
@@ -81,8 +71,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source-ref != '' && inputs.source-ref || github.sha }}
 
       - name: Set up QEMU
         if: ${{ inputs.use-qemu }}
@@ -105,7 +93,6 @@ jobs:
           set -euo pipefail
 
           TAGS="${{ inputs.tags }}"
-          GIT_COMMIT="${{ inputs.git-commit != '' && inputs.git-commit || github.sha }}"
           TAG_ARGS=""
 
           sanitize_image_ref() {
@@ -163,7 +150,7 @@ jobs:
             --platform "${{ inputs.platform }}" \
             --load \
             --target "${{ inputs.target }}" \
-            --build-arg GIT_COMMIT=${GIT_COMMIT} \
+            --build-arg GIT_COMMIT=${GITHUB_SHA} \
             --build-arg BASE_IMG="${{ inputs.base-image }}" \
             --build-arg BASE_IMG_TAG="${{ inputs.base-image-tag }}" \
             --build-arg DOWNLOAD_LLAMA_TOKENIZER=$DOWNLOAD_LLAMA \
