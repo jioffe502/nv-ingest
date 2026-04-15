@@ -37,6 +37,8 @@ jobs:
       tags: 'nv-ingest:pr-${{ github.event.pull_request.number }}'
       base-image: 'ubuntu'
       base-image-tag: 'jammy-20250415.1'
+      source-ref: ${{ github.event.pull_request.head.sha }}
+      git-commit: ${{ github.event.pull_request.head.sha }}
       test-selection: 'full'
       pytest-markers: 'not integration'
       coverage: true
