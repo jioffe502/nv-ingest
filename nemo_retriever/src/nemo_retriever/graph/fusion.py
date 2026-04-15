@@ -32,7 +32,7 @@ class GraphCompilationResult:
 
 
 class FusedOperator(AbstractOperator):
-    """Composite operator that runs a known-safe stage chain via ``process()`` only."""
+    """Composite operator that runs a known-safe stage chain."""
 
     def __init__(
         self,
@@ -62,6 +62,13 @@ class FusedOperator(AbstractOperator):
 
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data
+
+    def __call__(self, data: Any, **kwargs: Any) -> Any:
+        """Preserve unfused Ray batch semantics by invoking each stage callable."""
+        current = self.preprocess(data, **kwargs)
+        for operator in self._ensure_operators():
+            current = operator(current, **kwargs)
+        return self.postprocess(current, **kwargs)
 
     def _ensure_operators(self) -> list[AbstractOperator]:
         if self._operators is None:

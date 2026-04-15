@@ -4,6 +4,8 @@
 
 """Unit tests for Node, Graph, >> chaining (including auto-wrap), and Executors."""
 
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -121,6 +123,46 @@ class FusionOCROperator(ProcessOnlyFusionSafe, DataFrameMarkerOperator):
     fusion_stage_id = "ocr"
     fusion_next_stage_ids = ()
     fusion_can_start_segment = False
+
+
+class FusionWrappedFailureOperator(ProcessOnlyFusionSafe, AbstractOperator):
+    fusion_stage_id = "page_elements"
+    fusion_next_stage_ids = ("ocr",)
+    fusion_can_start_segment = True
+
+    def preprocess(self, data: Any, **kwargs: Any) -> Any:
+        return data
+
+    def process(self, data: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("wrapped boom")
+
+    def postprocess(self, data: Any, **kwargs: Any) -> Any:
+        return data
+
+    def __call__(self, data: Any, **kwargs: Any) -> Any:
+        try:
+            return self.run(data, **kwargs)
+        except RuntimeError as exc:
+            out = data.copy()
+            out["wrapped_error"] = [str(exc) for _ in range(len(out.index))]
+            return out
+
+
+class FusionWrapperObserverOperator(ProcessOnlyFusionSafe, AbstractOperator):
+    fusion_stage_id = "ocr"
+    fusion_next_stage_ids = ()
+    fusion_can_start_segment = False
+
+    def preprocess(self, data: Any, **kwargs: Any) -> Any:
+        return data
+
+    def process(self, data: Any, **kwargs: Any) -> Any:
+        out = data.copy()
+        out["wrapper_seen"] = out["wrapped_error"].fillna("missing")
+        return out
+
+    def postprocess(self, data: Any, **kwargs: Any) -> Any:
+        return data
 
 
 class ParamsHolderOperator(AbstractOperator):
@@ -936,6 +978,7 @@ class TestRayDataExecutor:
 
         monkeypatch.setitem(sys.modules, "ray", fake_ray)
         monkeypatch.setitem(sys.modules, "ray.data", fake_ray_data)
+
         monkeypatch.setattr(
             "nemo_retriever.graph.executor.gather_cluster_resources",
             lambda ray: SimpleNamespace(available_gpu_count=lambda: 0),
@@ -948,6 +991,68 @@ class TestRayDataExecutor:
         assert isinstance(result, _FakeDataset)
         assert captured["paths"] == [str(pdf_path)]
         assert captured["include_paths"] is True
+
+    def test_ingest_fused_operator_preserves_stage_call_wrappers(self, monkeypatch):
+        graph = Graph()
+        graph.add_chain(
+            Node(
+                FusionWrappedFailureOperator(),
+                name="PageElementDetectionActor",
+                operator_class=FusionWrappedFailureOperator,
+                operator_kwargs={},
+            ),
+            Node(
+                FusionWrapperObserverOperator(),
+                name="OCRActor",
+                operator_class=FusionWrapperObserverOperator,
+                operator_kwargs={},
+            ),
+        )
+
+        class _FakeRayDataset:
+            def __init__(self, df: pd.DataFrame) -> None:
+                self.df = df
+                self.map_calls: list[type[AbstractOperator]] = []
+
+            def map_batches(self, operator_class, *, fn_constructor_kwargs=None, **kwargs):
+                del kwargs
+                self.map_calls.append(operator_class)
+                operator = operator_class(**(fn_constructor_kwargs or {}))
+                self.df = operator(self.df)
+                return self
+
+            def materialize(self):
+                return self
+
+        fake_context = SimpleNamespace(enable_rich_progress_bars=None, use_ray_tqdm=None)
+        fake_ray_module = ModuleType("ray")
+        fake_ray_data_module = ModuleType("ray.data")
+
+        class _FakeDataContext:
+            @staticmethod
+            def get_current():
+                return fake_context
+
+        fake_ray_data_module.Dataset = _FakeRayDataset
+        fake_ray_data_module.DataContext = _FakeDataContext
+        fake_ray_module.data = fake_ray_data_module
+        fake_ray_module.is_initialized = lambda: True
+        fake_ray_module.init = lambda **kwargs: None
+
+        monkeypatch.setitem(sys.modules, "ray", fake_ray_module)
+        monkeypatch.setitem(sys.modules, "ray.data", fake_ray_data_module)
+        monkeypatch.setattr(
+            "nemo_retriever.graph.executor.gather_cluster_resources",
+            lambda ray: SimpleNamespace(available_gpu_count=lambda: 0),
+        )
+        monkeypatch.setattr("nemo_retriever.graph.executor.resolve_graph", lambda graph, cluster: graph)
+
+        dataset = _FakeRayDataset(pd.DataFrame({"value": [1]}))
+        result = RayDataExecutor(graph, enable_fusion=True).ingest(dataset)
+
+        assert result.map_calls == [FusedOperator]
+        assert result.df["wrapped_error"].tolist() == ["wrapped boom"]
+        assert result.df["wrapper_seen"].tolist() == ["wrapped boom"]
 
 
 # ---------------------------------------------------------------------------
