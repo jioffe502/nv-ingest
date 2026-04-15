@@ -166,7 +166,7 @@ jobs:
           PLATFORM="${{ inputs.platform }}"
           MARKERS="${{ inputs.pytest-markers }}"
           TEST_PATHS="tests/service_tests client/client_tests api/api_tests"
-          PYTHONPATH_PREFIX="export PYTHONPATH=/workspace:/workspace/api:/workspace/client:/workspace/tests/service_tests:\${PYTHONPATH} &&"
+          PYTHONPATH_PREFIX="export PYTHONPATH=/workspace:/workspace/api:/workspace/client:/workspace/tests/service_tests:/workspace/tests/service_tests/util/framework/orchestration/ray:\${PYTHONPATH} &&"
 
           sanitize_image_ref() {
             local ref="$1"
