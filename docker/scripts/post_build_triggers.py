@@ -43,11 +43,8 @@ if not token:
 model_path = os.environ.get("MODEL_PREDOWNLOAD_PATH")
 
 if os.getenv("DOWNLOAD_LLAMA_TOKENIZER") == "True":
-    if not token:
-        print("Skipping gated Llama tokenizer download because no HF token was provided.")
-    else:
-        tokenizer_path = os.path.join(model_path, "llama-3.2-1b/tokenizer/")
-        download_tokenizer("meta-llama/Llama-3.2-1B", tokenizer_path, token)
+    tokenizer_path = os.path.join(model_path, "llama-3.2-1b/tokenizer/")
+    download_tokenizer("meta-llama/Llama-3.2-1B", tokenizer_path, token)
 else:
     tokenizer_path = os.path.join(model_path, "e5-large-unsupervised/tokenizer/")
     download_tokenizer("intfloat/e5-large-unsupervised", tokenizer_path, token)
