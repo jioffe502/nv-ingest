@@ -179,6 +179,7 @@ jobs:
           PLATFORM="${{ inputs.platform }}"
           MARKERS="${{ inputs.pytest-markers }}"
           TEST_PATHS="tests/service_tests client/client_tests api/api_tests"
+          PYTHONPATH_PREFIX="export PYTHONPATH=/workspace:/workspace/api:/workspace/client:/workspace/tests/service_tests:\${PYTHONPATH} &&"
 
           sanitize_image_ref() {
             local ref="$1"
@@ -228,10 +229,11 @@ jobs:
           fi
 
           if [ "${{ inputs.test-selection }}" = "full" ]; then
-            CMD="python -m pip install --disable-pip-version-check 'pymilvus[milvus_lite]' && python -m pytest -rs -m \"$MARKERS\" $COV_ARGS $TEST_PATHS"
+            CMD="$PYTHONPATH_PREFIX python -m pip install --disable-pip-version-check 'pymilvus[milvus_lite]' && python -m pytest -rs -m \"$MARKERS\" $COV_ARGS $TEST_PATHS"
           else
             N="${{ inputs.random-count }}"
             CMD="set -euo pipefail; \
+              $PYTHONPATH_PREFIX \
               python -m pip install --disable-pip-version-check 'pymilvus[milvus_lite]'; \
               python -m pytest --collect-only -q $TEST_PATHS | grep '::' | shuf -n \"$N\" > /tmp/selected-tests.txt; \
               python -m pytest -rs -m \"$MARKERS\" $COV_ARGS \$(cat /tmp/selected-tests.txt)"
