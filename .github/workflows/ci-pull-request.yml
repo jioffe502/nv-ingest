@@ -1,7 +1,7 @@
 name: Pull Request Validation
 
 on:
-  pull_request_target:
+  pull_request:
     types:
       - opened
       - synchronize
@@ -39,12 +39,11 @@ jobs:
       base-image-tag: 'jammy-20250415.1'
       source-ref: ${{ github.event.pull_request.head.sha }}
       git-commit: ${{ github.event.pull_request.head.sha }}
+      download-llama-tokenizer: false
       test-selection: 'full'
       pytest-markers: 'not integration'
       coverage: true
       runner: 'linux-large-disk'
-    secrets:
-      HF_ACCESS_TOKEN: ${{ secrets.HF_ACCESS_TOKEN }}
 
   # Summary job
   pr-validation-complete:
