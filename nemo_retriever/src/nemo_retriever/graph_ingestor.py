@@ -27,6 +27,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from nemo_retriever.graph import InprocessExecutor, RayDataExecutor
@@ -46,6 +47,8 @@ from nemo_retriever.params import (
     VdbUploadParams,
 )
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_api_key(params: Any) -> Any:
@@ -148,6 +151,7 @@ class GraphIngestor(ingestor):
         self._dedup_params: Any = None
         self._store_params: Any = None
         self._vdb_upload_params: Any = None
+        self._vdb_op: Any = None
         # Ordered list of stage names; "extract" is tracked but excluded from
         # the post-extraction stage_order passed to graph builders.
         self._stage_order: List[str] = []
@@ -241,14 +245,32 @@ class GraphIngestor(ingestor):
         self._record_stage("embed")
         return self
 
-    def vdb_upload(self, params: Optional[VdbUploadParams] = None, **kwargs: Any) -> "GraphIngestor":
+    def vdb_upload(
+        self,
+        params: Optional[VdbUploadParams] = None,
+        *,
+        vdb_op: Any = None,
+        **kwargs: Any,
+    ) -> "GraphIngestor":
         """Record a VDB upload sink.
 
         Writes embeddings to a vector store as data flows through the graph,
         eliminating the need to collect all results on the driver.  Index
         creation happens automatically after the pipeline completes.
+
+        Parameters
+        ----------
+        params:
+            Upload/record-shaping config.  When ``vdb_op`` is ``None`` this
+            also determines which backend to construct.
+        vdb_op:
+            Optional pre-constructed client VDB instance (e.g. ``Milvus(...)``
+            or ``LanceDB(...)`` from ``nv_ingest_client.util.vdb``).  When
+            provided, the operator uses it directly instead of building one
+            from ``params``.
         """
         self._vdb_upload_params = _coerce(params, kwargs, default_factory=VdbUploadParams)
+        self._vdb_op = vdb_op
         self._record_stage("vdb_upload")
         return self
 
@@ -301,6 +323,7 @@ class GraphIngestor(ingestor):
                 dedup_params=self._dedup_params,
                 store_params=self._store_params,
                 vdb_upload_params=self._vdb_upload_params,
+                vdb_op=self._vdb_op,
                 stage_order=post_extract_order,
             )
             # Derive per-node Ray scheduling config from BatchTuningParams plus
@@ -351,6 +374,7 @@ class GraphIngestor(ingestor):
                 dedup_params=self._dedup_params,
                 store_params=self._store_params,
                 vdb_upload_params=self._vdb_upload_params,
+                vdb_op=self._vdb_op,
                 stage_order=post_extract_order,
             )
             executor = InprocessExecutor(graph, show_progress=self._show_progress)
@@ -445,43 +469,44 @@ class GraphIngestor(ingestor):
 
         from nemo_retriever.params.models import LanceDbParams, VdbUploadParams
 
-        if isinstance(self._vdb_upload_params, VdbUploadParams):
+        if self._vdb_op is not None:
+            backend_type = type(self._vdb_op).__name__.lower()
+        elif isinstance(self._vdb_upload_params, VdbUploadParams):
             backend_type = self._vdb_upload_params.backend
-            lance_params = self._vdb_upload_params.lancedb
         elif isinstance(self._vdb_upload_params, LanceDbParams):
             backend_type = "lancedb"
-            lance_params = self._vdb_upload_params
         else:
             return
 
         if backend_type != "lancedb":
             return
 
+        if isinstance(self._vdb_upload_params, VdbUploadParams):
+            lance_params = self._vdb_upload_params.lancedb
+        elif isinstance(self._vdb_upload_params, LanceDbParams):
+            lance_params = self._vdb_upload_params
+        else:
+            lance_params = LanceDbParams()
+
         if not lance_params.create_index:
             return
 
         import lancedb
 
-        from nv_ingest_client.util.vdb import get_vdb_op_cls
+        from nemo_retriever.vector_store.lancedb_utils import build_client_lancedb
+
+        uri = getattr(self._vdb_op, "uri", lance_params.lancedb_uri) if self._vdb_op else lance_params.lancedb_uri
+        table_name = (
+            getattr(self._vdb_op, "table_name", lance_params.table_name) if self._vdb_op else lance_params.table_name
+        )
 
         try:
-            db = lancedb.connect(uri=lance_params.lancedb_uri)
-            table = db.open_table(lance_params.table_name)
+            db = lancedb.connect(uri=uri)
+            table = db.open_table(table_name)
         except Exception:
             return
 
-        ClientLanceDB = get_vdb_op_cls("lancedb")
-        client = ClientLanceDB(
-            uri=lance_params.lancedb_uri,
-            table_name=lance_params.table_name,
-            overwrite=False,
-            index_type=lance_params.index_type,
-            metric=lance_params.metric,
-            num_partitions=lance_params.num_partitions,
-            num_sub_vectors=lance_params.num_sub_vectors,
-            hybrid=lance_params.hybrid,
-            fts_language=lance_params.fts_language,
-        )
+        client = self._vdb_op if self._vdb_op is not None else build_client_lancedb(lance_params, overwrite=False)
         try:
             client.write_to_index(None, table=table)
         except RuntimeError:

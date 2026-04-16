@@ -56,24 +56,3 @@ def build_vdb_records(
         if row_out is not None:
             rows.append(row_out)
     return rows
-
-
-def build_vdb_records_from_dicts(
-    records: List[Dict[str, Any]],
-    *,
-    embedding_column: str = "text_embeddings_1b_v2",
-    embedding_key: str = "embedding",
-    text_column: str = "text",
-    include_text: bool = True,
-) -> List[Dict[str, Any]]:
-    """Convert a list of dicts (e.g. from ``take_all()``) into canonical VDB records."""
-    if not records:
-        return []
-    df = pd.DataFrame(records)
-    return build_vdb_records(
-        df,
-        embedding_column=embedding_column,
-        embedding_key=embedding_key,
-        text_column=text_column,
-        include_text=include_text,
-    )

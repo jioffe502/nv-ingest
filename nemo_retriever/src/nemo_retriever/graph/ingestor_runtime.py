@@ -321,6 +321,7 @@ def _append_ordered_transform_stages(
     store_params: Any | None,
     embed_params: Any | None,
     vdb_upload_params: Any | None,
+    vdb_op: Any | None,
     stage_order: tuple[str, ...],
     supports_dedup: bool,
     reshape_for_modal_content: bool,
@@ -384,7 +385,7 @@ def _append_ordered_transform_stages(
                     )
             graph = graph >> _BatchEmbedActor(params=embed_params)
         elif stage_name == "vdb_upload" and vdb_upload_params is not None:
-            graph = graph >> VDBUploadOperator(params=vdb_upload_params)
+            graph = graph >> VDBUploadOperator(params=vdb_upload_params, vdb_op=vdb_op)
 
     return graph
 
@@ -404,6 +405,7 @@ def build_graph(
     caption_params: Any | None = None,
     store_params: Any | None = None,
     vdb_upload_params: Any | None = None,
+    vdb_op: Any | None = None,
     stage_order: tuple[str, ...] = (),
 ) -> Graph:
     """Build a batch graph from explicit params or a shared execution plan."""
@@ -567,6 +569,7 @@ def build_graph(
         store_params=store_params,
         embed_params=embed_params,
         vdb_upload_params=vdb_upload_params,
+        vdb_op=vdb_op,
         stage_order=stage_order,
         supports_dedup=True,
         reshape_for_modal_content=True,

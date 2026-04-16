@@ -161,29 +161,6 @@ def build_lancedb_row(
     return row_out
 
 
-def build_lancedb_rows(
-    df: Any,
-    *,
-    embedding_column: str = "text_embeddings_1b_v2",
-    embedding_key: str = "embedding",
-    text_column: str = "text",
-    include_text: bool = True,
-) -> List[Dict[str, Any]]:
-    """Build LanceDB rows from a pandas DataFrame."""
-    rows: List[Dict[str, Any]] = []
-    for row in df.itertuples(index=False):
-        row_out = build_lancedb_row(
-            row,
-            embedding_column=embedding_column,
-            embedding_key=embedding_key,
-            text_column=text_column,
-            include_text=include_text,
-        )
-        if row_out is not None:
-            rows.append(row_out)
-    return rows
-
-
 def lancedb_schema(vector_dim: int = 2048) -> Any:
     """Return a PyArrow schema for the standard LanceDB table layout."""
     import pyarrow as pa  # type: ignore
@@ -211,6 +188,28 @@ def infer_vector_dim(rows: List[Dict[str, Any]]) -> int:
         if isinstance(vector, list) and vector:
             return len(vector)
     return 0
+
+
+def build_client_lancedb(lance_params: Any, *, overwrite: Optional[bool] = None) -> Any:
+    """Construct an ``nv_ingest_client.util.vdb.LanceDB`` from ``LanceDbParams``.
+
+    Pass ``overwrite=False`` to open an existing table (e.g. for post-pipeline
+    index creation); otherwise ``lance_params.overwrite`` is used.
+    """
+    from nv_ingest_client.util.vdb import get_vdb_op_cls
+
+    LanceDB = get_vdb_op_cls("lancedb")
+    return LanceDB(
+        uri=lance_params.lancedb_uri,
+        table_name=lance_params.table_name,
+        overwrite=lance_params.overwrite if overwrite is None else overwrite,
+        index_type=lance_params.index_type,
+        metric=lance_params.metric,
+        num_partitions=lance_params.num_partitions,
+        num_sub_vectors=lance_params.num_sub_vectors,
+        hybrid=lance_params.hybrid,
+        fts_language=lance_params.fts_language,
+    )
 
 
 def create_or_append_lancedb_table(

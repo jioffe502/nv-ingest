@@ -257,6 +257,65 @@ class TestVDBUploadMilvus:
 
 
 # ---------------------------------------------------------------------------
+# Pre-constructed VDB injection
+# ---------------------------------------------------------------------------
+
+
+class TestPreConstructedVDB:
+    """Operator accepts a pre-built client VDB instance (lead's review ask)."""
+
+    def test_accepts_client_lancedb_instance(self, lance_params):
+        """Passing a client LanceDB object skips internal construction."""
+        from nv_ingest_client.util.vdb import get_vdb_op_cls
+
+        LanceDB = get_vdb_op_cls("lancedb")
+        client_vdb = LanceDB(
+            uri=lance_params.lancedb_uri,
+            table_name=lance_params.table_name,
+            overwrite=True,
+        )
+
+        op = VDBUploadOperator(vdb_op=client_vdb)
+        assert op._client_vdb is client_vdb
+        assert op._backend_name == "lancedb"
+
+        op.run(_make_embedded_df(2))
+
+        import lancedb
+
+        db = lancedb.connect(lance_params.lancedb_uri)
+        table = db.open_table(lance_params.table_name)
+        assert table.count_rows() == 2
+
+    def test_accepts_arbitrary_vdb_instance(self):
+        """A non-LanceDB instance routes through the client write path."""
+        mock_vdb = MagicMock()
+        type(mock_vdb).__name__ = "Milvus"
+        mock_vdb.get_connection_params.return_value = ("c", {"milvus_uri": "x"})
+        mock_vdb.get_write_params.return_value = ("c", {"collection_name": "c"})
+
+        op = VDBUploadOperator(vdb_op=mock_vdb)
+        assert op._backend_name == "milvus"
+        assert op._client_vdb is mock_vdb
+
+        op.run(_make_embedded_df(2))
+
+        mock_vdb.create_index.assert_called_once()
+        mock_vdb.write_to_index.assert_called_once()
+
+    def test_constructor_kwargs_round_trip(self):
+        """get_constructor_kwargs captures both params and vdb_op for Ray reconstruction."""
+        mock_vdb = MagicMock()
+        type(mock_vdb).__name__ = "Milvus"
+
+        op = VDBUploadOperator(params=VdbUploadParams(), vdb_op=mock_vdb)
+        kwargs = op.get_constructor_kwargs()
+        assert "vdb_op" in kwargs
+        assert kwargs["vdb_op"] is mock_vdb
+        assert "params" in kwargs
+
+
+# ---------------------------------------------------------------------------
 # Finalization
 # ---------------------------------------------------------------------------
 

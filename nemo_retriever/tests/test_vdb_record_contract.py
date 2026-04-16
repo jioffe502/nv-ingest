@@ -6,7 +6,6 @@
 
 These tests validate:
   - build_vdb_records produces the correct canonical record format
-  - build_vdb_records_from_dicts (transitional list[dict] path) matches
   - _ensure_dict handles Arrow serialization robustness
 """
 
@@ -158,34 +157,6 @@ class TestBuildVdbRecords:
         df = _make_sample_dataframe()
         rows = build_vdb_records(df, include_text=False)
         assert rows[0]["text"] == ""
-
-
-# ---------------------------------------------------------------------------
-# Transitional list[dict] builder tests
-# ---------------------------------------------------------------------------
-
-
-class TestBuildVdbRecordsFromDicts:
-    def test_matches_dataframe_path(self):
-        """list[dict] path should produce identical output to DataFrame path."""
-        from nemo_retriever.vector_store.vdb_records import build_vdb_records, build_vdb_records_from_dicts
-
-        df = _make_sample_dataframe()
-        records = df.to_dict("records")
-
-        from_df = build_vdb_records(df)
-        from_dicts = build_vdb_records_from_dicts(records)
-
-        assert len(from_df) == len(from_dicts)
-        assert from_df[0]["vector"] == from_dicts[0]["vector"]
-        assert from_df[0]["text"] == from_dicts[0]["text"]
-        assert from_df[0]["path"] == from_dicts[0]["path"]
-        assert from_df[0]["page_number"] == from_dicts[0]["page_number"]
-
-    def test_empty_list(self):
-        from nemo_retriever.vector_store.vdb_records import build_vdb_records_from_dicts
-
-        assert build_vdb_records_from_dicts([]) == []
 
 
 # ---------------------------------------------------------------------------

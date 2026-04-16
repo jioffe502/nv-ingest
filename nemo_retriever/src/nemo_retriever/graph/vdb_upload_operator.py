@@ -66,6 +66,15 @@ class VDBUploadOperator(AbstractOperator, CPUOperator):
     The DataFrame is passed through unchanged — this is a side-effect
     operator.
 
+    **Configuring the backend.** Callers can either:
+
+    * pass ``params`` and let the operator construct the client VDB from
+      ``VdbUploadParams.backend`` + ``client_vdb_kwargs``, or
+    * pass a pre-constructed client VDB via ``vdb_op``
+      (e.g. ``Milvus(...)`` / ``LanceDB(...)`` from
+      ``nv_ingest_client.util.vdb``).  ``params`` still supplies the
+      record-shaping config (embedding column, text column, etc.).
+
     **Concurrency**: This operator must run with ``concurrency=1`` in batch
     mode.  The single actor creates the table on its first write (respecting
     ``overwrite``) and appends on subsequent writes.  Index creation happens
@@ -77,13 +86,15 @@ class VDBUploadOperator(AbstractOperator, CPUOperator):
         self,
         *,
         params: Any = None,
+        vdb_op: Any = None,
     ) -> None:
         super().__init__()
         from nemo_retriever.params.models import LanceDbParams, VdbUploadParams
 
-        # Store as self.params so get_constructor_kwargs() can capture it
-        # for deferred reconstruction on Ray workers.
+        # Store as self.<name> so get_constructor_kwargs() captures both for
+        # deferred reconstruction on Ray workers.
         self.params = params
+        self.vdb_op = vdb_op
 
         if isinstance(params, VdbUploadParams):
             self._vdb_params = params
@@ -95,9 +106,14 @@ class VDBUploadOperator(AbstractOperator, CPUOperator):
             self._vdb_params = VdbUploadParams()
             self._lance_params = self._vdb_params.lancedb
 
-        self._backend_name: str = getattr(self._vdb_params, "backend", "lancedb") if self._vdb_params else "lancedb"
-        self._client_vdb: Any = None
+        if vdb_op is not None:
+            self._backend_name = type(vdb_op).__name__.lower()
+        else:
+            self._backend_name = getattr(self._vdb_params, "backend", "lancedb") if self._vdb_params else "lancedb"
+
+        self._client_vdb: Any = vdb_op
         self._table: Any = None
+        self._index_created: bool = False
         self._pending_records: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
@@ -109,18 +125,9 @@ class VDBUploadOperator(AbstractOperator, CPUOperator):
         from nv_ingest_client.util.vdb import get_vdb_op_cls
 
         if self._backend_name == "lancedb":
-            LanceDB = get_vdb_op_cls("lancedb")
-            return LanceDB(
-                uri=self._lance_params.lancedb_uri,
-                table_name=self._lance_params.table_name,
-                overwrite=self._lance_params.overwrite,
-                index_type=self._lance_params.index_type,
-                metric=self._lance_params.metric,
-                num_partitions=self._lance_params.num_partitions,
-                num_sub_vectors=self._lance_params.num_sub_vectors,
-                hybrid=self._lance_params.hybrid,
-                fts_language=self._lance_params.fts_language,
-            )
+            from nemo_retriever.vector_store.lancedb_utils import build_client_lancedb
+
+            return build_client_lancedb(self._lance_params)
 
         kwargs = getattr(self._vdb_params, "client_vdb_kwargs", {}) or {}
         return get_vdb_op_cls(self._backend_name)(**kwargs)
@@ -214,10 +221,10 @@ class VDBUploadOperator(AbstractOperator, CPUOperator):
         if not nvingest_records:
             return
 
-        if self._table is None:
+        if not self._index_created:
             collection_name, create_params = self._client_vdb.get_connection_params()
             self._client_vdb.create_index(collection_name=collection_name, **create_params)
-            self._table = True  # sentinel: schema created
+            self._index_created = True
 
         _, write_params = self._client_vdb.get_write_params()
         self._client_vdb.write_to_index(nvingest_records, **write_params)
