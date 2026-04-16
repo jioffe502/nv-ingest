@@ -16,7 +16,6 @@ import copy
 import json
 
 import pandas as pd
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +192,7 @@ class TestBuildVdbRecordsFromDicts:
 # _ensure_dict — Arrow serialization robustness
 # ---------------------------------------------------------------------------
 
+
 class TestEnsureDict:
     """Tests for the _ensure_dict helper that handles Arrow-serialized dict columns."""
 
@@ -235,11 +235,13 @@ class TestBuildVdbRecordsArrowCompat:
         from nemo_retriever.vector_store.vdb_records import build_vdb_records
 
         embedding = [0.1, 0.2, 0.3, 0.4]
-        metadata = json.dumps({
-            "embedding": embedding,
-            "source_path": "/data/test.pdf",
-            "content_metadata": {"hierarchy": {"page": 0}},
-        })
+        metadata = json.dumps(
+            {
+                "embedding": embedding,
+                "source_path": "/data/test.pdf",
+                "content_metadata": {"hierarchy": {"page": 0}},
+            }
+        )
         df = pd.DataFrame(
             [
                 {

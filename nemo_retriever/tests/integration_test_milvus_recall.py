@@ -32,8 +32,7 @@ TOP_K = 10
 def ingest_jp20_to_milvus():
     """Run the full graph pipeline with Milvus as the VDB backend."""
     from nemo_retriever import create_ingestor
-    from nemo_retriever.params import EmbedParams, ExtractParams, VdbUploadParams
-    from nemo_retriever.params.models import LanceDbParams
+    from nemo_retriever.params import EmbedParams, VdbUploadParams
 
     print("--- Step 1: Ingesting jp20 into Milvus ---")
     t0 = time.perf_counter()
@@ -244,6 +243,7 @@ def main():
     except Exception as e:
         print(f"\n[FAIL] {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

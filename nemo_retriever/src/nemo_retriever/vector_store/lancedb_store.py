@@ -12,7 +12,7 @@ from datetime import timedelta
 
 from nv_ingest_client.util.vdb.lancedb import LanceDB
 from nemo_retriever.params.models import LanceDbParams
-from nemo_retriever.vector_store.vdb_records import build_vdb_records, build_vdb_records_from_dicts
+from nemo_retriever.vector_store.vdb_records import build_vdb_records
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -159,4 +159,3 @@ def write_text_embeddings_dir_to_lancedb(
         "failed": failed,
         "lancedb": {"uri": cfg.lancedb_uri, "table_name": cfg.table_name, "overwrite": cfg.overwrite},
     }
-

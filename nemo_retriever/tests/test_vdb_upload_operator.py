@@ -144,11 +144,13 @@ class TestArrowSerializationCompat:
         rows = []
         for i in range(n):
             embedding = [float(i + j) for j in range(dim)]
-            metadata = json.dumps({
-                "embedding": embedding,
-                "source_path": f"/data/doc_{i}.pdf",
-                "content_metadata": {"hierarchy": {"page": i}},
-            })
+            metadata = json.dumps(
+                {
+                    "embedding": embedding,
+                    "source_path": f"/data/doc_{i}.pdf",
+                    "content_metadata": {"hierarchy": {"page": i}},
+                }
+            )
             embed_payload = json.dumps({"embedding": embedding, "info_msg": None})
             rows.append(
                 {
