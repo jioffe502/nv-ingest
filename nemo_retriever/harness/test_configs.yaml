@@ -75,13 +75,14 @@ datasets:
     recall_required: false
 
   bo767:
-    path: /raid/cjarrett/nv-ingest/data/bo767
+    path: /datasets/nv-ingest/bo767
     query_csv: data/bo767_annotations.csv
     input_type: pdf
     recall_required: false
     evaluation_mode: beir
     beir_loader: bo767_csv
     beir_doc_id_field: pdf_page
+    table_extraction_method: nemotron_parse
 
   jp20:
     path: /datasets/nv-ingest/jp20
@@ -95,9 +96,10 @@ datasets:
     path: /datasets/nv-ingest/earnings_consulting
     query_csv: data/earnings_consulting_multimodal.csv
     input_type: pdf
-    recall_required: true
-    recall_match_mode: pdf_page
-    recall_adapter: page_plus_one
+    recall_required: false
+    evaluation_mode: beir
+    beir_loader: earnings_csv
+    beir_doc_id_field: pdf_page
 
   bo10k:
     path: /datasets/nv-ingest/bo10k
@@ -108,14 +110,15 @@ datasets:
     beir_loader: bo10k_csv
     beir_doc_id_field: pdf_page
 
-  # FinanceBench is document-level recall using the repository fixture JSON.
+  # FinanceBench uses document-level BEIR matching on PDF basename.
   financebench:
     path: /datasets/nv-ingest/financebench
     query_csv: data/financebench_train.json
     input_type: pdf
-    recall_required: true
-    recall_match_mode: pdf_only
-    recall_adapter: financebench_json
+    recall_required: false
+    evaluation_mode: beir
+    beir_loader: financebench_json
+    beir_doc_id_field: pdf_basename
 
   audio_retrieval:
     path: /datasets/nv-ingest/audio_retrieval_data_mp3
