@@ -13,6 +13,7 @@ from PIL import Image
 
 from nemo_retriever.ocr.ocr import _crop_b64_image_by_norm_bbox
 from nemo_retriever.graph.abstract_operator import AbstractOperator
+from nemo_retriever.graph.designer import designer_component
 from nemo_retriever.graph.cpu_operator import CPUOperator
 from nemo_retriever.graph.gpu_operator import GPUOperator
 from nemo_retriever.graph.operator_archetype import ArchetypeOperator
@@ -54,6 +55,13 @@ def _get_cached_local_model(kwargs: dict) -> "Any":
     return _cached_local_model
 
 
+@designer_component(
+    name="Image Captioner",
+    category="Embeddings & Ranking",
+    compute="gpu",
+    description="Generates captions for images using a vision-language model",
+    category_color="#e06cff",
+)
 class CaptionGPUActor(AbstractOperator, GPUOperator):
     """Ray Data actor that holds a local VLM captioner on a single GPU."""
 

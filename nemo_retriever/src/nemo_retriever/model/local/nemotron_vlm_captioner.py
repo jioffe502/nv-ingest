@@ -11,6 +11,7 @@ from typing import Any, List, Optional
 from PIL import Image
 
 from nemo_retriever.utils.hf_cache import configure_global_hf_cache_base
+from nemo_retriever.utils.nvtx import gpu_inference_range
 from ..model import BaseModel, RunMode
 
 
@@ -228,7 +229,8 @@ class NemotronVLMCaptioner(BaseModel):
         if top_p is not None:
             sp_kwargs["top_p"] = top_p
         sampling_params = SamplingParams(**sp_kwargs)
-        outputs = self._llm.chat(conversations, sampling_params=sampling_params)
+        with gpu_inference_range("NemotronVLMCaptioner", batch_size=len(conversations)):
+            outputs = self._llm.chat(conversations, sampling_params=sampling_params)
         return [out.outputs[0].text.strip() for out in outputs]
 
     # ---- BaseModel abstract interface ----

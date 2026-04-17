@@ -38,6 +38,7 @@ from nemo_retriever.pdf.split import PDFSplitActor
 from nemo_retriever.table.table_detection import TableStructureActor
 from nemo_retriever.txt.ray_data import TxtSplitActor
 from nemo_retriever.utils.convert.to_pdf import DocToPdfConversionActor
+from nemo_retriever.graph.designer import designer_component
 from nemo_retriever.utils.ray_resource_hueristics import gather_local_resources
 
 
@@ -354,6 +355,13 @@ class MultiTypeExtractCPUActor(_MultiTypeExtractBase, CPUOperator):
     pass
 
 
+@designer_component(
+    name="Multi-Type Extractor",
+    category="Document Processing",
+    compute="gpu",
+    description="Extracts content from multiple file types (PDF, image, text, audio)",
+    category_color="#64b4ff",
+)
 class MultiTypeExtractOperator(ArchetypeOperator):
     """Graph-facing multi-type extraction archetype."""
 
