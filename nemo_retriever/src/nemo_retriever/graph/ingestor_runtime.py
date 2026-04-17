@@ -11,9 +11,9 @@ from typing import cast
 from typing import Any
 
 from nemo_retriever.caption.caption import CaptionActor
-from nemo_retriever.chart.chart_detection import GraphicElementsActor
 from nemo_retriever.audio import ASRActor
 from nemo_retriever.audio import MediaChunkActor
+from nemo_retriever.chart.chart_detection import GraphicElementsActor
 from nemo_retriever.dedup.dedup import dedup_images
 from nemo_retriever.graph import Graph, StoreOperator, UDFOperator
 from nemo_retriever.graph.content_transforms import (
@@ -22,13 +22,13 @@ from nemo_retriever.graph.content_transforms import (
     explode_content_to_rows,
 )
 from nemo_retriever.graph.multi_type_extract_operator import MultiTypeExtractOperator
+from nemo_retriever.text_embed.operators import _BatchEmbedActor
 from nemo_retriever.ocr.ocr import OCRActor
 from nemo_retriever.parse.nemotron_parse import NemotronParseActor
 from nemo_retriever.page_elements.page_elements import PageElementDetectionActor
+from nemo_retriever.table.table_detection import TableStructureActor
 from nemo_retriever.pdf.extract import PDFExtractionActor
 from nemo_retriever.pdf.split import PDFSplitActor
-from nemo_retriever.table.table_detection import TableStructureActor
-from nemo_retriever.text_embed.operators import _BatchEmbedActor
 from nemo_retriever.txt.ray_data import TextChunkActor
 from nemo_retriever.utils.convert.to_pdf import DocToPdfConversionActor
 from nemo_retriever.ingest_plans import IngestExecutionPlan
@@ -50,6 +50,9 @@ def batch_tuning_to_node_overrides(
     extract_params: Any | None,
     embed_params: Any | None,
     cluster_resources: ClusterResources | None = None,
+    allow_no_gpu: bool | None = None,
+    caption_params: Any | None = None,
+    caption_gpus_per_actor: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Translate BatchTuningParams from extract/embed params into RayDataExecutor node_overrides.
 
@@ -62,7 +65,18 @@ def batch_tuning_to_node_overrides(
     PDF extract concurrency is capped so that it cannot exhaust the cluster CPU
     budget when all other persistent actors are running simultaneously.
     """
-    plan = resolve_requested_plan(cluster_resources=cluster_resources) if cluster_resources is not None else None
+    auto_allow_no_gpu = bool(cluster_resources is not None and cluster_resources.available_gpu_count() == 0)
+    effective_allow_no_gpu = allow_no_gpu if allow_no_gpu is not None else auto_allow_no_gpu
+    plan = (
+        resolve_requested_plan(
+            cluster_resources=cluster_resources,
+            allow_no_gpu=effective_allow_no_gpu,
+            caption_enabled=caption_params is not None,
+            override_caption_gpus_per_actor=caption_gpus_per_actor,
+        )
+        if cluster_resources is not None
+        else None
+    )
 
     overrides: dict[str, dict[str, Any]] = {}
 
@@ -76,6 +90,15 @@ def batch_tuning_to_node_overrides(
         v = _resolve(explicit, fallback)
         if v is not None:
             overrides.setdefault(node_name, {})[key] = v
+
+    def _set_gpu(node_name: str, explicit: Any, fallback: Any = None) -> None:
+        """Like _set for num_gpus, but treats 0.0 as a valid explicit value."""
+        v = explicit if explicit is not None else fallback
+        if v is not None:
+            overrides.setdefault(node_name, {})["num_gpus"] = v
+
+    def _force_cpu_only(node_name: str) -> None:
+        overrides.setdefault(node_name, {})["num_gpus"] = 0.0
 
     embed_tuning = _batch_tuning(embed_params)
     embed_concurrency: int = 0
@@ -102,12 +125,24 @@ def batch_tuning_to_node_overrides(
             or 1.0
         )
         _set(_BatchEmbedActor.__name__, "num_cpus", embed_cpus if embed_cpus != 1.0 else None)
-        if not embed_invoke_url:
-            _set(
+        if effective_allow_no_gpu:
+            _force_cpu_only(_BatchEmbedActor.__name__)
+        elif not embed_invoke_url:
+            _set_gpu(
                 _BatchEmbedActor.__name__,
-                "num_gpus",
                 getattr(embed_tuning, "gpu_embed", None) if embed_tuning is not None else None,
                 plan.embed_gpus_per_actor if plan else None,
+            )
+
+    if caption_params is not None:
+        caption_invoke_url = _positive(getattr(caption_params, "endpoint_url", None))
+        if effective_allow_no_gpu:
+            _force_cpu_only(CaptionActor.__name__)
+        elif not caption_invoke_url:
+            _set_gpu(
+                CaptionActor.__name__,
+                caption_gpus_per_actor,
+                plan.caption_gpus_per_actor if plan else None,
             )
 
     extract_tuning = _batch_tuning(extract_params)
@@ -138,10 +173,11 @@ def batch_tuning_to_node_overrides(
             or 1.0
         )
         _set(OCRActor.__name__, "num_cpus", ocr_cpus if ocr_cpus != 1.0 else None)
-        if not ocr_invoke_url:
-            _set(
+        if effective_allow_no_gpu:
+            _force_cpu_only(OCRActor.__name__)
+        elif not ocr_invoke_url:
+            _set_gpu(
                 OCRActor.__name__,
-                "num_gpus",
                 getattr(extract_tuning, "gpu_ocr", None) if extract_tuning is not None else None,
                 plan.ocr_gpus_per_actor if plan else None,
             )
@@ -167,10 +203,11 @@ def batch_tuning_to_node_overrides(
             or 1.0
         )
         _set(PageElementDetectionActor.__name__, "num_cpus", page_elements_cpus if page_elements_cpus != 1.0 else None)
-        if not page_elements_invoke_url:
-            _set(
+        if effective_allow_no_gpu:
+            _force_cpu_only(PageElementDetectionActor.__name__)
+        elif not page_elements_invoke_url:
+            _set_gpu(
                 PageElementDetectionActor.__name__,
-                "num_gpus",
                 getattr(extract_tuning, "gpu_page_elements", None) if extract_tuning is not None else None,
                 plan.page_elements_gpus_per_actor if plan else None,
             )
@@ -185,12 +222,14 @@ def batch_tuning_to_node_overrides(
             getattr(extract_tuning, "nemotron_parse_workers", None) if extract_tuning is not None else None,
             plan.nemotron_parse_initial_actors if plan else None,
         )
-        _set(
-            NemotronParseActor.__name__,
-            "num_gpus",
-            getattr(extract_tuning, "gpu_nemotron_parse", None) if extract_tuning is not None else None,
-            plan.nemotron_parse_gpus_per_actor if plan else None,
-        )
+        if effective_allow_no_gpu:
+            _force_cpu_only(NemotronParseActor.__name__)
+        else:
+            _set_gpu(
+                NemotronParseActor.__name__,
+                getattr(extract_tuning, "gpu_nemotron_parse", None) if extract_tuning is not None else None,
+                plan.nemotron_parse_gpus_per_actor if plan else None,
+            )
 
         pdf_bs = _positive(
             getattr(extract_tuning, "pdf_extract_batch_size", None) if extract_tuning is not None else None
@@ -208,11 +247,15 @@ def batch_tuning_to_node_overrides(
         )
 
         # Cap PDF extract concurrency so persistent actors for page-elements,
-        # OCR, and embed plus 4 fixed pipeline tasks (DocToPdf, PDFSplit,
-        # UDFOperator, ReadBinary) cannot exhaust the cluster CPU budget.
+        # OCR, embed, and caption plus fixed pipeline tasks (DocToPdf,
+        # PDFSplit, UDFOperator(s), ReadBinary) cannot exhaust the cluster
+        # CPU budget.
         if pdf_extract_tasks is not None and cluster_resources is not None:
+            # Fixed overhead: ReadBinary + DocToPdf + PDFSplit + UDFOperator.
+            # Caption adds CaptionGPUActor + a second UDFOperator.
+            fixed_cpu_overhead = 4 + (2 if caption_params is not None else 0)
             non_pdf_cpu_overhead = (
-                4
+                fixed_cpu_overhead
                 + page_elements_concurrency * page_elements_cpus
                 + ocr_concurrency * ocr_cpus
                 + embed_concurrency * embed_cpus
@@ -516,8 +559,6 @@ def build_graph(
             table_kwargs: dict[str, Any] = {}
             if extract_params.table_structure_invoke_url:
                 table_kwargs["table_structure_invoke_url"] = extract_params.table_structure_invoke_url
-            if extract_params.ocr_invoke_url:
-                table_kwargs["ocr_invoke_url"] = extract_params.ocr_invoke_url
             if extract_params.api_key:
                 table_kwargs["api_key"] = extract_params.api_key
             if extract_params.table_output_format:
