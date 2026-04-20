@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from nemo_retriever.graph import InprocessExecutor, RayDataExecutor
@@ -307,7 +309,16 @@ class GraphIngestor(ingestor):
             import ray
 
             if self._ray_address or not ray.is_initialized():
-                ray.init(address=self._ray_address, ignore_reinit_error=True)
+                runtime_env = {
+                    "env_vars": {
+                        "VIRTUAL_ENV": os.path.dirname(os.path.dirname(sys.executable)),
+                    },
+                }
+                ray.init(
+                    address=self._ray_address,
+                    ignore_reinit_error=True,
+                    runtime_env=runtime_env,
+                )
             cluster_resources = gather_cluster_resources(ray)
 
             graph = build_graph(
@@ -329,8 +340,13 @@ class GraphIngestor(ingestor):
             # Derive per-node Ray scheduling config from BatchTuningParams plus
             # cluster-scaled heuristic defaults, then let any explicit
             # node_overrides passed to __init__ take precedence.
+            effective_allow_no_gpu = self._allow_no_gpu or cluster_resources.available_gpu_count() == 0
             derived_overrides = batch_tuning_to_node_overrides(
-                self._extract_params, self._embed_params, cluster_resources=cluster_resources
+                self._extract_params,
+                self._embed_params,
+                cluster_resources=cluster_resources,
+                allow_no_gpu=effective_allow_no_gpu,
+                caption_params=self._caption_params,
             )
             # VDBUploadOperator must run with concurrency=1 to avoid table
             # creation races — a single actor creates the table on its first

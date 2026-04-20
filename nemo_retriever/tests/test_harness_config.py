@@ -65,6 +65,48 @@ def test_load_harness_config_precedence(tmp_path: Path, monkeypatch: pytest.Monk
     assert cfg.recall_required is True
 
 
+def test_load_harness_config_supports_run_mode_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    query_csv = tmp_path / "query.csv"
+    query_csv.write_text("query,source,page\nq,a,1\n", encoding="utf-8")
+    cfg_path = tmp_path / "test_configs.yaml"
+    _write_harness_config(cfg_path, dataset_dir, query_csv)
+
+    monkeypatch.setenv("HARNESS_RUN_MODE", "inprocess")
+
+    cfg = load_harness_config(
+        config_file=str(cfg_path),
+        dataset="tiny",
+        preset="base",
+    )
+    assert cfg.run_mode == "inprocess"
+
+
+def test_load_harness_config_rejects_invalid_run_mode(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    cfg_path = tmp_path / "test_configs.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "active:",
+                f"  dataset_dir: {dataset_dir}",
+                "  run_mode: invalid",
+                "  preset: base",
+                "  recall_required: false",
+                "presets:",
+                "  base: {}",
+                "datasets: {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="run_mode must be one of"):
+        load_harness_config(config_file=str(cfg_path))
+
+
 def test_load_harness_config_fails_when_recall_required_without_query(tmp_path: Path) -> None:
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
@@ -393,6 +435,22 @@ def test_load_harness_config_falls_back_to_repo_root_for_query_csv(
     assert cfg.query_csv == str(query_csv.resolve())
 
 
+def test_resolve_query_csv_path_prefers_repo_root_for_default_harness_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo_root"
+    repo_root.mkdir()
+    cfg_path = tmp_path / "test_configs.yaml"
+    cfg_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(harness_config, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(harness_config, "DEFAULT_TEST_CONFIG_PATH", cfg_path)
+
+    resolved = harness_config._resolve_query_csv_path("data/missing.csv", config_path=cfg_path)
+
+    assert resolved == str((repo_root / "data" / "missing.csv").resolve())
+
+
 def test_load_harness_config_rejects_invalid_recall_adapter(tmp_path: Path) -> None:
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
@@ -536,26 +594,99 @@ def test_load_harness_config_rejects_removed_image_elements_modality_key(tmp_pat
         load_harness_config(config_file=str(cfg_path))
 
 
-def test_load_harness_config_uses_financebench_repo_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_harness_config_supports_financebench_beir_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     real_exists = Path.exists
+    expected_dataset_dir = Path("/datasets/nv-ingest/financebench").resolve()
     expected_query_csv = (harness_config.REPO_ROOT / "data" / "financebench_train.json").resolve()
 
     def _fake_exists(path_self: Path) -> bool:
-        if path_self == Path("/datasets/nv-ingest/financebench"):
-            return False
-        if path_self == Path("/raid/tester/financebench"):
+        if path_self == expected_dataset_dir:
             return True
         if path_self == expected_query_csv:
             return True
         return real_exists(path_self)
 
-    monkeypatch.setenv("USER", "tester")
     monkeypatch.setattr(harness_config.Path, "exists", _fake_exists)
 
     cfg = load_harness_config(dataset="financebench", preset="single_gpu")
-    assert cfg.dataset_dir == str(Path("/raid/tester/financebench").resolve())
+    assert cfg.dataset_dir == str(expected_dataset_dir)
     assert cfg.query_csv == str(expected_query_csv)
-    assert cfg.recall_required is True
+    assert cfg.recall_required is False
+    assert cfg.evaluation_mode == "beir"
+    assert cfg.beir_loader == "financebench_json"
+    assert cfg.beir_doc_id_field == "pdf_basename"
+
+
+def test_load_harness_config_supports_bo767_beir_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_exists = Path.exists
+    expected_dataset_dir = Path("/datasets/nv-ingest/bo767").resolve()
+    expected_query_csv = (harness_config.REPO_ROOT / "data" / "bo767_annotations.csv").resolve()
+
+    def _fake_exists(path_self: Path) -> bool:
+        if path_self == expected_dataset_dir:
+            return True
+        if path_self == expected_query_csv:
+            return True
+        return real_exists(path_self)
+
+    monkeypatch.setattr(harness_config.Path, "exists", _fake_exists)
+
+    cfg = load_harness_config(dataset="bo767", preset="single_gpu")
+
+    assert cfg.dataset_dir == str(expected_dataset_dir)
+    assert cfg.query_csv == str(expected_query_csv)
+    assert cfg.recall_required is False
+    assert cfg.evaluation_mode == "beir"
+    assert cfg.beir_loader == "bo767_csv"
+    assert cfg.beir_doc_id_field == "pdf_page"
+
+
+def test_load_harness_config_supports_bo10k_beir_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_exists = Path.exists
+    expected_dataset_dir = Path("/datasets/nv-ingest/bo10k").resolve()
+    expected_query_csv = (harness_config.REPO_ROOT / "data" / "digital_corpora_10k_annotations.csv").resolve()
+
+    def _fake_exists(path_self: Path) -> bool:
+        if path_self == expected_dataset_dir:
+            return True
+        if path_self == expected_query_csv:
+            return True
+        return real_exists(path_self)
+
+    monkeypatch.setattr(harness_config.Path, "exists", _fake_exists)
+
+    cfg = load_harness_config(dataset="bo10k", preset="single_gpu")
+
+    assert cfg.dataset_dir == str(expected_dataset_dir)
+    assert cfg.query_csv == str(expected_query_csv)
+    assert cfg.recall_required is False
+    assert cfg.evaluation_mode == "beir"
+    assert cfg.beir_loader == "bo10k_csv"
+    assert cfg.beir_doc_id_field == "pdf_page"
+
+
+def test_load_harness_config_supports_earnings_beir_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_exists = Path.exists
+    expected_dataset_dir = Path("/datasets/nv-ingest/earnings_consulting").resolve()
+    expected_query_csv = (harness_config.REPO_ROOT / "data" / "earnings_consulting_multimodal.csv").resolve()
+
+    def _fake_exists(path_self: Path) -> bool:
+        if path_self == expected_dataset_dir:
+            return True
+        if path_self == expected_query_csv:
+            return True
+        return real_exists(path_self)
+
+    monkeypatch.setattr(harness_config.Path, "exists", _fake_exists)
+
+    cfg = load_harness_config(dataset="earnings", preset="single_gpu")
+
+    assert cfg.dataset_dir == str(expected_dataset_dir)
+    assert cfg.query_csv == str(expected_query_csv)
+    assert cfg.recall_required is False
+    assert cfg.evaluation_mode == "beir"
+    assert cfg.beir_loader == "earnings_csv"
+    assert cfg.beir_doc_id_field == "pdf_page"
 
 
 def test_load_harness_config_supports_store_options(tmp_path: Path) -> None:
