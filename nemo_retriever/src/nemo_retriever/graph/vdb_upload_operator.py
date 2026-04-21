@@ -175,6 +175,16 @@ class VDBUploadOperator(AbstractOperator, CPUOperator):
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data
 
+    def finalize(self) -> None:
+        """Driver-side post-pipeline hook.
+
+        ``AbstractOperator.run()`` fires the preprocess/process/postprocess
+        lifecycle once per batch, so anything that must run exactly once at
+        the end of ingestion (flush, wait-for-index, etc.) is driven from
+        here by the driver after ``executor.ingest()`` returns.
+        """
+        return
+
     # ------------------------------------------------------------------
     # LanceDB streaming write path
     # ------------------------------------------------------------------

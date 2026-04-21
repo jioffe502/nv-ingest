@@ -321,6 +321,7 @@ class GraphIngestor(ingestor):
                 )
             cluster_resources = gather_cluster_resources(ray)
 
+            vdb_upload_ops: list[Any] = []
             graph = build_graph(
                 extraction_mode=self._extraction_mode,
                 extract_params=self._extract_params,
@@ -336,6 +337,7 @@ class GraphIngestor(ingestor):
                 vdb_upload_params=self._vdb_upload_params,
                 vdb_op=self._vdb_op,
                 stage_order=post_extract_order,
+                vdb_upload_ops_out=vdb_upload_ops,
             )
             # Derive per-node Ray scheduling config from BatchTuningParams plus
             # cluster-scaled heuristic defaults, then let any explicit
@@ -374,9 +376,12 @@ class GraphIngestor(ingestor):
             )
             result = executor.ingest(self._documents)
             self._rd_dataset = result
+            for op in vdb_upload_ops:
+                op.finalize()
             self._finalize_vdb()
             return result
         else:
+            vdb_upload_ops = []
             graph = build_graph(
                 extraction_mode=self._extraction_mode,
                 extract_params=self._extract_params,
@@ -392,10 +397,13 @@ class GraphIngestor(ingestor):
                 vdb_upload_params=self._vdb_upload_params,
                 vdb_op=self._vdb_op,
                 stage_order=post_extract_order,
+                vdb_upload_ops_out=vdb_upload_ops,
             )
             executor = InprocessExecutor(graph, show_progress=self._show_progress)
             self._rd_dataset = None
             result = executor.ingest(self._documents)
+            for op in vdb_upload_ops:
+                op.finalize()
             self._finalize_vdb()
             return result
 

@@ -130,15 +130,19 @@ def _write_runtime_summary(
     runtime_metrics_dir: Optional[Path],
     runtime_metrics_prefix: Optional[str],
     payload: dict[str, object],
+    metrics_output_file: Optional[Path] = None,
 ) -> None:
-    if runtime_metrics_dir is None and not runtime_metrics_prefix:
-        return
+    if runtime_metrics_dir is not None or runtime_metrics_prefix:
+        target_dir = Path(runtime_metrics_dir or Path.cwd()).expanduser().resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        prefix = (runtime_metrics_prefix or "run").strip() or "run"
+        target = target_dir / f"{prefix}.runtime.summary.json"
+        target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    target_dir = Path(runtime_metrics_dir or Path.cwd()).expanduser().resolve()
-    target_dir.mkdir(parents=True, exist_ok=True)
-    prefix = (runtime_metrics_prefix or "run").strip() or "run"
-    target = target_dir / f"{prefix}.runtime.summary.json"
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if metrics_output_file is not None:
+        out_path = Path(metrics_output_file).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _count_input_units(result_df) -> int:
@@ -292,6 +296,13 @@ def main(
     runtime_metrics_dir: Optional[Path] = typer.Option(None, "--runtime-metrics-dir", path_type=Path),
     runtime_metrics_prefix: Optional[str] = typer.Option(None, "--runtime-metrics-prefix"),
     detection_summary_file: Optional[Path] = typer.Option(None, "--detection-summary-file", path_type=Path),
+    metrics_output_file: Optional[Path] = typer.Option(
+        None,
+        "--metrics-output-file",
+        path_type=Path,
+        dir_okay=False,
+        help="JSON file path to write structured run metrics (used by the harness).",
+    ),
     log_file: Optional[Path] = typer.Option(None, "--log-file", path_type=Path, dir_okay=False),
 ) -> None:
     _ = ctx
@@ -510,9 +521,9 @@ def main(
 
         ingestor = ingestor.embed(embed_params)
 
-        # VDB upload runs inside the graph — rows stream to LanceDB as they
-        # are produced, so we never need to collect the entire result set on
-        # the driver just for the LanceDB write.  Index creation happens
+        # VDB upload runs inside the graph — rows stream to the configured
+        # backend as they are produced, so we never need to collect the entire
+        # result set on the driver just for the write.  Index creation happens
         # automatically in GraphIngestor._finalize_vdb() after the pipeline.
         ingestor = ingestor.vdb_upload(
             VdbUploadParams(
@@ -586,13 +597,7 @@ def main(
         # ------------------------------------------------------------------
         # Recall / BEIR evaluation
         # ------------------------------------------------------------------
-        import lancedb as _lancedb_mod
-
-        db = _lancedb_mod.connect(lancedb_uri)
-        table = db.open_table(LANCEDB_TABLE)
-
-        if int(table.count_rows()) == 0:
-            logger.warning("LanceDB table is empty; skipping %s evaluation.", evaluation_mode)
+        def _empty_summary(reason_label: str) -> None:
             _write_runtime_summary(
                 runtime_metrics_dir,
                 runtime_metrics_prefix,
@@ -612,8 +617,19 @@ def main(
                     "recall_details": bool(recall_details),
                     "lancedb_uri": str(lancedb_uri),
                     "lancedb_table": str(LANCEDB_TABLE),
+                    "skip_reason": reason_label,
                 },
+                metrics_output_file=metrics_output_file,
             )
+
+        import lancedb as _lancedb_mod
+
+        db = _lancedb_mod.connect(lancedb_uri)
+        table = db.open_table(LANCEDB_TABLE)
+
+        if int(table.count_rows()) == 0:
+            logger.warning("LanceDB table is empty; skipping %s evaluation.", evaluation_mode)
+            _empty_summary("lancedb_table_empty")
             if run_mode == "batch":
                 ray.shutdown()
             return
@@ -660,27 +676,7 @@ def main(
             query_csv_path = Path(query_csv)
             if not query_csv_path.exists():
                 logger.warning("Query CSV not found at %s; skipping recall evaluation.", query_csv_path)
-                _write_runtime_summary(
-                    runtime_metrics_dir,
-                    runtime_metrics_prefix,
-                    {
-                        "run_mode": run_mode,
-                        "input_path": str(Path(input_path).resolve()),
-                        "input_pages": int(num_rows),
-                        "num_pages": int(num_rows),
-                        "num_rows": int(num_rows),
-                        "ingestion_only_secs": float(ingestion_only_total_time),
-                        "ray_download_secs": float(ray_download_time),
-                        "lancedb_write_secs": 0.0,
-                        "evaluation_secs": 0.0,
-                        "total_secs": float(time.perf_counter() - ingest_start),
-                        "evaluation_mode": evaluation_mode,
-                        "evaluation_metrics": {},
-                        "recall_details": bool(recall_details),
-                        "lancedb_uri": str(lancedb_uri),
-                        "lancedb_table": str(LANCEDB_TABLE),
-                    },
-                )
+                _empty_summary("query_csv_missing")
                 if run_mode == "batch":
                     ray.shutdown()
                 return
@@ -731,6 +727,7 @@ def main(
                 "lancedb_uri": str(lancedb_uri),
                 "lancedb_table": str(LANCEDB_TABLE),
             },
+            metrics_output_file=metrics_output_file,
         )
 
         if run_mode == "batch":
