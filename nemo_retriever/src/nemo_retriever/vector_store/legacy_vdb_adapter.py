@@ -2,7 +2,25 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Adapters for invoking legacy NV-Ingest VDB operators from Retriever rows."""
+"""Compatibility conversion for legacy NV-Ingest VDB operators.
+
+This module is intentionally not a new vector-store abstraction.  The legacy
+``nv_ingest_client.util.vdb`` operators already expose the ADT boundary this PR
+needs to support: ``VDB.run(records)``.  The missing piece is that Retriever's
+graph pipeline produces row-oriented dataframes/Ray datasets, while those legacy
+operators expect NV-Ingest records shaped like::
+
+    [{"document_type": "text", "metadata": {...}}]
+
+where ``metadata`` contains ``content``, ``embedding``, ``content_metadata``,
+and ``source_metadata``.  Structured, image, and audio rows additionally need
+their legacy metadata blocks because the old VDB cleanup code reads text from
+``table_metadata``, ``image_metadata``, or ``audio_metadata`` based on
+``document_type``.
+
+Keep this file as a boundary adapter between Retriever rows and the legacy ADT
+record dialect.  New backend APIs should not grow here.
+"""
 
 from __future__ import annotations
 
