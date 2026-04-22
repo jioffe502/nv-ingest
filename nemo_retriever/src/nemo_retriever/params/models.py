@@ -409,6 +409,21 @@ class CaptionParams(LLMInferenceParams):
     caption_infographics: bool = False
 
 
+class WebhookParams(_ParamsModel):
+    """Configuration for the webhook notification stage.
+
+    When ``endpoint_url`` is set, selected columns from the processed batch
+    are serialised to JSON and HTTP-POSTed to that URL.  If ``endpoint_url``
+    is ``None`` the stage is a no-op.
+    """
+
+    endpoint_url: Optional[str] = None
+    columns: list[str] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
+    timeout_s: float = 30.0
+    max_retries: int = 3
+
+
 class DedupParams(_ParamsModel):
     content_hash: bool = True
     bbox_iou: bool = True
