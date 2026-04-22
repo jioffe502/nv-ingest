@@ -35,12 +35,13 @@ Examples::
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Any, Optional, TextIO
 
 import typer
 
@@ -141,6 +142,108 @@ def _ensure_lancedb_table(uri: str, table_name: str) -> None:
     schema = lancedb_schema()
     empty = pa.table({f.name: [] for f in schema}, schema=schema)
     db.create_table(table_name, data=empty, schema=schema, mode="create")
+
+
+def _load_json_object(raw: Optional[str], path: Optional[Path], *, label: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if path is not None:
+        try:
+            parsed = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise typer.BadParameter(f"Unable to read {label} file {path}: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise typer.BadParameter(f"{label} file must contain a JSON object.")
+        payload.update(parsed)
+
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"{label} must be a JSON object: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise typer.BadParameter(f"{label} must be a JSON object.")
+        payload.update(parsed)
+
+    return payload
+
+
+def _import_object(import_path: str) -> Any:
+    normalized = str(import_path or "").strip()
+    module_name, sep, attr_name = normalized.partition(":")
+    if not sep:
+        module_name, _, attr_name = normalized.rpartition(".")
+    if not module_name or not attr_name:
+        raise typer.BadParameter(
+            "--vdb-op must be an import path like 'package.module:ClassName' or 'package.module.ClassName'."
+        )
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        raise typer.BadParameter(f"Unable to import module {module_name!r}: {exc}") from exc
+    try:
+        return getattr(module, attr_name)
+    except AttributeError as exc:
+        raise typer.BadParameter(f"Module {module_name!r} has no attribute {attr_name!r}.") from exc
+
+
+def _load_legacy_vdb_op(
+    import_path: Optional[str],
+    kwargs_json: Optional[str],
+    kwargs_file: Optional[Path],
+) -> Any | None:
+    if not import_path:
+        if kwargs_json or kwargs_file is not None:
+            raise typer.BadParameter("--vdb-op-kwargs and --vdb-op-kwargs-file require --vdb-op.")
+        return None
+
+    factory = _import_object(import_path)
+    kwargs = _load_json_object(kwargs_json, kwargs_file, label="--vdb-op-kwargs")
+    try:
+        op = factory(**kwargs)
+    except Exception as exc:
+        raise typer.BadParameter(f"Unable to construct VDB operator {import_path!r}: {exc}") from exc
+    if not callable(getattr(op, "run", None)):
+        raise typer.BadParameter(f"VDB operator {import_path!r} must provide a callable run(records) method.")
+    return op
+
+
+def _describe_vdb_op(vdb_op: Any) -> str:
+    op_type = type(vdb_op)
+    return f"{op_type.__module__}:{op_type.__qualname__}"
+
+
+def _vdb_target_name(vdb_op: Any) -> str:
+    for attr_name in ("collection_name", "index_name", "table_name"):
+        value = getattr(vdb_op, attr_name, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def _write_legacy_vdb(
+    result_df,
+    *,
+    vdb_op: Any,
+    embedding_column: str,
+    text_column: str,
+) -> dict[str, object]:
+    from nemo_retriever.vector_store.legacy_vdb_adapter import dataframe_to_legacy_vdb_records
+
+    records = dataframe_to_legacy_vdb_records(
+        result_df,
+        embedding_column=embedding_column,
+        embedding_key="embedding",
+        text_column=text_column,
+    )
+    record_count = len(records[0]) if records else 0
+    result = vdb_op.run(records)
+    return {
+        "backend": "legacy_vdb",
+        "operator": _describe_vdb_op(vdb_op),
+        "target": _vdb_target_name(vdb_op),
+        "records": record_count,
+        "result_type": type(result).__name__,
+    }
 
 
 def _write_runtime_summary(
@@ -281,6 +384,26 @@ def main(
     nemotron_parse_batch_size: Optional[int] = typer.Option(0, "--nemotron-parse-batch-size"),
     # LanceDB / evaluation
     lancedb_uri: str = typer.Option(LANCEDB_URI, "--lancedb-uri"),
+    vdb_op: Optional[str] = typer.Option(
+        None,
+        "--vdb-op",
+        help=(
+            "Optional import path for a legacy nv_ingest_client VDB ADT operator. "
+            "Omit to use the native LanceDB writer."
+        ),
+    ),
+    vdb_op_kwargs: Optional[str] = typer.Option(
+        None,
+        "--vdb-op-kwargs",
+        help="JSON object passed to the --vdb-op constructor.",
+    ),
+    vdb_op_kwargs_file: Optional[Path] = typer.Option(
+        None,
+        "--vdb-op-kwargs-file",
+        help="Path to a JSON object passed to the --vdb-op constructor.",
+        path_type=Path,
+        dir_okay=False,
+    ),
     save_intermediate: Optional[Path] = typer.Option(
         None,
         "--save-intermediate",
@@ -323,12 +446,16 @@ def main(
             raise ValueError(f"Unsupported --audio-split-type: {audio_split_type!r}")
         if evaluation_mode not in {"recall", "beir"}:
             raise ValueError(f"Unsupported --evaluation-mode: {evaluation_mode!r}")
+        legacy_vdb_op = _load_legacy_vdb_op(vdb_op, vdb_op_kwargs, vdb_op_kwargs_file)
 
         if run_mode == "batch":
             os.environ["RAY_LOG_TO_DRIVER"] = "1" if ray_log_to_driver else "0"
 
         lancedb_uri = str(Path(lancedb_uri).expanduser().resolve())
-        _ensure_lancedb_table(lancedb_uri, LANCEDB_TABLE)
+        if legacy_vdb_op is None:
+            _ensure_lancedb_table(lancedb_uri, LANCEDB_TABLE)
+        else:
+            logger.info("Using legacy VDB operator %s.", _describe_vdb_op(legacy_vdb_op))
 
         remote_api_key = resolve_remote_api_key(api_key)
         extract_remote_api_key = remote_api_key
@@ -588,6 +715,84 @@ def main(
                 Path(detection_summary_file),
                 collect_detection_summary_from_df(result_df),
             )
+
+        if legacy_vdb_op is not None:
+            from nemo_retriever.utils.detection_summary import print_run_summary
+
+            logger.info(
+                "Writing graph results to legacy VDB operator %s via VDB.run(records).",
+                _describe_vdb_op(legacy_vdb_op),
+            )
+            vdb_write_start = time.perf_counter()
+            vdb_summary = _write_legacy_vdb(
+                result_df,
+                vdb_op=legacy_vdb_op,
+                embedding_column=str(embed_params.output_column),
+                text_column=str(embed_params.text_column),
+            )
+            vdb_write_time = time.perf_counter() - vdb_write_start
+            total_time = time.perf_counter() - ingest_start
+            vdb_operator = str(vdb_summary["operator"])
+            vdb_target = str(vdb_summary.get("target") or "")
+
+            logger.info(
+                "Legacy VDB upload complete: operator=%s target=%s records=%s",
+                vdb_operator,
+                vdb_target or "<unspecified>",
+                vdb_summary.get("records"),
+            )
+            logger.warning(
+                "Skipping LanceDB recall/BEIR evaluation because --vdb-op selected a legacy VDB ADT operator. "
+                "Backend-neutral evaluation needs a retrieval result contract for custom VDB operators."
+            )
+
+            _write_runtime_summary(
+                runtime_metrics_dir,
+                runtime_metrics_prefix,
+                {
+                    "run_mode": run_mode,
+                    "input_path": str(Path(input_path).resolve()),
+                    "input_pages": int(num_rows),
+                    "num_pages": int(num_rows),
+                    "num_rows": int(len(result_df.index)),
+                    "ingestion_only_secs": float(ingestion_only_total_time),
+                    "ray_download_secs": float(ray_download_time),
+                    "lancedb_write_secs": float(vdb_write_time),
+                    "vdb_write_secs": float(vdb_write_time),
+                    "evaluation_secs": 0.0,
+                    "total_secs": float(total_time),
+                    "evaluation_mode": "skipped",
+                    "evaluation_metrics": {},
+                    "recall_details": bool(recall_details),
+                    "vdb_backend": "legacy_vdb",
+                    "vdb_operator": vdb_operator,
+                    "vdb_target": vdb_target,
+                    "vdb_records": int(vdb_summary.get("records") or 0),
+                },
+            )
+
+            if run_mode == "batch":
+                ray.shutdown()
+
+            print_run_summary(
+                num_rows,
+                Path(input_path),
+                hybrid,
+                vdb_operator,
+                vdb_target,
+                total_time,
+                ingestion_only_total_time,
+                ray_download_time,
+                vdb_write_time,
+                0.0,
+                {},
+                evaluation_label="Evaluation",
+                evaluation_count=None,
+                vdb_backend="legacy_vdb",
+                vdb_uri=vdb_operator,
+                vdb_table_name=vdb_target,
+            )
+            return
 
         # ------------------------------------------------------------------
         # Write to LanceDB

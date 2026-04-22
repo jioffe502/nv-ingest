@@ -235,6 +235,9 @@ def print_run_summary(
     processed_files: Optional[int] = None,
     evaluation_label: str = "Recall",
     evaluation_count: Optional[int] = None,
+    vdb_backend: str = "lancedb",
+    vdb_uri: Optional[str] = None,
+    vdb_table_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Print a human-readable run summary and return all metrics as a dict.
 
@@ -247,6 +250,8 @@ def print_run_summary(
     if evaluation_metrics is None:
         evaluation_metrics = {}
     pages = processed_pages if processed_pages is not None else 0
+    backend = (vdb_backend or "lancedb").strip() or "lancedb"
+    backend_label = "LanceDB" if backend.lower() == "lancedb" else backend.replace("_", " ").title()
 
     ingest_only_pps = pages / ingest_only_total_time if ingest_only_total_time > 0 else 0
     ingest_write_denom = ingest_only_total_time + lancedb_write_total_time
@@ -259,8 +264,13 @@ def print_run_summary(
     print("Run Configuration:")
     print(f"\tInput path: {input_path}")
     print(f"\tHybrid: {hybrid}")
-    print(f"\tLancedb URI: {lancedb_uri}")
-    print(f"\tLancedb Table: {lancedb_table_name}")
+    if backend.lower() == "lancedb":
+        print(f"\tLancedb URI: {lancedb_uri}")
+        print(f"\tLancedb Table: {lancedb_table_name}")
+    else:
+        print(f"\tVector DB Backend: {backend_label}")
+        print(f"\t{backend_label} URI: {vdb_uri or lancedb_uri}")
+        print(f"\t{backend_label} Collection: {vdb_table_name or lancedb_table_name}")
 
     print("Runtimes:")
     if processed_files is not None:
@@ -268,7 +278,10 @@ def print_run_summary(
     print(f"\tTotal pages processed: {pages} from {input_path}")
     print(f"\tIngestion only time: {_fmt_time(ingest_only_total_time)}")
     print(f"\tRay dataset download time: {_fmt_time(ray_dataset_download_total_time)}")
-    print(f"\tLanceDB Write Time: {_fmt_time(lancedb_write_total_time)}")
+    if backend.lower() == "lancedb":
+        print(f"\tLanceDB Write Time: {_fmt_time(lancedb_write_total_time)}")
+    else:
+        print(f"\t{backend_label} Write Time: {_fmt_time(lancedb_write_total_time)}")
     if recall_total_time > 0:
         print(f"\tRecall time: {_fmt_time(recall_total_time)}")
     if evaluation_total_time > 0:
@@ -276,7 +289,10 @@ def print_run_summary(
 
     print("PPS:")
     print(f"\tIngestion only PPS: {ingest_only_pps:.2f}")
-    print(f"\tIngestion + LanceDB Write PPS: {ingest_and_lancedb_write_pps:.2f}")
+    if backend.lower() == "lancedb":
+        print(f"\tIngestion + LanceDB Write PPS: {ingest_and_lancedb_write_pps:.2f}")
+    else:
+        print(f"\tIngestion + {backend_label} Write PPS: {ingest_and_lancedb_write_pps:.2f}")
     if recall_total_time > 0:
         print(f"\tRecall QPS: {recall_qps:.2f}")
     print(f"\tTotal - Processed: {pages} pages in {_fmt_time(total_time)} @ {total_pps:.2f} PPS")
@@ -302,6 +318,10 @@ def print_run_summary(
         "total_pps": round(total_pps, 4),
         "ray_dataset_download_secs": round(ray_dataset_download_total_time, 4),
         "lancedb_write_secs": round(lancedb_write_total_time, 4),
+        "vdb_backend": backend,
+        "vdb_uri": vdb_uri or lancedb_uri,
+        "vdb_table": vdb_table_name or lancedb_table_name,
+        "vdb_write_secs": round(lancedb_write_total_time, 4),
         "recall_time_secs": round(recall_total_time, 4),
         "evaluation_time_secs": round(evaluation_total_time, 4),
         "evaluation_label": evaluation_label,

@@ -45,8 +45,10 @@ from nemo_retriever.params import (
     HtmlChunkParams,
     StoreParams,
     TextChunkParams,
+    VdbUploadParams,
 )
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
+from nemo_retriever.vector_store.legacy_vdb_adapter import execution_result_to_legacy_vdb_records
 
 
 def _resolve_api_key(params: Any) -> Any:
@@ -148,6 +150,10 @@ class GraphIngestor(ingestor):
         self._caption_params: Any = None
         self._dedup_params: Any = None
         self._store_params: Any = None
+        self._vdb_upload_params: Any = None
+        self._vdb_op: Any = None
+        self._vdb_upload_uses_native_lancedb: bool = False
+        self._vdb_upload_result: Any = None
         # Ordered list of stage names; "extract" is tracked but excluded from
         # the post-extraction stage_order passed to graph builders.
         self._stage_order: List[str] = []
@@ -239,6 +245,25 @@ class GraphIngestor(ingestor):
         """Record an embedding stage."""
         self._embed_params = _resolve_api_key(_coerce(params, kwargs, default_factory=EmbedParams))
         self._record_stage("embed")
+        return self
+
+    def vdb_upload(
+        self,
+        params: Optional[VdbUploadParams] = None,
+        *,
+        vdb_op: Any = None,
+        **kwargs: Any,
+    ) -> "GraphIngestor":
+        """Configure a VDB upload after graph execution."""
+        self._vdb_upload_params = _coerce(params, kwargs, default_factory=VdbUploadParams)
+        if vdb_op is None:
+            self._vdb_op = None
+            self._vdb_upload_uses_native_lancedb = True
+            return self
+        if not callable(getattr(vdb_op, "run", None)):
+            raise ValueError(f"vdb_op must provide a callable run(records) method, got {type(vdb_op).__name__}.")
+        self._vdb_op = vdb_op
+        self._vdb_upload_uses_native_lancedb = False
         return self
 
     # ------------------------------------------------------------------
@@ -334,6 +359,7 @@ class GraphIngestor(ingestor):
             )
             result = executor.ingest(self._documents)
             self._rd_dataset = result
+            self._run_vdb_upload(result)
             return result
         else:
             graph = build_graph(
@@ -352,11 +378,66 @@ class GraphIngestor(ingestor):
             )
             executor = InprocessExecutor(graph, show_progress=self._show_progress)
             self._rd_dataset = None
-            return executor.ingest(self._documents)
+            result = executor.ingest(self._documents)
+            self._run_vdb_upload(result)
+            return result
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _run_vdb_upload(self, result: Any) -> None:
+        if self._vdb_upload_uses_native_lancedb:
+            self._vdb_upload_result = self._run_native_lancedb_upload(result)
+            return
+        if self._vdb_op is None:
+            return
+        lancedb_params = getattr(self._vdb_upload_params, "lancedb", None)
+        records = execution_result_to_legacy_vdb_records(
+            result,
+            embedding_column=getattr(self._embed_params, "output_column", None)
+            or getattr(lancedb_params, "embedding_column", "text_embeddings_1b_v2"),
+            embedding_key=getattr(lancedb_params, "embedding_key", "embedding"),
+            text_column=getattr(self._embed_params, "text_column", None)
+            or getattr(lancedb_params, "text_column", "text"),
+        )
+        self._vdb_upload_result = self._vdb_op.run(records)
+
+    def _run_native_lancedb_upload(self, result: Any) -> dict[str, Any]:
+        """Write default LanceDB uploads using the Retriever-native LanceDB schema."""
+        from nemo_retriever.vector_store.lancedb_store import handle_lancedb
+
+        lancedb = self._vdb_upload_params.lancedb
+
+        if hasattr(result, "to_dict") and hasattr(result, "columns"):
+            df = result
+            rows = df.to_dict(orient="records")
+        else:
+            rows: list[dict[str, Any]] = []
+            iter_batches = getattr(result, "iter_batches", None)
+            if callable(iter_batches):
+                for batch_df in iter_batches(batch_format="pandas"):
+                    rows.extend(batch_df.to_dict(orient="records"))
+            else:
+                to_pandas = getattr(result, "to_pandas", None)
+                if not callable(to_pandas):
+                    raise TypeError(f"Cannot convert {type(result).__name__} to a pandas DataFrame for LanceDB upload.")
+                df = to_pandas()
+                rows = df.to_dict(orient="records")
+
+        handle_lancedb(
+            rows,
+            lancedb.lancedb_uri,
+            lancedb.table_name,
+            hybrid=lancedb.hybrid,
+            mode="overwrite",
+        )
+        return {
+            "backend": "lancedb",
+            "uri": lancedb.lancedb_uri,
+            "table_name": lancedb.table_name,
+            "rows": len(rows),
+        }
 
     @staticmethod
     def _has_error(v: Any) -> bool:

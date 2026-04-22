@@ -1,6 +1,6 @@
 import sys
 import json
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -32,6 +32,17 @@ class _FakeDataset:
                 return _FakeCounted()
 
         return _FakeGrouped()
+
+
+class _FakeRowsDataset:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def materialize(self):
+        return self
+
+    def take_all(self):
+        return list(self._rows)
 
 
 class _FakeErrorRows:
@@ -85,6 +96,19 @@ class _FakeIngestor:
 
     def get_error_rows(self, dataset=None):
         return _FakeErrorRows()
+
+
+class _FakeLegacyVDB:
+    instances = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.records = None
+        self.__class__.instances.append(self)
+
+    def run(self, records):
+        self.records = records
+        return {"ok": True}
 
 
 def test_resolve_input_file_patterns_recurses_for_directory_inputs(tmp_path) -> None:
@@ -267,6 +291,73 @@ def test_batch_pipeline_routes_beir_mode_to_evaluator(tmp_path, monkeypatch) -> 
     assert captured["cfg"].loader == "vidore_hf"
     assert captured["cfg"].dataset_name == "vidore_v3_computer_science"
     assert tuple(captured["cfg"].ks) == (5, 10)
+
+
+def test_graph_pipeline_routes_custom_vdb_op_through_legacy_adt(tmp_path, monkeypatch) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "sample.pdf").write_text("placeholder", encoding="utf-8")
+    runtime_dir = tmp_path / "runtime_metrics"
+
+    rows = [
+        {
+            "text": "alpha",
+            "text_embeddings_1b_v2": {"embedding": [0.1, 0.2]},
+            "source_path": str(dataset_dir / "sample.pdf"),
+            "page_number": 1,
+            "_content_type": "text",
+        }
+    ]
+
+    class _FakeRowsIngestor(_FakeIngestor):
+        def ingest(self, params=None):
+            return _FakeRowsDataset(rows)
+
+    fake_ingestor = _FakeRowsIngestor()
+    monkeypatch.setattr(batch_pipeline, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(
+        batch_pipeline,
+        "_ensure_lancedb_table",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("LanceDB table should not be initialized")),
+    )
+    monkeypatch.setattr(
+        batch_pipeline,
+        "handle_lancedb",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("LanceDB writer should not run")),
+    )
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(shutdown=lambda: None))
+
+    _FakeLegacyVDB.instances.clear()
+    fake_module = ModuleType("fake_legacy_vdb_module")
+    fake_module.FakeLegacyVDB = _FakeLegacyVDB
+    monkeypatch.setitem(sys.modules, "fake_legacy_vdb_module", fake_module)
+
+    result = RUNNER.invoke(
+        batch_pipeline.app,
+        [
+            str(dataset_dir),
+            "--vdb-op",
+            "fake_legacy_vdb_module:FakeLegacyVDB",
+            "--vdb-op-kwargs",
+            '{"collection_name":"custom"}',
+            "--runtime-metrics-dir",
+            str(runtime_dir),
+            "--runtime-metrics-prefix",
+            "custom-vdb",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    vdb = _FakeLegacyVDB.instances[-1]
+    assert vdb.kwargs == {"collection_name": "custom"}
+    assert len(vdb.records) == 1
+    assert len(vdb.records[0]) == 1
+    assert vdb.records[0][0]["metadata"]["content"] == "alpha"
+
+    payload = json.loads((runtime_dir / "custom-vdb.runtime.summary.json").read_text(encoding="utf-8"))
+    assert payload["vdb_backend"] == "legacy_vdb"
+    assert payload["vdb_records"] == 1
+    assert payload["evaluation_mode"] == "skipped"
 
 
 def test_batch_pipeline_accepts_harness_runtime_metric_flags(tmp_path, monkeypatch) -> None:
