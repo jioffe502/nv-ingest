@@ -47,6 +47,7 @@ from nemo_retriever.params import (
     StoreParams,
     TextChunkParams,
     VdbUploadParams,
+    WebhookParams,
 )
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 
@@ -154,6 +155,7 @@ class GraphIngestor(ingestor):
         self._store_params: Any = None
         self._vdb_upload_params: Any = None
         self._vdb_op: Any = None
+        self._webhook_params: Any = None
         # Ordered list of stage names; "extract" is tracked but excluded from
         # the post-extraction stage_order passed to graph builders.
         self._stage_order: List[str] = []
@@ -276,6 +278,16 @@ class GraphIngestor(ingestor):
         self._record_stage("vdb_upload")
         return self
 
+    def webhook(self, params: Optional[WebhookParams] = None, **kwargs: Any) -> "GraphIngestor":
+        """Record a webhook notification stage (always runs last).
+
+        When ``endpoint_url`` is set, processed results are HTTP-POSTed to
+        that URL.  If ``endpoint_url`` is ``None`` the stage is a no-op.
+        """
+        self._webhook_params = _coerce(params, kwargs, default_factory=WebhookParams)
+        self._record_stage("webhook")
+        return self
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -309,11 +321,18 @@ class GraphIngestor(ingestor):
             import ray
 
             if self._ray_address or not ray.is_initialized():
-                runtime_env = {
-                    "env_vars": {
-                        "VIRTUAL_ENV": os.path.dirname(os.path.dirname(sys.executable)),
-                    },
+                venv = os.path.dirname(os.path.dirname(sys.executable))
+                venv_bin = os.path.join(venv, "bin")
+                pypath = os.pathsep.join(p for p in sys.path if p)
+                ray_env_vars: dict[str, str] = {
+                    "VIRTUAL_ENV": venv,
+                    "PATH": venv_bin + os.pathsep + os.environ.get("PATH", ""),
+                    "PYTHONPATH": pypath,
                 }
+                for _fwd_key in ("HF_TOKEN", "HF_HOME", "HUGGING_FACE_HUB_TOKEN", "NVIDIA_API_KEY"):
+                    if os.environ.get(_fwd_key):
+                        ray_env_vars[_fwd_key] = os.environ[_fwd_key]
+                runtime_env = {"env_vars": ray_env_vars}
                 ray.init(
                     address=self._ray_address,
                     ignore_reinit_error=True,
@@ -336,6 +355,7 @@ class GraphIngestor(ingestor):
                 store_params=self._store_params,
                 vdb_upload_params=self._vdb_upload_params,
                 vdb_op=self._vdb_op,
+                webhook_params=self._webhook_params,
                 stage_order=post_extract_order,
                 vdb_upload_ops_out=vdb_upload_ops,
             )
@@ -396,6 +416,7 @@ class GraphIngestor(ingestor):
                 store_params=self._store_params,
                 vdb_upload_params=self._vdb_upload_params,
                 vdb_op=self._vdb_op,
+                webhook_params=self._webhook_params,
                 stage_order=post_extract_order,
                 vdb_upload_ops_out=vdb_upload_ops,
             )

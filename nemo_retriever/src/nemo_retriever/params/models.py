@@ -40,7 +40,7 @@ class _ParamsModel(BaseModel):
 
 
 class RemoteRetryParams(_ParamsModel):
-    remote_max_pool_workers: int = 8
+    remote_max_pool_workers: int = 32
     remote_max_retries: int = 5
     remote_max_429_retries: int = 3
 
@@ -149,14 +149,14 @@ class BatchTuningParams(_ParamsModel):
     page_elements_cpus_per_actor: float = 1
     ocr_cpus_per_actor: float = 1
     embed_workers: Optional[int] = None
-    embed_batch_size: int = 256
+    embed_batch_size: int = 32
     embed_cpus_per_actor: float = 1
     gpu_page_elements: Optional[float] = None
     gpu_ocr: Optional[float] = None
     gpu_embed: Optional[float] = None
-    nemotron_parse_workers: float = 0.0
-    gpu_nemotron_parse: float = 0.0
-    nemotron_parse_batch_size: float = 0.0
+    nemotron_parse_workers: Optional[int] = None
+    gpu_nemotron_parse: Optional[float] = None
+    nemotron_parse_batch_size: Optional[int] = None
     inference_batch_size: int = 8
 
 
@@ -257,6 +257,8 @@ class EmbedParams(_ParamsModel):
     has_embedding_column: str = "text_embeddings_1b_v2_has_embedding"
     embed_output_column: str = "text_embeddings_1b_v2"
     embed_inference_batch_size: int = 16
+    # Concurrent HTTP embedding requests per Ray batch (OpenAI-compatible NIM).
+    nim_http_max_concurrent: int = 32
 
     runtime: ModelRuntimeParams = Field(default_factory=ModelRuntimeParams)
     batch_tuning: BatchTuningParams = Field(default_factory=BatchTuningParams)
@@ -407,6 +409,21 @@ class CaptionParams(LLMInferenceParams):
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.5
     caption_infographics: bool = False
+
+
+class WebhookParams(_ParamsModel):
+    """Configuration for the webhook notification stage.
+
+    When ``endpoint_url`` is set, selected columns from the processed batch
+    are serialised to JSON and HTTP-POSTed to that URL.  If ``endpoint_url``
+    is ``None`` the stage is a no-op.
+    """
+
+    endpoint_url: Optional[str] = None
+    columns: list[str] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
+    timeout_s: float = 30.0
+    max_retries: int = 3
 
 
 class DedupParams(_ParamsModel):

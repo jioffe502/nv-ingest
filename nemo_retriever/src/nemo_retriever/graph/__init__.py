@@ -17,6 +17,7 @@ from nemo_retriever.graph.graph_pipeline_registry import GraphPipelineRegistry, 
 from nemo_retriever.graph.pipeline_graph import Graph, Node
 from nemo_retriever.graph.store_operator import StoreOperator
 from nemo_retriever.graph.vdb_upload_operator import VDBUploadOperator
+from nemo_retriever.graph.webhook_operator import WebhookNotifyOperator
 
 __all__ = [
     "AbstractExecutor",
@@ -34,6 +35,7 @@ __all__ = [
     "StoreOperator",
     "UDFOperator",
     "VDBUploadOperator",
+    "WebhookNotifyOperator",
     "default_registry",
 ]
 
