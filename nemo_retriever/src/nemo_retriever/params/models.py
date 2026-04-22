@@ -40,7 +40,7 @@ class _ParamsModel(BaseModel):
 
 
 class RemoteRetryParams(_ParamsModel):
-    remote_max_pool_workers: int = 8
+    remote_max_pool_workers: int = 32
     remote_max_retries: int = 5
     remote_max_429_retries: int = 3
 
@@ -154,9 +154,9 @@ class BatchTuningParams(_ParamsModel):
     gpu_page_elements: Optional[float] = None
     gpu_ocr: Optional[float] = None
     gpu_embed: Optional[float] = None
-    nemotron_parse_workers: float = 0.0
-    gpu_nemotron_parse: float = 0.0
-    nemotron_parse_batch_size: float = 0.0
+    nemotron_parse_workers: Optional[int] = None
+    gpu_nemotron_parse: Optional[float] = None
+    nemotron_parse_batch_size: Optional[int] = None
     inference_batch_size: int = 8
 
 
@@ -257,6 +257,8 @@ class EmbedParams(_ParamsModel):
     has_embedding_column: str = "text_embeddings_1b_v2_has_embedding"
     embed_output_column: str = "text_embeddings_1b_v2"
     embed_inference_batch_size: int = 16
+    # Concurrent HTTP embedding requests per Ray batch (OpenAI-compatible NIM).
+    nim_http_max_concurrent: int = 32
 
     runtime: ModelRuntimeParams = Field(default_factory=ModelRuntimeParams)
     batch_tuning: BatchTuningParams = Field(default_factory=BatchTuningParams)
