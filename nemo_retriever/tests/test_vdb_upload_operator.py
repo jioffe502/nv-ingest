@@ -14,6 +14,7 @@ import pytest
 
 from nemo_retriever.graph.vdb_upload_operator import VDBUploadOperator
 from nemo_retriever.params.models import LanceDbParams, VdbUploadParams
+from nv_ingest_client.util.vdb.adt_vdb import VDB
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,28 @@ def lance_params(tmp_path):
 @pytest.fixture()
 def vdb_params(lance_params):
     return VdbUploadParams(lancedb=lance_params)
+
+
+class CustomVDB(VDB):
+    """Minimal custom backend proving the operator uses the legacy VDB ADT."""
+
+    def __init__(self):
+        super().__init__()
+        self.create_index_calls = []
+        self.write_to_index_calls = []
+
+    def create_index(self, **kwargs):
+        self.create_index_calls.append(kwargs)
+
+    def write_to_index(self, records: list, **kwargs):
+        self.write_to_index_calls.append((records, kwargs))
+
+    def retrieval(self, queries: list, **kwargs):
+        return []
+
+    def run(self, records):
+        self.create_index()
+        self.write_to_index(records)
 
 
 # ---------------------------------------------------------------------------
@@ -208,52 +231,81 @@ class TestArrowSerializationCompat:
 
 
 class TestVDBUploadMilvus:
-    """VDBUploadOperator wrapping a mocked Milvus client VDB."""
+    """VDBUploadOperator wrapping a Milvus client VDB."""
 
-    def _make_milvus_params(self):
-        return VdbUploadParams(backend="milvus", client_vdb_kwargs={"collection_name": "test"})
+    def _make_milvus_vdb(self):
+        from nv_ingest_client.util.vdb import get_vdb_op_cls
 
-    def _make_mock_client(self):
-        mock_client = MagicMock()
-        mock_client.collection_name = "test"
-        mock_client.get_connection_params.return_value = ("test", {"milvus_uri": "http://localhost:19530"})
-        mock_client.get_write_params.return_value = ("test", {"collection_name": "test"})
-        return mock_client
+        Milvus = get_vdb_op_cls("milvus")
+        return Milvus(
+            milvus_uri="http://localhost:19530",
+            collection_name="test",
+            dense_dim=4,
+            recreate=True,
+            gpu_index=False,
+            sparse=False,
+        )
 
-    @patch("nemo_retriever.graph.vdb_upload_operator.get_vdb_op_cls", create=True)
-    def test_delegates_to_client_write_to_index(self, mock_get_cls):
-        mock_client = self._make_mock_client()
-        mock_get_cls.return_value = lambda **kwargs: mock_client
+    def test_streams_directly_to_milvus_client(self):
+        milvus_vdb = self._make_milvus_vdb()
+        op = VDBUploadOperator(vdb_op=milvus_vdb)
+        fake_client = MagicMock()
+        fake_client_cls = MagicMock(return_value=fake_client)
+        create_collection = MagicMock()
+        cleanup_records = MagicMock(
+            return_value=[
+                {"text": "content 0", "vector": [0.0, 1.0, 2.0, 3.0]},
+                {"text": "content 1", "vector": [1.0, 2.0, 3.0, 4.0]},
+                {"text": "content 2", "vector": [2.0, 3.0, 4.0, 5.0]},
+            ]
+        )
 
-        params = self._make_milvus_params()
-        op = VDBUploadOperator(params=params)
-        df = _make_embedded_df(3)
+        with patch.object(
+            VDBUploadOperator,
+            "_load_milvus_write_helpers",
+            return_value=(fake_client_cls, cleanup_records, create_collection, MagicMock()),
+        ):
+            op.run(_make_embedded_df(3))
 
-        with patch("nv_ingest_client.util.vdb.get_vdb_op_cls", return_value=lambda **kw: mock_client):
-            op.run(df)
+        create_collection.assert_called_once()
+        fake_client_cls.assert_called_once_with(uri="http://localhost:19530")
+        cleanup_records.assert_called_once()
+        fake_client.insert.assert_called_once()
+        assert fake_client.insert.call_args.kwargs["collection_name"] == "test"
+        assert len(fake_client.insert.call_args.kwargs["data"]) == 3
 
-        mock_client.create_index.assert_called_once()
-        mock_client.write_to_index.assert_called_once()
-        call_args = mock_client.write_to_index.call_args[0][0]
-        assert isinstance(call_args, list)
-        assert isinstance(call_args[0], list)
-        assert call_args[0][0]["document_type"] == "text"
-        assert "embedding" in call_args[0][0]["metadata"]
+    def test_multiple_batches_reuse_milvus_client(self):
+        milvus_vdb = self._make_milvus_vdb()
+        op = VDBUploadOperator(vdb_op=milvus_vdb)
+        fake_client = MagicMock()
+        fake_client_cls = MagicMock(return_value=fake_client)
+        create_collection = MagicMock()
+        cleanup_records = MagicMock(return_value=[{"text": "content", "vector": [0.0, 1.0, 2.0, 3.0]}])
 
-    @patch("nemo_retriever.graph.vdb_upload_operator.get_vdb_op_cls", create=True)
-    def test_multiple_batches_call_write_per_batch(self, mock_get_cls):
-        mock_client = self._make_mock_client()
-        mock_get_cls.return_value = lambda **kwargs: mock_client
-
-        params = self._make_milvus_params()
-        op = VDBUploadOperator(params=params)
-
-        with patch("nv_ingest_client.util.vdb.get_vdb_op_cls", return_value=lambda **kw: mock_client):
+        with patch.object(
+            VDBUploadOperator,
+            "_load_milvus_write_helpers",
+            return_value=(fake_client_cls, cleanup_records, create_collection, MagicMock()),
+        ):
             op.run(_make_embedded_df(2))
             op.run(_make_embedded_df(3))
 
-        mock_client.create_index.assert_called_once()
-        assert mock_client.write_to_index.call_count == 2
+        create_collection.assert_called_once()
+        fake_client_cls.assert_called_once_with(uri="http://localhost:19530")
+        assert fake_client.insert.call_count == 2
+
+    def test_milvus_sparse_streaming_is_explicitly_unsupported(self):
+        milvus_vdb = self._make_milvus_vdb()
+        milvus_vdb.sparse = True
+        op = VDBUploadOperator(vdb_op=milvus_vdb)
+
+        with patch.object(
+            VDBUploadOperator,
+            "_load_milvus_write_helpers",
+            return_value=(MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+        ):
+            with pytest.raises(NotImplementedError, match="sparse/hybrid"):
+                op.run(_make_embedded_df(1))
 
 
 # ---------------------------------------------------------------------------
@@ -288,25 +340,28 @@ class TestPreConstructedVDB:
         assert table.count_rows() == 2
 
     def test_accepts_arbitrary_vdb_instance(self):
-        """A non-LanceDB instance routes through the client write path."""
-        mock_vdb = MagicMock()
-        type(mock_vdb).__name__ = "Milvus"
-        mock_vdb.get_connection_params.return_value = ("c", {"milvus_uri": "x"})
-        mock_vdb.get_write_params.return_value = ("c", {"collection_name": "c"})
+        """A non-LanceDB custom instance routes through ADT methods only."""
+        mock_vdb = CustomVDB()
 
         op = VDBUploadOperator(vdb_op=mock_vdb)
-        assert op._backend_name == "milvus"
+        assert op._backend_name == "customvdb"
         assert op._client_vdb is mock_vdb
 
         op.run(_make_embedded_df(2))
 
-        mock_vdb.create_index.assert_called_once()
-        mock_vdb.write_to_index.assert_called_once()
+        assert mock_vdb.create_index_calls == [{}]
+        assert len(mock_vdb.write_to_index_calls) == 1
+        written_records, write_kwargs = mock_vdb.write_to_index_calls[0]
+        assert write_kwargs == {}
+        assert isinstance(written_records, list)
+        assert isinstance(written_records[0], list)
+        assert written_records[0][0]["document_type"] == "text"
+        assert not hasattr(mock_vdb, "get_connection_params")
+        assert not hasattr(mock_vdb, "get_write_params")
 
     def test_constructor_kwargs_round_trip(self):
         """get_constructor_kwargs captures both params and vdb_op for Ray reconstruction."""
-        mock_vdb = MagicMock()
-        type(mock_vdb).__name__ = "Milvus"
+        mock_vdb = CustomVDB()
 
         op = VDBUploadOperator(params=VdbUploadParams(), vdb_op=mock_vdb)
         kwargs = op.get_constructor_kwargs()
@@ -332,3 +387,66 @@ class TestVDBFinalization:
         db = lancedb.connect(lance_params.lancedb_uri)
         table = db.open_table(lance_params.table_name)
         assert table.count_rows() == 5
+
+    def test_lancedb_finalize_is_noop(self, lance_params):
+        from nv_ingest_client.util.vdb import get_vdb_op_cls
+
+        LanceDB = get_vdb_op_cls("lancedb")
+        op = VDBUploadOperator(vdb_op=LanceDB(uri=lance_params.lancedb_uri, table_name=lance_params.table_name))
+
+        with patch.object(op, "_finalize_milvus") as finalize_milvus:
+            op.finalize()
+
+        finalize_milvus.assert_not_called()
+
+    def test_milvus_finalize_waits_once(self):
+        from nv_ingest_client.util.vdb import get_vdb_op_cls
+
+        Milvus = get_vdb_op_cls("milvus")
+        milvus_vdb = Milvus(
+            milvus_uri="http://localhost:19530",
+            collection_name="test",
+            dense_dim=4,
+            recreate=True,
+            gpu_index=False,
+            sparse=False,
+        )
+        op = VDBUploadOperator(vdb_op=milvus_vdb)
+        fake_client = MagicMock()
+        fake_client.has_collection.return_value = True
+        fake_client.get_collection_stats.return_value = {"row_count": 7}
+        fake_client.list_indexes.return_value = ["dense_index", "sparse_index"]
+        fake_client_cls = MagicMock(return_value=fake_client)
+        wait_for_index = MagicMock()
+
+        with patch.object(
+            VDBUploadOperator,
+            "_load_milvus_finalize_helpers",
+            return_value=(fake_client_cls, wait_for_index),
+        ):
+            op.finalize()
+
+        fake_client_cls.assert_called_once_with(uri="http://localhost:19530")
+        fake_client.flush.assert_called_once_with("test")
+        wait_for_index.assert_called_once_with(
+            "test",
+            {"dense_index": 7, "sparse_index": 7},
+            fake_client,
+        )
+
+    def test_milvus_finalize_constructs_params_backend(self):
+        params = VdbUploadParams(backend="milvus", client_vdb_kwargs={"collection_name": "test"})
+        op = VDBUploadOperator(params=params)
+        fake_vdb = MagicMock()
+        fake_cls = MagicMock(return_value=fake_vdb)
+
+        with (
+            patch("nv_ingest_client.util.vdb.get_vdb_op_cls", return_value=fake_cls),
+            patch.object(VDBUploadOperator, "_is_milvus_vdb", return_value=True),
+            patch.object(op, "_finalize_milvus") as finalize_milvus,
+        ):
+            op.finalize()
+
+        fake_cls.assert_called_once_with(collection_name="test")
+        assert op._client_vdb is fake_vdb
+        finalize_milvus.assert_called_once_with()

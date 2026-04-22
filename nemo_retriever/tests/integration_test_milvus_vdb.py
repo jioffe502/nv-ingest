@@ -13,11 +13,12 @@ This is NOT part of the pytest suite — it requires external infrastructure.
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pandas as pd
 
-MILVUS_URI = "http://172.20.0.4:19530"
+MILVUS_URI = os.environ.get("NEMO_RETRIEVER_MILVUS_URI", "http://172.20.0.4:19530")
 COLLECTION_NAME = "nemo_retriever_integration_test"
 EMBED_DIM = 128
 
@@ -80,7 +81,10 @@ def main():
     result2 = op.run(df_batch2)
     print(f"[OK] Batch 2: {len(result2)} rows passed through, records written")
 
-    # --- Step 3: Verify data landed in Milvus ---
+    # --- Step 3: Finalize indexing and verify data landed in Milvus ---
+    op.finalize()
+    print("[OK] Finalized Milvus collection")
+
     from pymilvus import MilvusClient
 
     client = MilvusClient(uri=MILVUS_URI)
