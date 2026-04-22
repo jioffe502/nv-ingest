@@ -532,7 +532,16 @@ class GraphIngestor(ingestor):
 
         client = self._vdb_op if self._vdb_op is not None else build_client_lancedb(lance_params, overwrite=False)
         try:
-            client.write_to_index(None, table=table)
+            client.write_to_index(
+                None,
+                table=table,
+                index_type=getattr(client, "index_type", lance_params.index_type),
+                metric=getattr(client, "metric", lance_params.metric),
+                num_partitions=getattr(client, "num_partitions", lance_params.num_partitions),
+                num_sub_vectors=getattr(client, "num_sub_vectors", lance_params.num_sub_vectors),
+                hybrid=getattr(client, "hybrid", lance_params.hybrid),
+                fts_language=getattr(client, "fts_language", lance_params.fts_language),
+            )
         except RuntimeError:
             logger.warning(
                 "Index creation failed (likely too few rows for %d partitions); skipping.",

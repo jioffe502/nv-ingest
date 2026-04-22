@@ -145,12 +145,56 @@ def _write_runtime_summary(
         out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _count_input_units(result_df) -> int:
-    if "source_id" in result_df.columns:
-        return int(result_df["source_id"].nunique())
-    if "source_path" in result_df.columns:
-        return int(result_df["source_path"].nunique())
+def _page_keys_from_df(result_df) -> list[str]:
+    """Return stable page/input-unit keys from a pipeline result DataFrame."""
+    if result_df is None or result_df.empty:
+        return []
+
+    source_column = next((c for c in ("source_id", "path", "source_path") if c in result_df.columns), None)
+    if source_column is not None and "page_number" in result_df.columns:
+        key_df = result_df[[source_column, "page_number"]].dropna()
+        return [f"{source}\x1f{page}" for source, page in key_df.itertuples(index=False, name=None)]
+
+    if source_column is not None:
+        return [str(v) for v in result_df[source_column].dropna().tolist()]
+
+    if "page_number" in result_df.columns:
+        return [str(v) for v in result_df["page_number"].dropna().tolist()]
+
+    return []
+
+
+def _count_processed_pages_from_df(result_df) -> int:
+    keys = _page_keys_from_df(result_df)
+    if keys:
+        return int(len(set(keys)))
     return int(len(result_df.index))
+
+
+def _extract_page_key_batch(batch):
+    import pandas as pd
+
+    keys = _page_keys_from_df(batch)
+    return pd.DataFrame({"_page_key": keys})
+
+
+def _count_processed_pages_from_dataset(dataset, *, fallback_rows: int) -> int:
+    try:
+        columns = set(dataset.columns())
+    except Exception:
+        return int(fallback_rows)
+
+    if not columns.intersection({"source_id", "path", "source_path", "page_number"}):
+        return int(fallback_rows)
+
+    try:
+        key_ds = dataset.map_batches(_extract_page_key_batch, batch_format="pandas")
+        if int(key_ds.count()) == 0:
+            return 0
+        return int(key_ds.groupby("_page_key").count().count())
+    except Exception:
+        logger.warning("Could not estimate processed pages from Ray Dataset; falling back to output row count.", exc_info=True)
+        return int(fallback_rows)
 
 
 def _resolve_file_patterns(input_path: Path, input_type: str) -> list[str]:
@@ -551,12 +595,15 @@ def main(
         ingestion_only_total_time = time.perf_counter() - ingest_start
 
         # ------------------------------------------------------------------
-        # Collect results (only when needed for detection summary / counting)
+        # Collect results only when downstream features need the full DataFrame.
+        # Page/row metrics stay separate: PPS is pages/sec, while num_rows tracks
+        # output rows after any content explosion.
         # ------------------------------------------------------------------
         if run_mode == "batch":
             import ray
 
-            if detection_summary_file is not None:
+            needs_result_df = detection_summary_file is not None or save_intermediate is not None
+            if needs_result_df:
                 ray_download_start = time.perf_counter()
                 ingest_local_results = result.take_all()
                 ray_download_time = time.perf_counter() - ray_download_start
@@ -564,17 +611,20 @@ def main(
                 import pandas as pd
 
                 result_df = pd.DataFrame(ingest_local_results)
-                num_rows = _count_input_units(result_df)
+                processed_pages = _count_processed_pages_from_df(result_df)
+                output_rows = int(len(result_df.index))
             else:
                 ray_download_time = 0.0
                 result_df = None
-                num_rows = result.count()
+                output_rows = int(result.count())
+                processed_pages = _count_processed_pages_from_dataset(result, fallback_rows=output_rows)
         else:
             import pandas as pd
 
             result_df = result
             ray_download_time = 0.0
-            num_rows = _count_input_units(result_df)
+            processed_pages = _count_processed_pages_from_df(result_df)
+            output_rows = int(len(result_df.index))
 
         if save_intermediate is not None:
             out_dir = Path(save_intermediate).expanduser().resolve()
@@ -604,9 +654,9 @@ def main(
                 {
                     "run_mode": run_mode,
                     "input_path": str(Path(input_path).resolve()),
-                    "input_pages": int(num_rows),
-                    "num_pages": int(num_rows),
-                    "num_rows": int(num_rows),
+                    "input_pages": int(processed_pages),
+                    "num_pages": int(processed_pages),
+                    "num_rows": int(output_rows),
                     "ingestion_only_secs": float(ingestion_only_total_time),
                     "ray_download_secs": float(ray_download_time),
                     "lancedb_write_secs": 0.0,
@@ -625,7 +675,14 @@ def main(
         import lancedb as _lancedb_mod
 
         db = _lancedb_mod.connect(lancedb_uri)
-        table = db.open_table(LANCEDB_TABLE)
+        try:
+            table = db.open_table(LANCEDB_TABLE)
+        except Exception:
+            logger.warning("LanceDB table %r was not created; skipping %s evaluation.", LANCEDB_TABLE, evaluation_mode)
+            _empty_summary("lancedb_table_missing")
+            if run_mode == "batch":
+                ray.shutdown()
+            return
 
         if int(table.count_rows()) == 0:
             logger.warning("LanceDB table is empty; skipping %s evaluation.", evaluation_mode)
@@ -712,9 +769,9 @@ def main(
             {
                 "run_mode": run_mode,
                 "input_path": str(Path(input_path).resolve()),
-                "input_pages": int(num_rows),
-                "num_pages": int(num_rows),
-                "num_rows": int(num_rows),
+                "input_pages": int(processed_pages),
+                "num_pages": int(processed_pages),
+                "num_rows": int(output_rows),
                 "ingestion_only_secs": float(ingestion_only_total_time),
                 "ray_download_secs": float(ray_download_time),
                 "lancedb_write_secs": 0.0,
@@ -734,7 +791,7 @@ def main(
             ray.shutdown()
 
         print_run_summary(
-            num_rows,
+            processed_pages,
             Path(input_path),
             hybrid,
             lancedb_uri,

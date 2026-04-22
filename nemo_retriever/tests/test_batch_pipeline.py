@@ -2,6 +2,7 @@ import sys
 import json
 from types import SimpleNamespace
 
+import pandas as pd
 from typer.testing import CliRunner
 
 import nemo_retriever.examples.graph_pipeline as batch_pipeline
@@ -124,6 +125,19 @@ def test_graph_pipeline_resolves_nested_pdf_directories(tmp_path) -> None:
     patterns = batch_pipeline._resolve_file_patterns(dataset_dir, "pdf")
 
     assert patterns == [str(dataset_dir / "**" / "*.pdf")]
+
+
+def test_graph_pipeline_counts_pages_separately_from_output_rows() -> None:
+    df = pd.DataFrame(
+        [
+            {"path": "/data/a.pdf", "page_number": 1, "text": "page text"},
+            {"path": "/data/a.pdf", "page_number": 1, "text": "table text"},
+            {"path": "/data/a.pdf", "page_number": 2, "text": "page text"},
+        ]
+    )
+
+    assert batch_pipeline._count_processed_pages_from_df(df) == 2
+    assert len(df.index) == 3
 
 
 def test_batch_pipeline_accepts_multimodal_embed_and_page_image_flags(tmp_path, monkeypatch) -> None:
