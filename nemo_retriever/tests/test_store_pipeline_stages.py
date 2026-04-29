@@ -2,13 +2,14 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Graph-level tests for StoreOperator at multiple pipeline positions."""
+"""Graph-level tests for StoreOperator."""
 
 from __future__ import annotations
 
 import base64
 import io
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 
@@ -25,86 +26,116 @@ def _make_tiny_png_b64(width: int = 4, height: int = 4, color=(255, 0, 0)) -> st
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _make_post_ocr_df(b64: str) -> pd.DataFrame:
-    """Build a single-row DataFrame matching post-OCR pipeline output."""
+def _make_embedded_df(b64: str | None = None) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "path": "/docs/test.pdf",
                 "page_number": 1,
-                "page_image": {"image_b64": b64},
                 "text": "Sample page text",
-                "table": [{"text": "col1|col2", "image_b64": b64}],
-                "chart": [{"text": "chart data", "bbox_xyxy_norm": [0.1, 0.1, 0.9, 0.9]}],
-                "infographic": [],
-                "images": [{"image_b64": b64}],
+                "_content_type": "text",
+                "_bbox_xyxy_norm": None,
+                "_image_b64": b64,
+                "page_image": {"image_b64": b64, "stored_image_uri": "file:///old/page.png"},
+                "table": [
+                    {
+                        "text": "col1|col2",
+                        "image_b64": b64,
+                        "stored_image_uri": "file:///old/table.png",
+                    }
+                ],
             }
         ]
     )
 
 
 class TestStoreOperatorInGraph:
-    def test_store_operator_runs_in_graph(self, tmp_path: Path):
-        """StoreOperator works end-to-end through InprocessExecutor,
-        including kwargs reconstruction (the Ray worker serialization contract)."""
+    def test_store_operator_writes_row_image_and_sets_top_level_uri(self, tmp_path: Path):
         b64 = _make_tiny_png_b64()
-        df = _make_post_ocr_df(b64)
+        df = _make_embedded_df(b64)
 
-        params = StoreParams(storage_uri=str(tmp_path))
-        graph = UDFOperator(lambda x: x, name="Identity") >> StoreOperator(params=params)
+        graph = UDFOperator(lambda x: x, name="Identity") >> StoreOperator(
+            params=StoreParams(storage_uri=str(tmp_path))
+        )
         result = InprocessExecutor(graph, show_progress=False).ingest(df)
 
-        assert (tmp_path / "test" / "page_1.png").exists()
-        assert (tmp_path / "test" / "page_1_table_0.png").exists()
-        assert (tmp_path / "test" / "page_1_image_0.png").exists()
-        assert "stored_image_uri" in result.iloc[0]["page_image"]
+        files = list(tmp_path.rglob("*.png"))
+        assert len(files) == 1
+        assert files[0].read_bytes() == base64.b64decode(b64)
 
-    def test_two_store_nodes_different_positions(self, tmp_path: Path):
-        """Store at position A sees different content than store at position B.
+        stored_uri = result.iloc[0]["_stored_image_uri"]
+        assert stored_uri.startswith("file://")
+        assert Path(urlparse(stored_uri).path).exists()
 
-        Graph: store(stage_a) >> add_table >> store(stage_b)
-
-        stage_a should have only page image (no table yet).
-        stage_b should have page image AND the table added between stores.
-        """
+    def test_store_operator_preserves_inline_and_nested_payloads(self, tmp_path: Path):
         b64 = _make_tiny_png_b64()
-        df = pd.DataFrame(
-            [
-                {
-                    "path": "/docs/test.pdf",
-                    "page_number": 1,
-                    "page_image": {"image_b64": b64},
-                    "text": "",
-                    "table": [],
-                    "chart": [],
-                    "infographic": [],
-                    "images": [],
-                }
-            ]
+        df = _make_embedded_df(b64)
+
+        result = StoreOperator(params=StoreParams(storage_uri=str(tmp_path))).process(df)
+
+        assert result.iloc[0]["_image_b64"] == b64
+        assert result.iloc[0]["page_image"]["image_b64"] == b64
+        assert result.iloc[0]["page_image"]["stored_image_uri"] == "file:///old/page.png"
+        assert result.iloc[0]["table"][0]["image_b64"] == b64
+        assert result.iloc[0]["table"][0]["stored_image_uri"] == "file:///old/table.png"
+
+    def test_store_operator_skips_rows_without_image_b64(self, tmp_path: Path):
+        df = _make_embedded_df(None)
+
+        result = StoreOperator(params=StoreParams(storage_uri=str(tmp_path))).process(df)
+
+        assert not list(tmp_path.rglob("*"))
+        assert "_stored_image_uri" not in result.columns
+
+    def test_store_operator_forwards_storage_options(self, monkeypatch):
+        b64 = _make_tiny_png_b64()
+        df = _make_embedded_df(b64)
+        calls: list[tuple[str, str, dict]] = []
+
+        class _Writer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def write(self, data: bytes) -> int:
+                self.data = data
+                return len(data)
+
+        def _fake_open(path: str, mode: str = "rb", **kwargs):
+            calls.append((path, mode, kwargs))
+            return _Writer()
+
+        monkeypatch.setattr("nemo_retriever.graph.store_operator.fsspec.open", _fake_open)
+
+        params = StoreParams(
+            storage_uri="s3://bucket/prefix",
+            storage_options={"key": "YOUR_KEY", "secret": "YOUR_SECRET"},
         )
+        result = StoreOperator(params=params).process(df)
 
-        def _add_table_column(df: pd.DataFrame) -> pd.DataFrame:
-            b64 = _make_tiny_png_b64(color=(0, 255, 0))
-            df = df.copy()
-            df["table"] = [[{"text": "added later", "image_b64": b64}]]
-            return df
+        assert len(calls) == 1
+        assert calls[0][0].startswith("s3://bucket/prefix/")
+        assert calls[0][1] == "wb"
+        assert calls[0][2] == {"key": "YOUR_KEY", "secret": "YOUR_SECRET"}
+        assert result.iloc[0]["_stored_image_uri"].startswith("s3://bucket/prefix/")
 
-        stage_a = tmp_path / "stage_a"
-        stage_b = tmp_path / "stage_b"
-        params_a = StoreParams(storage_uri=str(stage_a), strip_base64=False)
-        params_b = StoreParams(storage_uri=str(stage_b), strip_base64=False)
+    def test_embedding_preserves_image_b64_for_post_embed_store(self, monkeypatch):
+        from nemo_retriever.text_embed import runtime
 
-        graph = (
-            StoreOperator(params=params_a)
-            >> UDFOperator(_add_table_column, name="AddTable")
-            >> StoreOperator(params=params_b)
-        )
-        InprocessExecutor(graph, show_progress=False).ingest(df)
+        b64 = _make_tiny_png_b64()
+        df = _make_embedded_df(b64)
+        df["_embed_modality"] = "text_image"
 
-        # stage_a: only page image, no table content existed yet
-        assert (stage_a / "test" / "page_1.png").exists()
-        assert not list(stage_a.rglob("*_table_*"))
+        def _fake_embed_group(group_df: pd.DataFrame, **kwargs):
+            out = group_df.copy()
+            out["metadata"] = [{"embedding": [0.1, 0.2]} for _ in range(len(out.index))]
+            return out
 
-        # stage_b: page image + table file (added by UDF between stores)
-        assert (stage_b / "test" / "page_1.png").exists()
-        assert (stage_b / "test" / "page_1_table_0.png").exists()
+        monkeypatch.setattr(runtime, "_embed_group", _fake_embed_group)
+
+        result = runtime.embed_text_main_text_embed(df, model=object(), embed_modality="text_image")
+
+        assert result.iloc[0]["_image_b64"] == b64
+        assert "_embed_modality" not in result.columns

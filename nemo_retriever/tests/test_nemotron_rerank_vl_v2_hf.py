@@ -396,6 +396,44 @@ class TestContentTransformsStoredImageURI:
         assert "_stored_image_uri" in result.columns
         assert result.iloc[0]["_stored_image_uri"] == "file:///page.png"
 
+    def test_explode_does_not_reload_stored_uri_for_embedding(self, monkeypatch):
+        from nemo_retriever.graph.content_transforms import explode_content_to_rows
+
+        def _fail_load(uri):
+            pytest.fail(f"content transform attempted to reload stored image URI: {uri}")
+
+        monkeypatch.setattr("nemo_retriever.io.image_store.load_image_b64_from_uri", _fail_load)
+
+        df = pd.DataFrame(
+            {
+                "text": ["Page text"],
+                "page_image": [{"image_b64": None, "stored_image_uri": "file:///page.png"}],
+            }
+        )
+        result = explode_content_to_rows(df, modality="text_image")
+
+        assert result.iloc[0]["_image_b64"] is None
+        assert result.iloc[0]["_stored_image_uri"] == "file:///page.png"
+
+    def test_collapse_does_not_reload_stored_uri_for_embedding(self, monkeypatch):
+        from nemo_retriever.graph.content_transforms import collapse_content_to_page_rows
+
+        def _fail_load(uri):
+            pytest.fail(f"content transform attempted to reload stored image URI: {uri}")
+
+        monkeypatch.setattr("nemo_retriever.io.image_store.load_image_b64_from_uri", _fail_load)
+
+        df = pd.DataFrame(
+            {
+                "text": ["Page text"],
+                "page_image": [{"image_b64": None, "stored_image_uri": "file:///page.png"}],
+            }
+        )
+        result = collapse_content_to_page_rows(df, modality="text_image")
+
+        assert result.iloc[0]["_image_b64"] is None
+        assert result.iloc[0]["_stored_image_uri"] == "file:///page.png"
+
 
 # ---------------------------------------------------------------------------
 # lancedb_utils — stored_image_uri in schema and row building
