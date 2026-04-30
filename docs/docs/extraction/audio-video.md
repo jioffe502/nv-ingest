@@ -34,7 +34,7 @@ This pipeline enables users to retrieve speech files at the segment level.
 
 ## Run the NIM locally (Helm)
 
-Use the following procedure to run the NIM on your own infrastructure.
+Use the following procedure to run the NIM on your own infrastructure. Self-hosted Parakeet runs on Kubernetes via the [NeMo Retriever Helm chart](https://github.com/NVIDIA/NeMo-Retriever/blob/main/helm/README.md).
 
 !!! important
 
@@ -57,7 +57,7 @@ Use the following procedure to run the NIM on your own infrastructure.
     NGC_API_KEY=<your-ngc-key>
     ```
 
-3. Deploy or upgrade NeMo Retriever extraction with the Helm chart and enable the ASR / audio components your release requires (Parakeet and related services). Follow [Deploy (Helm chart)](https://github.com/NVIDIA/NeMo-Retriever/blob/main/helm/README.md) and [Deployment options](deployment-options.md). Ensure the chart values for your cluster request the ASR NIM and any dependencies (for example, retrieval or Milvus) that match how you call the library.
+3. Deploy or upgrade NeMo Retriever Library with the Helm chart and enable the ASR / audio components your release requires (Parakeet and related services). Follow [Deploy (Helm chart)](https://github.com/NVIDIA/NeMo-Retriever/blob/main/helm/README.md) and [Deployment options](deployment-options.md). Ensure the chart values for your cluster request the ASR NIM.
 
 4. After the services are running, you can interact with the pipeline by using Python.
 
@@ -79,7 +79,8 @@ Use the following procedure to run the NIM on your own infrastructure.
         )
     )
     ```
-To generate one extracted element for each sentence-like ASR segment, include `extract_audio_params={"segment_audio": True}` when calling `.extract(...)`. This option applies when audio extraction runs with a Parakeet NIM (either self-hosted on your cluster or remotely via NVCF) but has no effect when using the local Hugging Face Parakeet model.
+
+    To generate one extracted element for each sentence-like ASR segment, include `extract_audio_params={"segment_audio": True}` when calling `.extract(...)`. This option applies when audio extraction runs with a Parakeet NIM (either self-hosted on your cluster or remotely via NVCF) but has no effect when using the local Hugging Face Parakeet model.
 
     !!! tip
 
