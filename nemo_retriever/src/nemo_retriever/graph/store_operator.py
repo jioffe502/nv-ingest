@@ -119,6 +119,7 @@ def _store_row_images(
     storage_uri: str,
     storage_options: dict[str, Any] | None = None,
     image_format: str = "png",
+    strip_base64: bool = True,
 ) -> pd.DataFrame:
     """Return a copy of *df* with ``_stored_image_uri`` set for stored rows."""
     if df.empty or ("_image_b64" not in df.columns and "page_image" not in df.columns):
@@ -143,7 +144,18 @@ def _store_row_images(
         except Exception as exc:
             raise RuntimeError(f"Failed to store image for row {idx!r} to {dest_uri!r}: {exc}") from exc
 
-        out.at[idx, "_stored_image_uri"] = _stored_uri(dest_uri)
+        stored_uri = _stored_uri(dest_uri)
+        out.at[idx, "_stored_image_uri"] = stored_uri
+
+        if strip_base64:
+            if "_image_b64" in out.columns:
+                out.at[idx, "_image_b64"] = None
+            page_image = row.get("page_image")
+            if isinstance(page_image, dict):
+                updated_page_image = dict(page_image)
+                updated_page_image["image_b64"] = None
+                updated_page_image["stored_image_uri"] = stored_uri
+                out.at[idx, "page_image"] = updated_page_image
 
     return out
 
@@ -152,8 +164,9 @@ class StoreOperator(AbstractOperator, CPUOperator):
     """Persist row-level image payloads to local or object storage.
 
     The operator consumes ``_image_b64`` produced by content transforms and
-    writes ``_stored_image_uri`` for downstream vector DB upload. It does not
-    inspect nested extraction payloads or clear base64 data.
+    writes ``_stored_image_uri`` for downstream vector DB upload. By default it
+    clears inline base64 after successful writes to avoid carrying page-sized
+    payloads into VDB upload.
     """
 
     def __init__(self, *, params: Any = None) -> None:
@@ -178,6 +191,7 @@ class StoreOperator(AbstractOperator, CPUOperator):
             storage_uri=store_kwargs.get("storage_uri", "stored_images"),
             storage_options=store_kwargs.get("storage_options") or {},
             image_format=store_kwargs.get("image_format", "png"),
+            strip_base64=bool(store_kwargs.get("strip_base64", True)),
         )
 
     def postprocess(self, data: Any, **kwargs: Any) -> Any:

@@ -67,15 +67,15 @@ class TestStoreOperatorInGraph:
         assert stored_uri.startswith("file://")
         assert Path(urlparse(stored_uri).path).exists()
 
-    def test_store_operator_preserves_inline_and_nested_payloads(self, tmp_path: Path):
+    def test_store_operator_clears_inline_and_nested_payloads_after_write(self, tmp_path: Path):
         b64 = _make_tiny_png_b64()
         df = _make_embedded_df(b64)
 
         result = StoreOperator(params=StoreParams(storage_uri=str(tmp_path))).process(df)
 
-        assert result.iloc[0]["_image_b64"] == b64
-        assert result.iloc[0]["page_image"]["image_b64"] == b64
-        assert result.iloc[0]["page_image"]["stored_image_uri"] == "file:///old/page.png"
+        assert result.iloc[0]["_image_b64"] is None
+        assert result.iloc[0]["page_image"]["image_b64"] is None
+        assert result.iloc[0]["page_image"]["stored_image_uri"] == result.iloc[0]["_stored_image_uri"]
         assert result.iloc[0]["table"][0]["image_b64"] == b64
         assert result.iloc[0]["table"][0]["stored_image_uri"] == "file:///old/table.png"
 
@@ -97,6 +97,7 @@ class TestStoreOperatorInGraph:
         assert len(files) == 1
         assert files[0].read_bytes() == base64.b64decode(b64)
         assert result.iloc[0]["_stored_image_uri"].startswith("file://")
+        assert result.iloc[0]["page_image"]["image_b64"] is None
 
     def test_store_operator_forwards_storage_options(self, monkeypatch):
         b64 = _make_tiny_png_b64()
