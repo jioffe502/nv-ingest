@@ -87,6 +87,17 @@ class TestStoreOperatorInGraph:
         assert not list(tmp_path.rglob("*"))
         assert "_stored_image_uri" not in result.columns
 
+    def test_store_operator_uses_page_image_when_row_image_column_is_absent(self, tmp_path: Path):
+        b64 = _make_tiny_png_b64()
+        df = _make_embedded_df(b64).drop(columns=["_image_b64"])
+
+        result = StoreOperator(params=StoreParams(storage_uri=str(tmp_path))).process(df)
+
+        files = list(tmp_path.rglob("*.png"))
+        assert len(files) == 1
+        assert files[0].read_bytes() == base64.b64decode(b64)
+        assert result.iloc[0]["_stored_image_uri"].startswith("file://")
+
     def test_store_operator_forwards_storage_options(self, monkeypatch):
         b64 = _make_tiny_png_b64()
         df = _make_embedded_df(b64)

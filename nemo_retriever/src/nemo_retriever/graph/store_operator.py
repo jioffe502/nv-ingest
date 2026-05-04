@@ -101,6 +101,18 @@ def _stored_uri(dest_uri: str) -> str:
     return Path(dest_uri).resolve().as_uri()
 
 
+def _row_image_b64(row: pd.Series) -> Any:
+    value = row.get("_image_b64")
+    if isinstance(value, str) and value.strip():
+        return value
+
+    page_image = row.get("page_image")
+    if isinstance(page_image, dict):
+        return page_image.get("image_b64")
+
+    return None
+
+
 def _store_row_images(
     df: pd.DataFrame,
     *,
@@ -109,7 +121,7 @@ def _store_row_images(
     image_format: str = "png",
 ) -> pd.DataFrame:
     """Return a copy of *df* with ``_stored_image_uri`` set for stored rows."""
-    if df.empty or "_image_b64" not in df.columns:
+    if df.empty or ("_image_b64" not in df.columns and "page_image" not in df.columns):
         return df
 
     out = df.copy()
@@ -117,7 +129,7 @@ def _store_row_images(
     fsspec_options = dict(storage_options or {})
 
     for idx, row in out.iterrows():
-        raw = _decode_image_b64(row.get("_image_b64"))
+        raw = _decode_image_b64(_row_image_b64(row))
         if raw is None:
             continue
 
