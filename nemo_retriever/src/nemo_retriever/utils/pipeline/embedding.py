@@ -182,6 +182,7 @@ def embed_text_main_text_embed(
     out_df[has_embedding_column] = [bool(int(dim) > 0) for dim in out_df[embedding_dim_column].tolist()]
 
     if "_embed_modality" in out_df.columns:
+        # Internal embedding router column; StoreOperator consumes _image_b64.
         out_df = out_df.drop(columns=["_embed_modality"])
 
     return out_df

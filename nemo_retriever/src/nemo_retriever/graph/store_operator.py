@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import logging
 import os
@@ -53,19 +54,25 @@ def _decode_image_b64(value: Any) -> bytes | None:
 
     try:
         return base64.b64decode(payload)
-    except Exception as exc:
+    except binascii.Error as exc:
         logger.warning("Skipping store row with invalid _image_b64 payload: %s", exc)
         return None
 
 
 def _safe_segment(value: Any, *, default: str = "item", max_len: int = 120) -> str:
-    text = str(value or "").strip() or default
+    """Build a filesystem/object-store-safe key segment without mutating row data."""
+    text = str("" if value is None else value).strip() or default
     text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
     text = text.strip("._-") or default
     return text[:max_len]
 
 
-def _source_stem(source_path: Any) -> str:
+def _source_storage_prefix(source_path: Any) -> str:
+    """Return a compact storage prefix derived from source path basename and hash.
+
+    The original row ``path`` is preserved unchanged; this value is only used
+    as an object key prefix under the configured storage URI.
+    """
     source = str(source_path or "").strip()
     stem = os.path.splitext(os.path.basename(source))[0] if source else ""
     stem = _safe_segment(stem, default="document", max_len=100)
@@ -87,7 +94,7 @@ def _build_object_key(row: pd.Series, *, row_index: Any, raw: bytes, extension: 
     image_hash = hashlib.sha1(raw).hexdigest()[:12]
 
     filename = f"page_{page_number}_{content_type}_{row_id}_{image_hash}.{extension}"
-    return f"{_source_stem(row.get('path'))}/{filename}"
+    return f"{_source_storage_prefix(row.get('path'))}/{filename}"
 
 
 def _join_storage_uri(storage_uri: str, object_key: str) -> str:

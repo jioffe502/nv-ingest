@@ -10,15 +10,11 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
 
+from nemo_retriever.io.image_store import inline_image_b64
 from nemo_retriever.ocr.ocr import _crop_b64_image_by_norm_bbox
 from nemo_retriever.params.models import IMAGE_MODALITIES
 
 _CONTENT_COLUMNS = ("table", "chart", "infographic")
-
-
-def _inline_image_b64(container: dict) -> Optional[str]:
-    value = container.get("image_b64")
-    return value if isinstance(value, str) and value.strip() else None
 
 
 def _combine_text_with_content(row: Any, text_column: str, content_columns: Sequence[str]) -> str:
@@ -74,7 +70,7 @@ def explode_content_to_rows(
         batch_df = batch_df.copy()
         if text_mod in IMAGE_MODALITIES and "page_image" in batch_df.columns:
             batch_df["_image_b64"] = batch_df["page_image"].apply(
-                lambda page_image: _inline_image_b64(page_image) if isinstance(page_image, dict) else None
+                lambda page_image: inline_image_b64(page_image) if isinstance(page_image, dict) else None
             )
         if "page_image" in batch_df.columns:
             batch_df["_stored_image_uri"] = batch_df["page_image"].apply(
@@ -94,7 +90,7 @@ def explode_content_to_rows(
         if isinstance(page_image, dict):
             page_stored_uri = page_image.get("stored_image_uri")
             if any_images:
-                page_image_b64 = _inline_image_b64(page_image)
+                page_image_b64 = inline_image_b64(page_image)
 
         page_text = row_dict.get(text_column)
         if isinstance(page_text, str) and page_text.strip():
@@ -115,7 +111,7 @@ def explode_content_to_rows(
             for item in content_list:
                 if not isinstance(item, dict):
                     continue
-                item_b64 = _inline_image_b64(item) if struct_mod in IMAGE_MODALITIES else None
+                item_b64 = inline_image_b64(item) if struct_mod in IMAGE_MODALITIES else None
                 for field, content_type in [("text", column), ("caption", f"{column}_caption")]:
                     value = item.get(field, "")
                     if not isinstance(value, str) or not value.strip():
@@ -174,7 +170,7 @@ def collapse_content_to_page_rows(
     if modality in IMAGE_MODALITIES:
         if "page_image" in batch_df.columns:
             batch_df["_image_b64"] = batch_df["page_image"].apply(
-                lambda page_image: _inline_image_b64(page_image) if isinstance(page_image, dict) else None
+                lambda page_image: inline_image_b64(page_image) if isinstance(page_image, dict) else None
             )
         else:
             batch_df["_image_b64"] = None

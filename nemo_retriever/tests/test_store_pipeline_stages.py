@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pandas as pd
+import pytest
 
 from nemo_retriever.graph import InprocessExecutor, StoreOperator, UDFOperator
 from nemo_retriever.params import StoreParams
@@ -133,6 +134,39 @@ class TestStoreOperatorInGraph:
         assert calls[0][2] == {"key": "YOUR_KEY", "secret": "YOUR_SECRET"}
         assert result.iloc[0]["_stored_image_uri"].startswith("s3://bucket/prefix/")
 
+    def test_store_object_key_sanitizes_without_mutating_source_columns(self, monkeypatch):
+        b64 = _make_tiny_png_b64()
+        df = _make_embedded_df(b64)
+        df.at[0, "path"] = "/nested/source folders/report with spaces.pdf"
+        df.at[0, "page_number"] = 0
+        df.at[0, "_content_type"] = "text/page"
+        calls: list[str] = []
+
+        class _Writer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def write(self, data: bytes) -> int:
+                return len(data)
+
+        def _fake_open(path: str, mode: str = "rb", **kwargs):
+            calls.append(path)
+            return _Writer()
+
+        monkeypatch.setattr("nemo_retriever.graph.store_operator.fsspec.open", _fake_open)
+
+        result = StoreOperator(params=StoreParams(storage_uri="memory://stored")).process(df)
+
+        assert result.iloc[0]["path"] == "/nested/source folders/report with spaces.pdf"
+        assert result.iloc[0]["page_number"] == 0
+        assert result.iloc[0]["_content_type"] == "text/page"
+        assert calls
+        assert "/report_with_spaces-" in calls[0]
+        assert "/page_0_text_page_" in calls[0]
+
     def test_embedding_preserves_image_b64_for_post_embed_store(self, monkeypatch):
         from nemo_retriever.text_embed import runtime
 
@@ -151,3 +185,45 @@ class TestStoreOperatorInGraph:
 
         assert result.iloc[0]["_image_b64"] == b64
         assert "_embed_modality" not in result.columns
+
+    def test_store_params_reject_removed_legacy_knobs(self):
+        with pytest.raises(ValueError):
+            StoreParams(public_base_url="https://cdn.example.com")
+
+    def test_explode_does_not_reload_stored_uri_for_embedding(self, monkeypatch):
+        from nemo_retriever.graph.content_transforms import explode_content_to_rows
+
+        def _fail_load(uri):
+            raise AssertionError(f"content transform attempted to reload stored image URI: {uri}")
+
+        monkeypatch.setattr("nemo_retriever.io.image_store.load_image_b64_from_uri", _fail_load)
+
+        df = pd.DataFrame(
+            {
+                "text": ["Page text"],
+                "page_image": [{"image_b64": None, "stored_image_uri": "file:///page.png"}],
+            }
+        )
+        result = explode_content_to_rows(df, modality="text_image")
+
+        assert result.iloc[0]["_image_b64"] is None
+        assert result.iloc[0]["_stored_image_uri"] == "file:///page.png"
+
+    def test_collapse_does_not_reload_stored_uri_for_embedding(self, monkeypatch):
+        from nemo_retriever.graph.content_transforms import collapse_content_to_page_rows
+
+        def _fail_load(uri):
+            raise AssertionError(f"content transform attempted to reload stored image URI: {uri}")
+
+        monkeypatch.setattr("nemo_retriever.io.image_store.load_image_b64_from_uri", _fail_load)
+
+        df = pd.DataFrame(
+            {
+                "text": ["Page text"],
+                "page_image": [{"image_b64": None, "stored_image_uri": "file:///page.png"}],
+            }
+        )
+        result = collapse_content_to_page_rows(df, modality="text_image")
+
+        assert result.iloc[0]["_image_b64"] is None
+        assert result.iloc[0]["_stored_image_uri"] == "file:///page.png"

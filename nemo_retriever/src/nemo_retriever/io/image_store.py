@@ -2,18 +2,22 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Image recovery helpers used by VL reranking."""
+"""Image payload helpers used by VL reranking and content transforms."""
 
 from __future__ import annotations
 
 import base64
 import logging
-import warnings
 
-import pandas as pd
 from upath import UPath
 
 logger = logging.getLogger(__name__)
+
+
+def inline_image_b64(container: dict) -> str | None:
+    """Return inline base64 image data without reloading stored URIs."""
+    value = container.get("image_b64")
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def load_image_b64_from_uri(uri: str) -> str | None:
@@ -46,37 +50,3 @@ def render_page_image_b64(pdf_path: str, page_number: int, *, dpi: int = 300) ->
     except Exception as exc:
         logger.warning("Failed to render page %s of %s: %s", page_number, pdf_path, exc)
         return None
-
-
-def store_extracted(
-    df: pd.DataFrame,
-    *,
-    storage_uri: str = "stored_images",
-    storage_options: dict | None = None,
-    public_base_url: str | None = None,
-    store_page_images: bool = True,
-    store_tables: bool = True,
-    store_charts: bool = True,
-    store_infographics: bool = True,
-    store_images: bool = True,
-    store_text: bool = False,
-    image_format: str = "png",
-    strip_base64: bool = True,
-) -> pd.DataFrame:
-    """Deprecated compatibility wrapper for row-level image storage."""
-    del public_base_url, store_page_images, store_tables, store_charts, store_infographics, store_images, store_text
-    warnings.warn(
-        "nemo_retriever.io.store_extracted is deprecated; use GraphIngestor.store() "
-        "or StoreOperator with StoreParams instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    from nemo_retriever.graph.store_operator import _store_row_images
-
-    return _store_row_images(
-        df,
-        storage_uri=storage_uri,
-        storage_options=storage_options,
-        image_format=image_format,
-        strip_base64=strip_base64,
-    )

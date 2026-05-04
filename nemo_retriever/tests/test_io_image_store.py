@@ -11,10 +11,6 @@ import sys
 import types
 from pathlib import Path
 
-import pandas as pd
-import pytest
-
-from nemo_retriever.io import store_extracted
 from nemo_retriever.io.image_store import load_image_b64_from_uri, render_page_image_b64
 
 
@@ -31,19 +27,6 @@ class TestLoadImageB64FromUri:
 
     def test_missing_file_returns_none(self):
         assert load_image_b64_from_uri("file:///nonexistent/path/image.png") is None
-
-
-class TestStoreExtractedCompat:
-    def test_store_extracted_remains_importable_with_deprecation(self, tmp_path: Path):
-        raw = b"\x89PNG\r\n\x1a\nfake"
-        b64 = base64.b64encode(raw).decode("ascii")
-        df = pd.DataFrame([{"path": "/docs/a.pdf", "page_number": 1, "_image_b64": b64}])
-
-        with pytest.warns(DeprecationWarning):
-            result = store_extracted(df, storage_uri=str(tmp_path))
-
-        assert result.iloc[0]["_image_b64"] is None
-        assert result.iloc[0]["_stored_image_uri"].startswith("file://")
 
 
 class TestRenderPageImageB64:
