@@ -194,6 +194,8 @@ class RayDataExecutor(AbstractExecutor):
         self._default_num_cpus = num_cpus
         self._default_num_gpus = num_gpus
         self._node_overrides = node_overrides or {}
+        self.last_ray_data_stats: Optional[str] = None
+        self.last_ray_data_stats_error: Optional[str] = None
 
     @staticmethod
     def _linearize(graph: Graph) -> List[Node]:
@@ -382,4 +384,12 @@ class RayDataExecutor(AbstractExecutor):
                 **overrides,
             )
 
-        return ds.to_pandas()
+        result_df = ds.to_pandas()
+        try:
+            self.last_ray_data_stats = ds.stats()
+            self.last_ray_data_stats_error = None
+        except Exception as exc:  # pragma: no cover - depends on Ray internals
+            self.last_ray_data_stats = None
+            self.last_ray_data_stats_error = f"{type(exc).__name__}: {exc}"
+            logger.debug("Unable to collect Ray Data stats after materialization.", exc_info=True)
+        return result_df

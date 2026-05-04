@@ -140,6 +140,8 @@ class GraphIngestor(ingestor):
         self._node_overrides: Dict[str, Dict[str, Any]] = node_overrides or {}
         self._show_progress = show_progress
         self._rd_dataset: Any = None
+        self._ray_data_stats: Optional[str] = None
+        self._ray_data_stats_error: Optional[str] = None
 
         # Pipeline configuration accumulated by fluent methods
         self._extraction_mode: str = "pdf"
@@ -394,6 +396,8 @@ class GraphIngestor(ingestor):
             )
             result = executor.ingest(self._documents)
             self._rd_dataset = result
+            self._ray_data_stats = getattr(executor, "last_ray_data_stats", None)
+            self._ray_data_stats_error = getattr(executor, "last_ray_data_stats_error", None)
         else:
             graph = build_graph(
                 extraction_mode=self._extraction_mode,
@@ -415,9 +419,21 @@ class GraphIngestor(ingestor):
             )
             executor = InprocessExecutor(graph, show_progress=self._show_progress)
             self._rd_dataset = None
+            self._ray_data_stats = None
+            self._ray_data_stats_error = None
             result = executor.ingest(self._documents)
 
         return result
+
+    @property
+    def ray_data_stats(self) -> Optional[str]:
+        """Ray Data ``Dataset.stats()`` text captured after batch materialization."""
+        return self._ray_data_stats
+
+    @property
+    def ray_data_stats_error(self) -> Optional[str]:
+        """Best-effort error text from Ray Data stats collection, when unavailable."""
+        return self._ray_data_stats_error
 
     # ------------------------------------------------------------------
     # Internal helpers

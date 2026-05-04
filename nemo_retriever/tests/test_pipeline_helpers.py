@@ -17,9 +17,11 @@ from nemo_retriever.params import EmbedParams, ExtractParams, TextChunkParams
 from nemo_retriever.pipeline.__main__ import (
     _build_ingestor,
     _build_embed_params,
+    _build_runtime_observability_fields,
     _collect_results,
     _count_input_units,
     _count_uploadable_vdb_records,
+    _parse_ray_data_operator_timings,
     _parse_vdb_kwargs_json,
     _resolve_file_patterns,
 )
@@ -123,6 +125,113 @@ class TestBuildIngestor:
 
         assert calls == ["files", "extract", "embed", "store"]
         assert captured["store_params"].storage_uri.endswith("/stored")
+        assert captured["init"]["node_overrides"] is None
+
+    def test_store_tuning_flags_create_store_node_overrides(self, monkeypatch, tmp_path: Path) -> None:
+        captured: dict[str, Any] = {}
+
+        class _FakeIngestor:
+            def __init__(self, **kwargs):
+                captured["init"] = kwargs
+
+            def files(self, file_patterns):
+                return self
+
+            def extract(self, params):
+                return self
+
+            def embed(self, params):
+                return self
+
+            def store(self, params):
+                captured["store_params"] = params
+                return self
+
+        monkeypatch.setattr(pipeline_main, "GraphIngestor", _FakeIngestor)
+
+        _build_ingestor(
+            run_mode="batch",
+            ray_address=None,
+            file_patterns=[str(tmp_path / "doc.pdf")],
+            input_type="pdf",
+            extract_params=ExtractParams(method="ocr"),
+            embed_params=EmbedParams(model_name="nvidia/llama-nemotron-embed-1b-v2"),
+            text_chunk_params=TextChunkParams(),
+            enable_text_chunk=False,
+            enable_dedup=False,
+            enable_caption=False,
+            dedup_iou_threshold=0.8,
+            caption_invoke_url=None,
+            caption_remote_api_key=None,
+            caption_model_name="nvidia/llama-nemotron-rerank-vl-1b-v2",
+            caption_device=None,
+            caption_context_text_max_chars=0,
+            caption_gpu_memory_utilization=0.5,
+            caption_gpus_per_actor=None,
+            caption_temperature=1.0,
+            caption_top_p=None,
+            caption_max_tokens=1024,
+            store_images_uri=str(tmp_path / "stored"),
+            store_actors=4,
+            store_cpus_per_actor=0.5,
+            segment_audio=False,
+            audio_split_type="time",
+            audio_split_interval=30,
+        )
+
+        assert captured["init"]["node_overrides"] == {"StoreOperator": {"concurrency": 4, "num_cpus": 0.5}}
+        assert captured["store_params"].storage_uri.endswith("/stored")
+
+    def test_default_store_tuning_adds_no_store_node_override(self, monkeypatch, tmp_path: Path) -> None:
+        captured: dict[str, Any] = {}
+
+        class _FakeIngestor:
+            def __init__(self, **kwargs):
+                captured["init"] = kwargs
+
+            def files(self, file_patterns):
+                return self
+
+            def extract(self, params):
+                return self
+
+            def embed(self, params):
+                return self
+
+            def store(self, params):
+                return self
+
+        monkeypatch.setattr(pipeline_main, "GraphIngestor", _FakeIngestor)
+
+        _build_ingestor(
+            run_mode="batch",
+            ray_address=None,
+            file_patterns=[str(tmp_path / "doc.pdf")],
+            input_type="pdf",
+            extract_params=ExtractParams(method="ocr"),
+            embed_params=EmbedParams(model_name="nvidia/llama-nemotron-embed-1b-v2"),
+            text_chunk_params=TextChunkParams(),
+            enable_text_chunk=False,
+            enable_dedup=False,
+            enable_caption=False,
+            dedup_iou_threshold=0.8,
+            caption_invoke_url=None,
+            caption_remote_api_key=None,
+            caption_model_name="nvidia/llama-nemotron-rerank-vl-1b-v2",
+            caption_device=None,
+            caption_context_text_max_chars=0,
+            caption_gpu_memory_utilization=0.5,
+            caption_gpus_per_actor=None,
+            caption_temperature=1.0,
+            caption_top_p=None,
+            caption_max_tokens=1024,
+            store_images_uri=str(tmp_path / "stored"),
+            segment_audio=False,
+            audio_split_type="time",
+            audio_split_interval=30,
+        )
+
+        assert captured["init"]["node_overrides"] is None
 
 
 def test_resolve_file_patterns_returns_existing_file_verbatim(tmp_path: Path) -> None:
@@ -266,6 +375,98 @@ def test_count_uploadable_vdb_records_filters_rows_without_embedding_or_text() -
 
     assert _count_uploadable_vdb_records(rows) == 1
     assert _count_uploadable_vdb_records([]) == 0
+
+
+def test_ray_data_stats_are_written_and_parsed_for_store_operator(tmp_path: Path) -> None:
+    stats_text = """Operator 0 FromItems: 1 tasks executed, 10 blocks produced in 0.50s
+* Operator throughput:
+\t* Total input num rows: 0 rows
+\t* Total output num rows: 10 rows
+\t* Ray Data throughput: 20 rows/s
+
+Operator 1 MapBatches(_BatchEmbedActor): 2 tasks executed, 5 blocks produced in 2.00s
+* UDF time: 200ms min, 1.00s max, 600ms mean, 1.20s total
+* Operator throughput:
+\t* Total input num rows: 10 rows
+\t* Total output num rows: 10 rows
+\t* Ray Data throughput: 5 rows/s
+
+Operator 2 MapBatches(StoreOperator): 4 tasks executed, 4 blocks produced in 2.50s
+* Remote wall time: 100ms min, 1.00s max, 500ms mean, 2.00s total
+* Remote cpu time: 20ms min, 200ms max, 100ms mean, 400ms total
+* UDF time: 90ms min, 900ms max, 450ms mean, 1.80s total
+* Operator throughput:
+\t* Total input num rows: 10 rows
+\t* Total output num rows: 10 rows
+\t* Ray Data throughput: 4 rows/s
+"""
+
+    class _FakeIngestor:
+        ray_data_stats = stats_text
+        ray_data_stats_error = None
+
+    fields = _build_runtime_observability_fields(
+        ingestor=_FakeIngestor(),
+        run_mode="batch",
+        runtime_metrics_dir=tmp_path,
+        runtime_metrics_prefix="stats-run",
+        num_rows=10,
+        store_actors=4,
+        store_cpus_per_actor=0.5,
+    )
+
+    raw_stats_path = tmp_path / "stats-run.ray-data.stats.txt"
+    assert raw_stats_path.read_text(encoding="utf-8") == stats_text.rstrip() + "\n"
+    assert fields["ray_data_stats_available"] is True
+    assert fields["ray_data_stats_file"] == str(raw_stats_path.resolve())
+    assert len(fields["ray_data_operator_timings"]) == 3
+
+    store_metrics = fields["store_operator"]
+    assert store_metrics["requested_actors"] == 4
+    assert store_metrics["effective_actors"] == 4
+    assert store_metrics["requested_cpus_per_actor"] == 0.5
+    assert store_metrics["effective_cpus_per_actor"] == 0.5
+    assert store_metrics["stats_detected"] is True
+    assert store_metrics["elapsed_secs"] == 2.5
+    assert store_metrics["udf_total_secs"] == 1.8
+    assert store_metrics["rows_per_sec"] == 4.0
+    assert store_metrics["tail_after_previous_operator_secs"] == 0.5
+    assert store_metrics["previous_operator"] == "MapBatches(_BatchEmbedActor)"
+
+
+def test_ray_data_stats_helpers_tolerate_missing_stats(tmp_path: Path) -> None:
+    class _StatsUnavailable:
+        @property
+        def ray_data_stats(self):
+            raise RuntimeError("stats unavailable")
+
+    fields = _build_runtime_observability_fields(
+        ingestor=_StatsUnavailable(),
+        run_mode="batch",
+        runtime_metrics_dir=tmp_path,
+        runtime_metrics_prefix="missing",
+        num_rows=8,
+        store_actors=0,
+        store_cpus_per_actor=0.0,
+    )
+
+    assert not (tmp_path / "missing.ray-data.stats.txt").exists()
+    assert fields["ray_data_stats_available"] is False
+    assert fields["ray_data_operator_timings"] == []
+    assert fields["ray_data_stats_error"] == "RuntimeError: stats unavailable"
+    assert fields["store_operator"] == {
+        "requested_actors": 0,
+        "effective_actors": 1,
+        "requested_cpus_per_actor": 0.0,
+        "effective_cpus_per_actor": 1.0,
+        "cpus_per_actor_is_resource_reservation": True,
+        "stats_detected": False,
+    }
+
+
+def test_parse_ray_data_operator_timings_handles_empty_stats() -> None:
+    assert _parse_ray_data_operator_timings(None) == []
+    assert _parse_ray_data_operator_timings("") == []
 
 
 def test_count_input_units_prefers_source_id_then_source_path() -> None:

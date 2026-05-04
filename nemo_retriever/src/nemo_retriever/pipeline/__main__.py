@@ -34,6 +34,7 @@ import glob as _glob
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional, TextIO
@@ -161,6 +162,259 @@ def _write_runtime_summary(
     prefix = (runtime_metrics_prefix or "run").strip() or "run"
     target = target_dir / f"{prefix}.runtime.summary.json"
     target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_ray_data_stats(
+    runtime_metrics_dir: Optional[Path],
+    runtime_metrics_prefix: Optional[str],
+    stats_text: Optional[str],
+) -> Optional[Path]:
+    if not stats_text:
+        return None
+    if runtime_metrics_dir is None and not runtime_metrics_prefix:
+        return None
+
+    target_dir = Path(runtime_metrics_dir or Path.cwd()).expanduser().resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    prefix = (runtime_metrics_prefix or "run").strip() or "run"
+    target = target_dir / f"{prefix}.ray-data.stats.txt"
+    target.write_text(stats_text.rstrip() + "\n", encoding="utf-8")
+    return target
+
+
+_OPERATOR_HEADER_RE = re.compile(
+    r"^Operator\s+(?P<index>\d+)\s+(?P<name>.*?):.*?\bin\s+" r"(?P<elapsed>[0-9.eE+-]+)\s*(?P<unit>[A-Za-z]+)\b"
+)
+_TOTAL_TIME_RE = re.compile(
+    r"^\*\s+(?P<label>Remote wall time|Remote cpu time|UDF time):.*?"
+    r"(?P<value>[0-9.eE+-]+)\s*(?P<unit>[A-Za-z]+)\s+total\b"
+)
+_ROWS_RE = re.compile(r"^\*\s+Total (?P<kind>input|output) num rows:\s+(?P<rows>[0-9]+)\s+rows\b")
+_THROUGHPUT_RE = re.compile(r"^\*\s+Ray Data throughput:\s+(?P<throughput>[0-9.eE+-]+)\s+rows/s\b")
+
+
+def _duration_to_seconds(value: str, unit: str) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    multiplier = {
+        "ns": 1e-9,
+        "us": 1e-6,
+        "ms": 1e-3,
+        "s": 1.0,
+        "sec": 1.0,
+        "secs": 1.0,
+        "m": 60.0,
+        "min": 60.0,
+        "mins": 60.0,
+        "h": 3600.0,
+        "hr": 3600.0,
+        "hrs": 3600.0,
+    }.get(str(unit).strip().lower())
+    if multiplier is None:
+        return None
+    return number * multiplier
+
+
+def _parse_ray_data_operator_timings(stats_text: Optional[str]) -> list[dict[str, object]]:
+    """Parse best-effort Ray Data operator timing metrics from ``Dataset.stats()`` text."""
+
+    if not stats_text:
+        return []
+
+    operators: list[dict[str, object]] = []
+    current: Optional[dict[str, object]] = None
+    in_throughput = False
+
+    for raw_line in str(stats_text).splitlines():
+        line = raw_line.strip()
+        header_match = _OPERATOR_HEADER_RE.match(line)
+        if header_match:
+            elapsed_secs = _duration_to_seconds(header_match.group("elapsed"), header_match.group("unit"))
+            current = {
+                "index": int(header_match.group("index")),
+                "name": header_match.group("name").strip(),
+            }
+            if elapsed_secs is not None:
+                current["elapsed_secs"] = elapsed_secs
+            tasks_match = re.search(r"\b(?P<tasks>[0-9]+)\s+tasks executed\b", line)
+            if tasks_match:
+                current["tasks_executed"] = int(tasks_match.group("tasks"))
+            blocks_match = re.search(r"\b(?P<blocks>[0-9]+)\s+blocks produced\b", line)
+            if blocks_match:
+                current["blocks_produced"] = int(blocks_match.group("blocks"))
+            operators.append(current)
+            in_throughput = False
+            continue
+
+        if current is None:
+            continue
+
+        total_match = _TOTAL_TIME_RE.match(line)
+        if total_match:
+            key = {
+                "Remote wall time": "remote_wall_total_secs",
+                "Remote cpu time": "remote_cpu_total_secs",
+                "UDF time": "udf_total_secs",
+            }[total_match.group("label")]
+            seconds = _duration_to_seconds(total_match.group("value"), total_match.group("unit"))
+            if seconds is not None:
+                current[key] = seconds
+            continue
+
+        if line == "* Operator throughput:":
+            in_throughput = True
+            continue
+        if not in_throughput:
+            continue
+
+        rows_match = _ROWS_RE.match(line)
+        if rows_match:
+            current[f"{rows_match.group('kind')}_rows"] = int(rows_match.group("rows"))
+            continue
+
+        throughput_match = _THROUGHPUT_RE.match(line)
+        if throughput_match:
+            try:
+                current["ray_data_rows_per_sec"] = float(throughput_match.group("throughput"))
+            except ValueError:
+                pass
+
+    return operators
+
+
+def _ingestor_ray_data_stats(ingestor: Any) -> tuple[Optional[str], Optional[str]]:
+    """Read captured Ray Data stats from public or legacy private ingestor fields."""
+
+    stats_error: Optional[str] = None
+    for attr in ("ray_data_stats", "_ray_data_stats"):
+        try:
+            stats_text = getattr(ingestor, attr, None)
+        except Exception as exc:
+            stats_error = f"{type(exc).__name__}: {exc}"
+            continue
+        if stats_text:
+            return str(stats_text), None
+
+    for attr in ("ray_data_stats_error", "_ray_data_stats_error"):
+        try:
+            value = getattr(ingestor, attr, None)
+        except Exception as exc:
+            stats_error = f"{type(exc).__name__}: {exc}"
+            continue
+        if value:
+            stats_error = str(value)
+            break
+
+    return None, stats_error
+
+
+def _positive_int(value: Optional[int]) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _positive_float(value: Optional[float]) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _store_operator_runtime_metrics(
+    *,
+    operators: list[dict[str, object]],
+    num_rows: int,
+    store_actors: Optional[int],
+    store_cpus_per_actor: Optional[float],
+) -> dict[str, object]:
+    requested_actors = _positive_int(store_actors)
+    requested_cpus = _positive_float(store_cpus_per_actor)
+    metrics: dict[str, object] = {
+        "requested_actors": requested_actors,
+        "effective_actors": requested_actors if requested_actors > 0 else 1,
+        "requested_cpus_per_actor": requested_cpus,
+        "effective_cpus_per_actor": requested_cpus if requested_cpus > 0.0 else 1.0,
+        "cpus_per_actor_is_resource_reservation": True,
+    }
+
+    store_index = next(
+        (idx for idx, op in enumerate(operators) if "StoreOperator" in str(op.get("name", ""))),
+        None,
+    )
+    if store_index is None:
+        metrics["stats_detected"] = False
+        return metrics
+
+    store_op = operators[store_index]
+    metrics["stats_detected"] = True
+    for key in (
+        "name",
+        "elapsed_secs",
+        "remote_wall_total_secs",
+        "remote_cpu_total_secs",
+        "udf_total_secs",
+        "input_rows",
+        "output_rows",
+        "ray_data_rows_per_sec",
+        "tasks_executed",
+        "blocks_produced",
+    ):
+        if key in store_op:
+            metrics[key] = store_op[key]
+
+    rows_per_sec = store_op.get("ray_data_rows_per_sec")
+    elapsed_secs = store_op.get("elapsed_secs")
+    if rows_per_sec is None and isinstance(elapsed_secs, (int, float)) and elapsed_secs > 0:
+        metrics["rows_per_sec"] = float(num_rows) / float(elapsed_secs)
+    elif rows_per_sec is not None:
+        metrics["rows_per_sec"] = rows_per_sec
+
+    if store_index > 0:
+        previous = operators[store_index - 1]
+        previous_elapsed = previous.get("elapsed_secs")
+        if isinstance(previous_elapsed, (int, float)) and isinstance(elapsed_secs, (int, float)):
+            metrics["tail_after_previous_operator_secs"] = max(0.0, float(elapsed_secs) - float(previous_elapsed))
+            metrics["previous_operator"] = previous.get("name")
+
+    return metrics
+
+
+def _build_runtime_observability_fields(
+    *,
+    ingestor: Any,
+    run_mode: str,
+    runtime_metrics_dir: Optional[Path],
+    runtime_metrics_prefix: Optional[str],
+    num_rows: int,
+    store_actors: Optional[int],
+    store_cpus_per_actor: Optional[float],
+) -> dict[str, object]:
+    stats_text: Optional[str] = None
+    stats_error: Optional[str] = None
+    if run_mode == "batch":
+        stats_text, stats_error = _ingestor_ray_data_stats(ingestor)
+
+    stats_path = _write_ray_data_stats(runtime_metrics_dir, runtime_metrics_prefix, stats_text)
+    operators = _parse_ray_data_operator_timings(stats_text)
+    fields: dict[str, object] = {
+        "ray_data_stats_available": bool(stats_text),
+        "ray_data_operator_timings": operators,
+        "store_operator": _store_operator_runtime_metrics(
+            operators=operators,
+            num_rows=num_rows,
+            store_actors=store_actors,
+            store_cpus_per_actor=store_cpus_per_actor,
+        ),
+    }
+    if stats_path is not None:
+        fields["ray_data_stats_file"] = str(stats_path)
+    if stats_error:
+        fields["ray_data_stats_error"] = stats_error
+    return fields
 
 
 def _count_input_units(result_df) -> int:
@@ -384,6 +638,8 @@ def _build_ingestor(
     caption_top_p: Optional[float],
     caption_max_tokens: int,
     store_images_uri: Optional[str],
+    store_actors: Optional[int] = 0,
+    store_cpus_per_actor: Optional[float] = 0.0,
     segment_audio: bool,
     audio_split_type: str,
     audio_split_interval: int,
@@ -400,6 +656,13 @@ def _build_ingestor(
     node_overrides: dict[str, dict[str, Any]] = {}
     if caption_gpus_per_actor is not None:
         node_overrides["CaptionActor"] = {"num_gpus": caption_gpus_per_actor}
+    store_override: dict[str, Any] = {}
+    if _positive_int(store_actors) > 0:
+        store_override["concurrency"] = _positive_int(store_actors)
+    if _positive_float(store_cpus_per_actor) > 0.0:
+        store_override["num_cpus"] = _positive_float(store_cpus_per_actor)
+    if store_override:
+        node_overrides["StoreOperator"] = store_override
 
     ingestor = GraphIngestor(
         run_mode=run_mode,
@@ -795,6 +1058,22 @@ def run(
     embed_gpus_per_actor: Optional[float] = typer.Option(
         None, "--embed-gpus-per-actor", max=1.0, rich_help_panel=_PANEL_RAY
     ),
+    store_actors: Optional[int] = typer.Option(
+        0,
+        "--store-actors",
+        min=0,
+        help="StoreOperator Ray actor concurrency. For S3/object-store writes, scale throughput primarily here.",
+        rich_help_panel=_PANEL_RAY,
+    ),
+    store_cpus_per_actor: Optional[float] = typer.Option(
+        0.0,
+        "--store-cpus-per-actor",
+        min=0.0,
+        help=(
+            "CPU reservation per StoreOperator actor. " "This does not add intra-actor object-store PUT parallelism."
+        ),
+        rich_help_panel=_PANEL_RAY,
+    ),
     pdf_split_batch_size: int = typer.Option(1, "--pdf-split-batch-size", min=1, rich_help_panel=_PANEL_RAY),
     pdf_extract_batch_size: Optional[int] = typer.Option(0, "--pdf-extract-batch-size", rich_help_panel=_PANEL_RAY),
     pdf_extract_tasks: Optional[int] = typer.Option(0, "--pdf-extract-tasks", rich_help_panel=_PANEL_RAY),
@@ -1130,6 +1409,8 @@ def run(
             caption_top_p=caption_top_p,
             caption_max_tokens=caption_max_tokens,
             store_images_uri=store_images_uri,
+            store_actors=store_actors,
+            store_cpus_per_actor=store_cpus_per_actor,
             segment_audio=segment_audio,
             audio_split_type=audio_split_type,
             audio_split_interval=audio_split_interval,
@@ -1148,6 +1429,15 @@ def run(
         raw_result = ingestor.ingest()
         ingestion_only_total_time = time.perf_counter() - ingest_start
         ingest_local_results, result_df, ray_download_time, num_rows = _collect_results(run_mode, raw_result)
+        runtime_observability_fields = _build_runtime_observability_fields(
+            ingestor=ingestor,
+            run_mode=run_mode,
+            runtime_metrics_dir=runtime_metrics_dir,
+            runtime_metrics_prefix=runtime_metrics_prefix,
+            num_rows=int(len(result_df.index)),
+            store_actors=store_actors,
+            store_cpus_per_actor=store_cpus_per_actor,
+        )
         uploadable_vdb_records = _count_uploadable_vdb_records(ingest_local_results)
         if uploadable_vdb_records == 0:
             logger.warning(
@@ -1187,6 +1477,27 @@ def run(
             )
 
         if uploadable_vdb_records == 0:
+            _write_runtime_summary(
+                runtime_metrics_dir,
+                runtime_metrics_prefix,
+                {
+                    "run_mode": run_mode,
+                    "input_path": str(Path(input_path).resolve()),
+                    "input_pages": int(num_rows),
+                    "num_pages": int(num_rows),
+                    "num_rows": int(len(result_df.index)),
+                    "ingestion_only_secs": float(ingestion_only_total_time),
+                    "ray_download_secs": float(ray_download_time),
+                    "vdb_upload_secs": 0.0,
+                    "evaluation_secs": 0.0,
+                    "total_secs": float(time.perf_counter() - ingest_start),
+                    "evaluation_mode": evaluation_mode,
+                    "evaluation_metrics": {},
+                    "recall_details": bool(recall_details),
+                    "vdb_op": str(resolved_vdb_op),
+                    **runtime_observability_fields,
+                },
+            )
             if run_mode == "batch":
                 import ray
 
@@ -1230,6 +1541,7 @@ def run(
                     "recall_details": bool(recall_details),
                     "vdb_op": str(resolved_vdb_op),
                     "qa_sweep_exit_code": qa_code,
+                    **runtime_observability_fields,
                 },
             )
             if run_mode == "batch":
@@ -1302,6 +1614,7 @@ def run(
                     "evaluation_metrics": {},
                     "recall_details": bool(recall_details),
                     "vdb_op": str(resolved_vdb_op),
+                    **runtime_observability_fields,
                 },
             )
             if run_mode == "batch":
@@ -1331,6 +1644,7 @@ def run(
                 "evaluation_count": evaluation_query_count,
                 "recall_details": bool(recall_details),
                 "vdb_op": str(resolved_vdb_op),
+                **runtime_observability_fields,
             },
         )
 
