@@ -73,16 +73,26 @@ def _stored_uri(dest_uri: str) -> str:
     return Path(dest_uri).resolve().as_uri()
 
 
-def _row_image_b64(row: pd.Series) -> Any:
+def _row_image_b64_with_source(row: pd.Series) -> tuple[Any, bool]:
     value = row.get("_image_b64")
     if isinstance(value, str) and value.strip():
-        return value
+        return value, False
 
     page_image = row.get("page_image")
     if isinstance(page_image, dict):
-        return page_image.get("image_b64")
+        return page_image.get("image_b64"), True
 
-    return None
+    return None, False
+
+
+def _row_image_represents_page(row: pd.Series, *, from_page_image: bool) -> bool:
+    if from_page_image:
+        return True
+
+    content_type = row.get("_content_type")
+    if not isinstance(content_type, str) or not content_type.strip():
+        return True
+    return content_type == "text"
 
 
 def _store_row_images(
@@ -102,7 +112,8 @@ def _store_row_images(
     fsspec_options = dict(storage_options or {})
 
     for idx, row in out.iterrows():
-        raw = _decode_image_b64(_row_image_b64(row))
+        image_b64, from_page_image = _row_image_b64_with_source(row)
+        raw = _decode_image_b64(image_b64)
         if raw is None:
             continue
 
@@ -126,7 +137,8 @@ def _store_row_images(
             if isinstance(page_image, dict):
                 updated_page_image = dict(page_image)
                 updated_page_image["image_b64"] = None
-                updated_page_image["stored_image_uri"] = stored_uri
+                if _row_image_represents_page(row, from_page_image=from_page_image):
+                    updated_page_image["stored_image_uri"] = stored_uri
                 out.at[idx, "page_image"] = updated_page_image
 
     return out

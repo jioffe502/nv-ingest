@@ -69,7 +69,7 @@ class TestStoreOperatorInGraph:
         assert stored_uri.startswith("file://")
         assert Path(urlparse(stored_uri).path).exists()
 
-    def test_store_operator_clears_inline_and_nested_payloads_after_write(self, tmp_path: Path):
+    def test_store_operator_clears_row_and_page_payloads_after_write(self, tmp_path: Path):
         b64 = _make_tiny_png_b64()
         df = _make_embedded_df(b64)
 
@@ -80,6 +80,21 @@ class TestStoreOperatorInGraph:
         assert result.iloc[0]["page_image"]["stored_image_uri"] == result.iloc[0]["_stored_image_uri"]
         assert result.iloc[0]["table"][0]["image_b64"] == b64
         assert result.iloc[0]["table"][0]["stored_image_uri"] == "file:///old/table.png"
+
+    def test_store_operator_does_not_overwrite_page_uri_for_element_rows(self, tmp_path: Path):
+        page_b64 = _make_tiny_png_b64(color=(255, 0, 0))
+        element_b64 = _make_tiny_png_b64(color=(0, 0, 255))
+        df = _make_embedded_df(element_b64)
+        df.at[0, "_content_type"] = "images"
+        df.at[0, "page_image"] = {"image_b64": page_b64, "stored_image_uri": "file:///old/page.png"}
+
+        result = StoreOperator(params=StoreParams(storage_uri=str(tmp_path))).process(df)
+
+        stored_uri = result.iloc[0]["_stored_image_uri"]
+        assert Path(urlparse(stored_uri).path).read_bytes() == base64.b64decode(element_b64)
+        assert result.iloc[0]["_image_b64"] is None
+        assert result.iloc[0]["page_image"]["image_b64"] is None
+        assert result.iloc[0]["page_image"]["stored_image_uri"] == "file:///old/page.png"
 
     def test_store_operator_skips_rows_without_image_b64(self, tmp_path: Path):
         df = _make_embedded_df(None)
@@ -100,6 +115,7 @@ class TestStoreOperatorInGraph:
         assert files[0].read_bytes() == base64.b64decode(b64)
         assert result.iloc[0]["_stored_image_uri"].startswith("file://")
         assert result.iloc[0]["page_image"]["image_b64"] is None
+        assert result.iloc[0]["page_image"]["stored_image_uri"] == result.iloc[0]["_stored_image_uri"]
 
     def test_store_operator_forwards_storage_options(self, monkeypatch):
         b64 = _make_tiny_png_b64()
