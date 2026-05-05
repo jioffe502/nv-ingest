@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 from pathlib import Path
 from urllib.parse import urlparse
@@ -134,8 +135,9 @@ class TestStoreOperatorInGraph:
         assert calls[0][2] == {"key": "YOUR_KEY", "secret": "YOUR_SECRET"}
         assert result.iloc[0]["_stored_image_uri"].startswith("s3://bucket/prefix/")
 
-    def test_store_object_key_sanitizes_without_mutating_source_columns(self, monkeypatch):
+    def test_store_object_key_uses_image_hash_without_mutating_source_columns(self, monkeypatch):
         b64 = _make_tiny_png_b64()
+        raw = base64.b64decode(b64)
         df = _make_embedded_df(b64)
         df.at[0, "path"] = "/nested/source folders/report with spaces.pdf"
         df.at[0, "page_number"] = 0
@@ -164,8 +166,7 @@ class TestStoreOperatorInGraph:
         assert result.iloc[0]["page_number"] == 0
         assert result.iloc[0]["_content_type"] == "text/page"
         assert calls
-        assert "/report_with_spaces-" in calls[0]
-        assert "/page_0_text_page_" in calls[0]
+        assert calls[0] == f"memory://stored/{hashlib.sha1(raw).hexdigest()}.png"
 
     def test_embedding_preserves_image_b64_for_post_embed_store(self, monkeypatch):
         from nemo_retriever.text_embed import runtime

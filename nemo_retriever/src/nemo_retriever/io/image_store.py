@@ -26,7 +26,7 @@ def load_image_b64_from_uri(uri: str) -> str | None:
         raw = UPath(uri).read_bytes()
         return base64.b64encode(raw).decode("ascii")
     except Exception as exc:
-        logger.warning("Failed to load image from %s: %s", uri, exc)
+        logger.warning("Failed to load image from %s: %s", uri, exc, exc_info=True)
         return None
 
 
@@ -48,5 +48,5 @@ def render_page_image_b64(pdf_path: str, page_number: int, *, dpi: int = 300) ->
         finally:
             doc.close()
     except Exception as exc:
-        logger.warning("Failed to render page %s of %s: %s", page_number, pdf_path, exc)
+        logger.warning("Failed to render page %s of %s: %s", page_number, pdf_path, exc, exc_info=True)
         return None

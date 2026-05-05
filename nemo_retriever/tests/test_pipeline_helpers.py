@@ -112,6 +112,13 @@ class TestBuildIngestor:
             segment_audio=False,
             audio_split_type="time",
             audio_split_interval=30,
+            video_extract_audio=True,
+            video_extract_frames=True,
+            video_frame_fps=0.5,
+            video_frame_dedup=True,
+            video_frame_text_dedup=True,
+            video_frame_text_dedup_max_dropped_frames=2,
+            video_av_fuse=True,
         )
 
         assert calls == ["files", "extract", "embed", "store"]

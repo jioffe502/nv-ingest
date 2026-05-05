@@ -67,6 +67,8 @@ class _ParamsModel(BaseModel):
             value = getattr(self, field_name, None)
             if _is_api_key_field(field_name) and value:
                 parts.append(f"{field_name}={_REDACTED}")
+            elif field_name == "storage_options" and value:
+                parts.append(f"{field_name}={_REDACTED}")
             else:
                 parts.append(f"{field_name}={value!r}")
         return f"{type(self).__name__}({', '.join(parts)})"

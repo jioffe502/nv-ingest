@@ -10,8 +10,6 @@ import base64
 import binascii
 import hashlib
 import logging
-import os
-import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -59,42 +57,9 @@ def _decode_image_b64(value: Any) -> bytes | None:
         return None
 
 
-def _safe_segment(value: Any, *, default: str = "item", max_len: int = 120) -> str:
-    """Build a filesystem/object-store-safe key segment without mutating row data."""
-    text = str("" if value is None else value).strip() or default
-    text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
-    text = text.strip("._-") or default
-    return text[:max_len]
-
-
-def _source_storage_prefix(source_path: Any) -> str:
-    """Return a compact storage prefix derived from source path basename and hash.
-
-    The original row ``path`` is preserved unchanged; this value is only used
-    as an object key prefix under the configured storage URI.
-    """
-    source = str(source_path or "").strip()
-    stem = os.path.splitext(os.path.basename(source))[0] if source else ""
-    stem = _safe_segment(stem, default="document", max_len=100)
-    source_hash = hashlib.sha1(source.encode("utf-8")).hexdigest()[:10] if source else "unknown"
-    return f"{stem}-{source_hash}"
-
-
-def _build_object_key(row: pd.Series, *, row_index: Any, raw: bytes, extension: str) -> str:
-    page_number = row.get("page_number", "unknown")
-    if page_number is None:
-        page_number = "unknown"
-    content_type = row.get("_content_type", "image")
-    if content_type is None:
-        content_type = "image"
-
-    page_number = _safe_segment(page_number, default="unknown", max_len=40)
-    content_type = _safe_segment(content_type, default="image", max_len=60)
-    row_id = _safe_segment(row_index, default="row", max_len=60)
-    image_hash = hashlib.sha1(raw).hexdigest()[:12]
-
-    filename = f"page_{page_number}_{content_type}_{row_id}_{image_hash}.{extension}"
-    return f"{_source_storage_prefix(row.get('path'))}/{filename}"
+def _build_object_key(*, raw: bytes, extension: str) -> str:
+    image_hash = hashlib.sha1(raw).hexdigest()
+    return f"{image_hash}.{extension}"
 
 
 def _join_storage_uri(storage_uri: str, object_key: str) -> str:
@@ -142,7 +107,7 @@ def _store_row_images(
             continue
 
         extension = _sniff_image_format(raw) or fallback_format
-        object_key = _build_object_key(row, row_index=idx, raw=raw, extension=extension)
+        object_key = _build_object_key(raw=raw, extension=extension)
         dest_uri = _join_storage_uri(storage_uri, object_key)
 
         try:
