@@ -57,7 +57,16 @@ def test_resolve_file_patterns_recurses_directory_inputs(
 
 
 class TestBuildIngestor:
-    def test_store_is_attached_after_embed(self, monkeypatch, tmp_path: Path) -> None:
+    def _build_pdf_ingestor(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+        *,
+        run_mode: str,
+        store_images_uri: str,
+        store_actors: int = 0,
+        store_cpus_per_actor: float = 0.0,
+    ) -> tuple[list[str], dict[str, Any]]:
         calls: list[str] = []
         captured: dict[str, Any] = {}
 
@@ -87,7 +96,7 @@ class TestBuildIngestor:
         monkeypatch.setattr(pipeline_main, "GraphIngestor", _FakeIngestor)
 
         _build_ingestor(
-            run_mode="inprocess",
+            run_mode=run_mode,
             ray_address=None,
             file_patterns=[str(tmp_path / "doc.pdf")],
             input_type="pdf",
@@ -108,7 +117,9 @@ class TestBuildIngestor:
             caption_temperature=1.0,
             caption_top_p=None,
             caption_max_tokens=1024,
-            store_images_uri=str(tmp_path / "stored"),
+            store_images_uri=store_images_uri,
+            store_actors=store_actors,
+            store_cpus_per_actor=store_cpus_per_actor,
             segment_audio=False,
             audio_split_type="time",
             audio_split_interval=30,
@@ -121,8 +132,46 @@ class TestBuildIngestor:
             video_av_fuse=True,
         )
 
+        return calls, captured
+
+    def test_store_is_attached_after_embed(self, monkeypatch, tmp_path: Path) -> None:
+        calls, captured = self._build_pdf_ingestor(
+            monkeypatch,
+            tmp_path,
+            run_mode="inprocess",
+            store_images_uri=str(tmp_path / "stored"),
+            store_actors=8,
+            store_cpus_per_actor=0.5,
+        )
+
         assert calls == ["files", "extract", "embed", "store"]
+        assert captured["init"]["node_overrides"] is None
         assert captured["store_params"].storage_uri.endswith("/stored")
+
+    def test_store_tuning_flags_create_store_node_overrides(self, monkeypatch, tmp_path: Path) -> None:
+        calls, captured = self._build_pdf_ingestor(
+            monkeypatch,
+            tmp_path,
+            run_mode="batch",
+            store_images_uri=str(tmp_path / "stored"),
+            store_actors=4,
+            store_cpus_per_actor=0.5,
+        )
+
+        assert calls == ["files", "extract", "embed", "store"]
+        assert captured["init"]["node_overrides"] == {"StoreOperator": {"concurrency": (1, 4, 1), "num_cpus": 0.5}}
+        assert captured["store_params"].storage_uri.endswith("/stored")
+
+    def test_default_store_tuning_adds_store_node_override(self, monkeypatch, tmp_path: Path) -> None:
+        calls, captured = self._build_pdf_ingestor(
+            monkeypatch,
+            tmp_path,
+            run_mode="batch",
+            store_images_uri=str(tmp_path / "stored"),
+        )
+
+        assert calls == ["files", "extract", "embed", "store"]
+        assert captured["init"]["node_overrides"] == {"StoreOperator": {"concurrency": (1, 4, 1), "num_cpus": 0.1}}
 
 
 def test_resolve_file_patterns_returns_existing_file_verbatim(tmp_path: Path) -> None:

@@ -69,6 +69,7 @@ from nemo_retriever.params import (
 )
 from nemo_retriever.params.models import BatchTuningParams
 from nemo_retriever.utils.input_files import resolve_input_patterns
+from nemo_retriever.utils.ray_resource_hueristics import store_node_override
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 
 logger = logging.getLogger(__name__)
@@ -396,6 +397,8 @@ def _build_ingestor(
     caption_top_p: Optional[float],
     caption_max_tokens: int,
     store_images_uri: Optional[str],
+    store_actors: Optional[int],
+    store_cpus_per_actor: Optional[float],
     segment_audio: bool,
     audio_split_type: str,
     audio_split_interval: int,
@@ -435,6 +438,17 @@ def _build_ingestor(
     node_overrides: dict[str, dict[str, Any]] = {}
     if caption_gpus_per_actor is not None:
         node_overrides["CaptionActor"] = {"num_gpus": caption_gpus_per_actor}
+    store_override = (
+        store_node_override(
+            storage_uri=store_images_uri,
+            store_actors=store_actors,
+            store_cpus_per_actor=store_cpus_per_actor,
+        )
+        if run_mode == "batch"
+        else {}
+    )
+    if store_override:
+        node_overrides["StoreOperator"] = store_override
 
     ingestor = GraphIngestor(
         run_mode=run_mode,
@@ -884,6 +898,23 @@ def run(
     embed_gpus_per_actor: Optional[float] = typer.Option(
         None, "--embed-gpus-per-actor", max=1.0, rich_help_panel=_PANEL_RAY
     ),
+    store_actors: Optional[int] = typer.Option(
+        0,
+        "--store-actors",
+        min=0,
+        help=(
+            "Maximum StoreOperator Ray actors. Store sinks autoscale from one actor to this cap; "
+            "0 uses the default cap."
+        ),
+        rich_help_panel=_PANEL_RAY,
+    ),
+    store_cpus_per_actor: Optional[float] = typer.Option(
+        0.0,
+        "--store-cpus-per-actor",
+        min=0.0,
+        help="CPU reservation per StoreOperator actor. 0 uses the default store-sink reservation.",
+        rich_help_panel=_PANEL_RAY,
+    ),
     pdf_split_batch_size: int = typer.Option(1, "--pdf-split-batch-size", min=1, rich_help_panel=_PANEL_RAY),
     pdf_extract_batch_size: Optional[int] = typer.Option(0, "--pdf-extract-batch-size", rich_help_panel=_PANEL_RAY),
     pdf_extract_tasks: Optional[int] = typer.Option(0, "--pdf-extract-tasks", rich_help_panel=_PANEL_RAY),
@@ -1292,6 +1323,8 @@ def run(
             caption_top_p=caption_top_p,
             caption_max_tokens=caption_max_tokens,
             store_images_uri=store_images_uri,
+            store_actors=store_actors,
+            store_cpus_per_actor=store_cpus_per_actor,
             segment_audio=segment_audio,
             audio_split_type=audio_split_type,
             audio_split_interval=audio_split_interval,

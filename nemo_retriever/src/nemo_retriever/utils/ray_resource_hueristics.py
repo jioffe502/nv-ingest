@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -67,6 +68,36 @@ PDF_EXTRACT_CPUS_PER_TASK = (
     2.0  # Hueristic baseline num CPUs per task. Used to determine which CPU to schedule the task on.
 )
 PDF_EXTRACT_TASKS = 16  # Hueristic baseline num tasks. Used to determine how many CPU tasks to run in parallel.
+
+# Store sink constants. Store is a final I/O stage, so start with one actor and
+# let Ray grow the pool only when writes back up.
+STORE_INITIAL_ACTORS = 1
+STORE_MIN_ACTORS = 1
+STORE_MAX_ACTORS = 4
+STORE_CPUS_PER_ACTOR = 0.1
+
+
+def store_node_override(
+    *,
+    storage_uri: Optional[str],
+    store_actors: Optional[int],
+    store_cpus_per_actor: Optional[float],
+) -> dict[str, Any]:
+    """Return Ray Data overrides for the optional StoreOperator stage."""
+    if storage_uri is None:
+        return {}
+
+    requested_actors = max(0, int(store_actors or 0))
+    max_actors = requested_actors if requested_actors > 0 else STORE_MAX_ACTORS
+    requested_cpus = max(0.0, float(store_cpus_per_actor or 0.0))
+    cpus_per_actor = requested_cpus if requested_cpus > 0.0 else STORE_CPUS_PER_ACTOR
+    concurrency: int | tuple[int, int, int]
+    if max_actors <= 1:
+        concurrency = 1
+    else:
+        concurrency = (STORE_MIN_ACTORS, max_actors, STORE_INITIAL_ACTORS)
+
+    return {"concurrency": concurrency, "num_cpus": cpus_per_actor}
 
 
 class GpuInfo(BaseModel):
