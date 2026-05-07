@@ -140,8 +140,6 @@ class TestBuildIngestor:
             tmp_path,
             run_mode="inprocess",
             store_images_uri=str(tmp_path / "stored"),
-            store_actors=8,
-            store_cpus_per_actor=0.5,
         )
 
         assert calls == ["files", "extract", "embed", "store"]

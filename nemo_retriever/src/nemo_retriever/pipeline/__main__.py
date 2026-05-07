@@ -419,10 +419,6 @@ def _build_ingestor(
     local ``batch`` or ``inprocess`` execution.
     """
 
-    store_tuning_requested = (store_actors or 0) > 0 or (store_cpus_per_actor or 0.0) > 0.0
-    if run_mode != "batch" and store_tuning_requested:
-        logger.warning("Ignoring store Ray tuning flags because run_mode=%s does not use Ray Data.", run_mode)
-
     if run_mode == "service":
         from nemo_retriever.service_ingestor import ServiceIngestor
 

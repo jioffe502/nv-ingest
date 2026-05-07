@@ -356,8 +356,9 @@ def batch_tuning_to_node_overrides(
         if cpus > 0:
             _set(VideoSplitActor.__name__, "concurrency", max(1, min(cpus // 4, 8)))
 
-    store_tuning = _batch_tuning(store_params)
     if store_params is not None:
+        store_tuning = _batch_tuning(store_params)
+        store_override = overrides.setdefault(StoreOperator.__name__, {})
         store_workers = _resolve(
             getattr(store_tuning, "store_workers", None) if store_tuning is not None else None,
             STORE_MAX_ACTORS,
@@ -371,9 +372,9 @@ def batch_tuning_to_node_overrides(
             store_concurrency: int | tuple[int, int, int] = 1
             if store_workers > 1:
                 store_concurrency = (STORE_MIN_ACTORS, store_workers, STORE_INITIAL_ACTORS)
-            overrides.setdefault(StoreOperator.__name__, {})["concurrency"] = store_concurrency
+            store_override["concurrency"] = store_concurrency
         if store_cpus is not None:
-            overrides.setdefault(StoreOperator.__name__, {})["num_cpus"] = float(store_cpus)
+            store_override["num_cpus"] = float(store_cpus)
 
     return overrides
 
