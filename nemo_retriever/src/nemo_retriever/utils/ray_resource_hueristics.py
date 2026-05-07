@@ -83,7 +83,19 @@ def store_node_override(
     store_actors: Optional[int],
     store_cpus_per_actor: Optional[float],
 ) -> dict[str, Any]:
-    """Return Ray Data overrides for the optional StoreOperator stage."""
+    """Return Ray Data StoreOperator overrides.
+
+    Args:
+        storage_uri: Image storage URI. No override is returned when unset.
+        store_actors: Maximum store actor cap. Values less than one use the default.
+        store_cpus_per_actor: CPU reservation per store actor. Values less than
+            or equal to zero use the default.
+
+    Returns:
+        An empty dictionary when storage is disabled. Otherwise, a Ray Data node
+        override using scalar concurrency for one actor or Ray's autoscaling
+        ``(min, max, initial)`` actor-pool form for higher caps.
+    """
     if storage_uri is None:
         return {}
 
