@@ -79,7 +79,7 @@ ingestor = (
 | Value | Behavior |
 | --- | --- |
 | `"auto"` | Default for `.extract()`. Uses `MultiTypeExtractOperator` and dispatches each input by file extension. This is the normal mode for mixed corpora and for direct image files such as BMP and TIFF. |
-| `"pdf"` | Uses the legacy PDF/document graph directly: document-to-PDF conversion, PDF splitting, PDF extraction, page-element detection, optional table/chart stages, and optional OCR. This is an explicit compatibility path for PDF-like document extraction. It does not dispatch direct image inputs through `ImageLoadActor`. |
+| `"pdf"` | Uses the dedicated PDF/document graph directly: document-to-PDF conversion, PDF splitting, PDF extraction, page-element detection, optional table/chart stages, and optional OCR. This is an explicit path for PDF-like document extraction. It does not dispatch direct image inputs through `ImageLoadActor`. |
 | `"image"` | Forces inputs through the image pipeline. This is what `.extract_image_files()` sets. Images are converted into one-page page-schema rows before page-element detection and OCR/table/chart stages. |
 | `"text"` | Forces inputs through the text splitter. This is what `.extract_txt()` sets. |
 | `"html"` | Forces inputs through the HTML splitter. This is what `.extract_html()` sets. |
@@ -107,8 +107,8 @@ general extraction entry point. Defaulting `.extract()` to `"auto"` means the
 ingestor can route each supported file type through the matching graph branch.
 For direct image inputs, that branch first materializes `page_image`, allowing
 page-elements, OCR, table, chart, embed, and store stages to consume the image
-payload. Use `extraction_mode="pdf"` only when you intentionally want the
-legacy PDF/document graph.
+payload. Use `extraction_mode="pdf"` when you intentionally want to force all
+inputs through the PDF/document graph instead of extension dispatch.
 
 ### Typed extraction shortcuts
 
@@ -205,8 +205,8 @@ Use `.extract()` with its default `extraction_mode="auto"` for general
 document ingestion and mixed corpora. This is the safest default when the input
 set may contain supported non-PDF formats.
 
-Use `.extract(..., extraction_mode="pdf")` only when you intentionally want the
-legacy PDF/document graph for all inputs.
+Use `.extract(..., extraction_mode="pdf")` when you intentionally want the
+PDF/document graph for all inputs.
 
 Use typed shortcuts when the corpus is known to contain one file family and
 you want that mode explicitly, or when you need family-specific parameters such

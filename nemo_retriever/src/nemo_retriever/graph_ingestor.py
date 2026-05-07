@@ -188,7 +188,7 @@ class GraphIngestor(ingestor):
 
         Defaults to ``extraction_mode='auto'`` so supported file types are
         dispatched by extension. Pass ``extraction_mode='pdf'`` to use the
-        legacy PDF/document graph directly.
+        dedicated PDF/document graph directly.
         Chunking is opt-in: pass ``split_config={"<key>": {...}}`` to enable
         post-extract token chunking for that source type.
         """
