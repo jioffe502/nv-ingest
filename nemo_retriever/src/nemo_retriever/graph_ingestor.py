@@ -399,6 +399,7 @@ class GraphIngestor(ingestor):
             derived_overrides = batch_tuning_to_node_overrides(
                 self._extract_params,
                 self._embed_params,
+                store_params=self._store_params,
                 cluster_resources=cluster_resources,
                 allow_no_gpu=effective_allow_no_gpu,
                 caption_params=self._caption_params,

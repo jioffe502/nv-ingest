@@ -42,6 +42,10 @@ from nemo_retriever.utils.convert.to_pdf import DocToPdfConversionActor
 from nemo_retriever.ingest_plans import IngestExecutionPlan
 from nemo_retriever.utils.ray_resource_hueristics import (
     ClusterResources,
+    STORE_CPUS_PER_ACTOR,
+    STORE_INITIAL_ACTORS,
+    STORE_MAX_ACTORS,
+    STORE_MIN_ACTORS,
     resolve_requested_plan,
 )
 
@@ -76,8 +80,9 @@ def batch_tuning_to_node_overrides(
     caption_params: Any | None = None,
     caption_gpus_per_actor: float | None = None,
     video_frame_params: Any | None = None,
+    store_params: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Translate BatchTuningParams from extract/embed params into RayDataExecutor node_overrides.
+    """Translate BatchTuningParams from stage params into RayDataExecutor node_overrides.
 
     Explicit (non-zero) values from BatchTuningParams always win.  When a field
     is absent or zero, the heuristic default from ``resolve_requested_plan`` is
@@ -350,6 +355,25 @@ def batch_tuning_to_node_overrides(
         cpus = cluster_resources.total_cpu_count() if cluster_resources is not None else 0
         if cpus > 0:
             _set(VideoSplitActor.__name__, "concurrency", max(1, min(cpus // 4, 8)))
+
+    store_tuning = _batch_tuning(store_params)
+    if store_params is not None:
+        store_workers = _resolve(
+            getattr(store_tuning, "store_workers", None) if store_tuning is not None else None,
+            STORE_MAX_ACTORS,
+        )
+        store_cpus = _resolve(
+            getattr(store_tuning, "store_cpus_per_actor", None) if store_tuning is not None else None,
+            STORE_CPUS_PER_ACTOR,
+        )
+        if store_workers is not None:
+            store_workers = int(store_workers)
+            store_concurrency: int | tuple[int, int, int] = 1
+            if store_workers > 1:
+                store_concurrency = (STORE_MIN_ACTORS, store_workers, STORE_INITIAL_ACTORS)
+            overrides.setdefault(StoreOperator.__name__, {})["concurrency"] = store_concurrency
+        if store_cpus is not None:
+            overrides.setdefault(StoreOperator.__name__, {})["num_cpus"] = float(store_cpus)
 
     return overrides
 

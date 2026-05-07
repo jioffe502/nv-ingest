@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -75,41 +74,6 @@ STORE_INITIAL_ACTORS = 1
 STORE_MIN_ACTORS = 1
 STORE_MAX_ACTORS = 4
 STORE_CPUS_PER_ACTOR = 0.1
-
-
-def store_node_override(
-    *,
-    storage_uri: Optional[str],
-    store_actors: Optional[int],
-    store_cpus_per_actor: Optional[float],
-) -> dict[str, Any]:
-    """Return Ray Data StoreOperator overrides.
-
-    Args:
-        storage_uri: Image storage URI. No override is returned when unset.
-        store_actors: Maximum store actor cap. Values less than one use the default.
-        store_cpus_per_actor: CPU reservation per store actor. Values less than
-            or equal to zero use the default.
-
-    Returns:
-        An empty dictionary when storage is disabled. Otherwise, a Ray Data node
-        override using scalar concurrency for one actor or Ray's autoscaling
-        ``(min, max, initial)`` actor-pool form for higher caps.
-    """
-    if storage_uri is None:
-        return {}
-
-    requested_actors = max(0, int(store_actors or 0))
-    max_actors = requested_actors if requested_actors > 0 else STORE_MAX_ACTORS
-    requested_cpus = max(0.0, float(store_cpus_per_actor or 0.0))
-    cpus_per_actor = requested_cpus if requested_cpus > 0.0 else STORE_CPUS_PER_ACTOR
-    concurrency: int | tuple[int, int, int]
-    if max_actors <= 1:
-        concurrency = 1
-    else:
-        concurrency = (STORE_MIN_ACTORS, max_actors, STORE_INITIAL_ACTORS)
-
-    return {"concurrency": concurrency, "num_cpus": cpus_per_actor}
 
 
 class GpuInfo(BaseModel):

@@ -23,7 +23,6 @@ from nemo_retriever.pipeline.__main__ import (
     _parse_vdb_kwargs_json,
     _resolve_file_patterns,
 )
-from nemo_retriever.utils.ray_resource_hueristics import store_node_override
 
 
 def test_pipeline_package_exports_cli_app_and_run() -> None:
@@ -149,7 +148,7 @@ class TestBuildIngestor:
         assert captured["init"]["node_overrides"] is None
         assert captured["store_params"].storage_uri.endswith("/stored")
 
-    def test_store_tuning_flags_create_store_node_overrides(self, monkeypatch, tmp_path: Path) -> None:
+    def test_store_tuning_flags_create_store_params(self, monkeypatch, tmp_path: Path) -> None:
         calls, captured = self._build_pdf_ingestor(
             monkeypatch,
             tmp_path,
@@ -160,10 +159,12 @@ class TestBuildIngestor:
         )
 
         assert calls == ["files", "extract", "embed", "store"]
-        assert captured["init"]["node_overrides"] == {"StoreOperator": {"concurrency": (1, 4, 1), "num_cpus": 0.5}}
+        assert captured["init"]["node_overrides"] is None
         assert captured["store_params"].storage_uri.endswith("/stored")
+        assert captured["store_params"].batch_tuning.store_workers == 4
+        assert captured["store_params"].batch_tuning.store_cpus_per_actor == 0.5
 
-    def test_default_store_tuning_adds_store_node_override(self, monkeypatch, tmp_path: Path) -> None:
+    def test_default_store_tuning_leaves_store_params_defaults(self, monkeypatch, tmp_path: Path) -> None:
         calls, captured = self._build_pdf_ingestor(
             monkeypatch,
             tmp_path,
@@ -172,14 +173,9 @@ class TestBuildIngestor:
         )
 
         assert calls == ["files", "extract", "embed", "store"]
-        assert captured["init"]["node_overrides"] == {"StoreOperator": {"concurrency": (1, 4, 1), "num_cpus": 0.1}}
-
-
-def test_store_node_override_uses_scalar_concurrency_for_single_actor() -> None:
-    assert store_node_override(storage_uri="/tmp/stored", store_actors=1, store_cpus_per_actor=0.5) == {
-        "concurrency": 1,
-        "num_cpus": 0.5,
-    }
+        assert captured["init"]["node_overrides"] is None
+        assert captured["store_params"].batch_tuning.store_workers is None
+        assert captured["store_params"].batch_tuning.store_cpus_per_actor is None
 
 
 def test_resolve_file_patterns_returns_existing_file_verbatim(tmp_path: Path) -> None:

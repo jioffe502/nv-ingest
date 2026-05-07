@@ -69,7 +69,6 @@ from nemo_retriever.params import (
 )
 from nemo_retriever.params.models import BatchTuningParams
 from nemo_retriever.utils.input_files import resolve_input_patterns
-from nemo_retriever.utils.ray_resource_hueristics import store_node_override
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 
 logger = logging.getLogger(__name__)
@@ -442,17 +441,6 @@ def _build_ingestor(
     node_overrides: dict[str, dict[str, Any]] = {}
     if caption_gpus_per_actor is not None:
         node_overrides["CaptionActor"] = {"num_gpus": caption_gpus_per_actor}
-    store_override = (
-        store_node_override(
-            storage_uri=store_images_uri,
-            store_actors=store_actors,
-            store_cpus_per_actor=store_cpus_per_actor,
-        )
-        if run_mode == "batch"
-        else {}
-    )
-    if store_override:
-        node_overrides["StoreOperator"] = store_override
 
     ingestor = GraphIngestor(
         run_mode=run_mode,
@@ -567,9 +555,14 @@ def _build_ingestor(
     ingestor = ingestor.embed(embed_params)
 
     if store_images_uri is not None:
+        store_batch_tuning = BatchTuningParams(
+            store_workers=store_actors or None,
+            store_cpus_per_actor=store_cpus_per_actor or None,
+        )
         ingestor = ingestor.store(
             StoreParams(
                 storage_uri=store_images_uri,
+                batch_tuning=store_batch_tuning,
             )
         )
 
