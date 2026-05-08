@@ -303,7 +303,7 @@ class GraphIngestor(ingestor):
         return self
 
     def store(self, params: Optional[StoreParams] = None, **kwargs: Any) -> "GraphIngestor":
-        """Record a store stage for persisting extracted images/text to storage."""
+        """Record a store stage for persisting extracted image assets to storage."""
         self._store_params = _coerce(params, kwargs, default_factory=StoreParams)
         self._record_stage("store")
         return self
