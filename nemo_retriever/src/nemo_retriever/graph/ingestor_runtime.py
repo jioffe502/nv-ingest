@@ -43,10 +43,6 @@ from nemo_retriever.utils.convert.to_pdf import DocToPdfConversionActor
 from nemo_retriever.ingest_plans import IngestExecutionPlan
 from nemo_retriever.utils.ray_resource_hueristics import (
     ClusterResources,
-    STORE_CPUS_PER_ACTOR,
-    STORE_INITIAL_ACTORS,
-    STORE_MAX_ACTORS,
-    STORE_MIN_ACTORS,
     resolve_requested_plan,
 )
 
@@ -359,23 +355,28 @@ def batch_tuning_to_node_overrides(
 
     if store_params is not None:
         store_tuning = _batch_tuning(store_params)
-        store_override = overrides.setdefault(StoreOperator.__name__, {})
         store_workers = _resolve(
             getattr(store_tuning, "store_workers", None) if store_tuning is not None else None,
-            STORE_MAX_ACTORS,
+            plan.store_max_actors if plan else None,
         )
         store_cpus = _resolve(
             getattr(store_tuning, "store_cpus_per_actor", None) if store_tuning is not None else None,
-            STORE_CPUS_PER_ACTOR,
+            plan.store_cpus_per_actor if plan else None,
         )
-        if store_workers is not None:
-            store_workers = int(store_workers)
-            store_concurrency: int | tuple[int, int, int] = 1
-            if store_workers > 1:
-                store_concurrency = (STORE_MIN_ACTORS, store_workers, STORE_INITIAL_ACTORS)
-            store_override["concurrency"] = store_concurrency
-        if store_cpus is not None:
-            store_override["num_cpus"] = float(store_cpus)
+        if store_workers is not None or store_cpus is not None:
+            store_override = overrides.setdefault(StoreOperator.__name__, {})
+            if store_workers is not None:
+                store_workers = int(store_workers)
+                store_concurrency: int | tuple[int, int, int] = 1
+                if store_workers > 1:
+                    store_concurrency = (
+                        (plan.store_min_actors, store_workers, plan.store_initial_actors)
+                        if plan is not None
+                        else store_workers
+                    )
+                store_override["concurrency"] = store_concurrency
+            if store_cpus is not None:
+                store_override["num_cpus"] = float(store_cpus)
 
     return overrides
 
