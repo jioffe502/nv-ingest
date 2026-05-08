@@ -245,7 +245,7 @@ retriever pipeline run ./data/test.pdf \
 
 Stored image URIs are persisted in vector DB row metadata for VL reranking.
 Page granularity stores page images; element granularity stores element images.
-Use `--store-actors` and `--store-cpus-per-actor` to tune the store sink when
+Use `--store-actors` to tune the maximum store sink concurrency when
 object-storage writes are the bottleneck.
 
 ## Where results live

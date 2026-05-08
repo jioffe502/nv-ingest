@@ -402,7 +402,6 @@ def _build_ingestor(
     caption_max_tokens: int,
     store_images_uri: Optional[str],
     store_actors: Optional[int],
-    store_cpus_per_actor: Optional[float],
     segment_audio: bool,
     audio_split_type: str,
     audio_split_interval: int,
@@ -560,8 +559,6 @@ def _build_ingestor(
         store_batch_tuning = BatchTuningParams()
         if store_actors:
             store_batch_tuning.store_workers = store_actors
-        if store_cpus_per_actor:
-            store_batch_tuning.store_cpus_per_actor = store_cpus_per_actor
         ingestor = ingestor.store(
             StoreParams(
                 storage_uri=store_images_uri,
@@ -901,13 +898,6 @@ def run(
             "Maximum StoreOperator Ray actors. Store sinks autoscale from one actor to this cap; "
             "0 uses the default cap."
         ),
-        rich_help_panel=_PANEL_RAY,
-    ),
-    store_cpus_per_actor: Optional[float] = typer.Option(
-        0.0,
-        "--store-cpus-per-actor",
-        min=0.0,
-        help="CPU reservation per StoreOperator actor. 0 uses the default store-sink reservation.",
         rich_help_panel=_PANEL_RAY,
     ),
     pdf_split_batch_size: int = typer.Option(1, "--pdf-split-batch-size", min=1, rich_help_panel=_PANEL_RAY),
@@ -1341,7 +1331,6 @@ def run(
             caption_max_tokens=caption_max_tokens,
             store_images_uri=store_images_uri,
             store_actors=store_actors,
-            store_cpus_per_actor=store_cpus_per_actor,
             segment_audio=segment_audio,
             audio_split_type=audio_split_type,
             audio_split_interval=audio_split_interval,

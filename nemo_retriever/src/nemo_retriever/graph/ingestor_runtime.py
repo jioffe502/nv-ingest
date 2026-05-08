@@ -48,6 +48,9 @@ from nemo_retriever.utils.ray_resource_hueristics import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_STORE_WORKERS = 4
+DEFAULT_STORE_CPUS_PER_ACTOR = 0.1
+
 
 def _batch_tuning(params: Any) -> Any:
     return getattr(params, "batch_tuning", None)
@@ -356,17 +359,11 @@ def batch_tuning_to_node_overrides(
     if store_params is not None:
         store_tuning = _batch_tuning(store_params)
         store_workers = _positive(getattr(store_tuning, "store_workers", None) if store_tuning is not None else None)
-        store_cpus = _positive(
-            getattr(store_tuning, "store_cpus_per_actor", None) if store_tuning is not None else None
-        )
-        if store_workers is not None or store_cpus is not None:
-            store_override = overrides.setdefault(StoreOperator.__name__, {})
-            if store_workers is not None:
-                store_workers = int(store_workers)
-                # Ray actor pool tuple is (min, max, initial); keep store lazy at startup.
-                store_override["concurrency"] = (1, store_workers, 1) if store_workers > 1 else 1
-            if store_cpus is not None:
-                store_override["num_cpus"] = float(store_cpus)
+        store_workers = int(store_workers or DEFAULT_STORE_WORKERS)
+        store_override = overrides.setdefault(StoreOperator.__name__, {})
+        # Ray actor pool tuple is (min, max, initial); keep store lazy at startup.
+        store_override["concurrency"] = (1, store_workers, 1) if store_workers > 1 else 1
+        store_override["num_cpus"] = DEFAULT_STORE_CPUS_PER_ACTOR
 
     return overrides
 

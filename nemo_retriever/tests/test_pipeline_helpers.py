@@ -65,7 +65,6 @@ class TestBuildIngestor:
         run_mode: str,
         store_images_uri: str,
         store_actors: int = 0,
-        store_cpus_per_actor: float = 0.0,
     ) -> tuple[list[str], dict[str, Any]]:
         calls: list[str] = []
         captured: dict[str, Any] = {}
@@ -119,7 +118,6 @@ class TestBuildIngestor:
             caption_max_tokens=1024,
             store_images_uri=store_images_uri,
             store_actors=store_actors,
-            store_cpus_per_actor=store_cpus_per_actor,
             segment_audio=False,
             audio_split_type="time",
             audio_split_interval=30,
@@ -146,23 +144,21 @@ class TestBuildIngestor:
         assert captured["init"]["node_overrides"] is None
         assert captured["store_params"].storage_uri.endswith("/stored")
 
-    def test_store_tuning_flags_create_store_params(self, monkeypatch, tmp_path: Path) -> None:
+    def test_store_actor_flag_creates_store_params(self, monkeypatch, tmp_path: Path) -> None:
         calls, captured = self._build_pdf_ingestor(
             monkeypatch,
             tmp_path,
             run_mode="batch",
             store_images_uri=str(tmp_path / "stored"),
             store_actors=4,
-            store_cpus_per_actor=0.5,
         )
 
         assert calls == ["files", "extract", "embed", "store"]
         assert captured["init"]["node_overrides"] is None
         assert captured["store_params"].storage_uri.endswith("/stored")
         assert captured["store_params"].batch_tuning.store_workers == 4
-        assert captured["store_params"].batch_tuning.store_cpus_per_actor == 0.5
 
-    def test_default_store_tuning_uses_store_params_defaults(self, monkeypatch, tmp_path: Path) -> None:
+    def test_default_store_tuning_leaves_store_params_unset(self, monkeypatch, tmp_path: Path) -> None:
         calls, captured = self._build_pdf_ingestor(
             monkeypatch,
             tmp_path,
@@ -172,8 +168,7 @@ class TestBuildIngestor:
 
         assert calls == ["files", "extract", "embed", "store"]
         assert captured["init"]["node_overrides"] is None
-        assert captured["store_params"].batch_tuning.store_workers == 4
-        assert captured["store_params"].batch_tuning.store_cpus_per_actor == 0.1
+        assert captured["store_params"].batch_tuning.store_workers is None
 
 
 def test_resolve_file_patterns_returns_existing_file_verbatim(tmp_path: Path) -> None:

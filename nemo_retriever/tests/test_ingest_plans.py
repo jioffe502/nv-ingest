@@ -327,7 +327,7 @@ def test_batch_tuning_to_node_overrides_adds_default_store_tuning() -> None:
 def test_batch_tuning_to_node_overrides_honors_store_tuning() -> None:
     store_params = StoreParams(
         storage_uri="memory://stored",
-        batch_tuning=BatchTuningParams(store_workers=1, store_cpus_per_actor=0.5),
+        batch_tuning=BatchTuningParams(store_workers=1),
     )
 
     overrides = batch_tuning_to_node_overrides(
@@ -336,7 +336,7 @@ def test_batch_tuning_to_node_overrides_honors_store_tuning() -> None:
         store_params=store_params,
     )
 
-    assert overrides["StoreOperator"] == {"concurrency": 1, "num_cpus": 0.5}
+    assert overrides["StoreOperator"] == {"concurrency": 1, "num_cpus": 0.1}
 
 
 def test_graph_ingestor_autodetects_no_gpu_for_batch_overrides(monkeypatch) -> None:
