@@ -68,13 +68,6 @@ PDF_EXTRACT_CPUS_PER_TASK = (
 )
 PDF_EXTRACT_TASKS = 16  # Hueristic baseline num tasks. Used to determine how many CPU tasks to run in parallel.
 
-# Store sink constants. Store is a final I/O stage, so start with one actor and
-# let Ray grow the pool only when writes back up.
-STORE_INITIAL_ACTORS = 1
-STORE_MIN_ACTORS = 1
-STORE_MAX_ACTORS = 4
-STORE_CPUS_PER_ACTOR = 0.1
-
 
 class GpuInfo(BaseModel):
     driver_version: str
@@ -309,12 +302,6 @@ class RequestedPlan(BaseModel):
     pdf_extract_cpus_per_task: float
     pdf_extract_tasks: int
 
-    # Store sink resources requested to satisfy DAG plan
-    store_initial_actors: int
-    store_min_actors: int
-    store_max_actors: int
-    store_cpus_per_actor: float
-
     def get_embed_initial_actors(self) -> int:
         return self.embed_initial_actors
 
@@ -414,20 +401,8 @@ class RequestedPlan(BaseModel):
     def get_pdf_extract_tasks(self) -> int:
         return self.pdf_extract_tasks
 
-    def get_store_initial_actors(self) -> int:
-        return self.store_initial_actors
-
-    def get_store_min_actors(self) -> int:
-        return self.store_min_actors
-
-    def get_store_max_actors(self) -> int:
-        return self.store_max_actors
-
-    def get_store_cpus_per_actor(self) -> float:
-        return self.store_cpus_per_actor
-
     def __str__(self) -> str:
-        return f"RequestedPlan(embed_initial_actors={self.embed_initial_actors}, embed_min_actors={self.embed_min_actors}, embed_max_actors={self.embed_max_actors}, embed_gpus_per_actor={self.embed_gpus_per_actor}, embed_batch_size={self.embed_batch_size}, nemotron_parse_initial_actors={self.nemotron_parse_initial_actors}, nemotron_parse_min_actors={self.nemotron_parse_min_actors}, nemotron_parse_max_actors={self.nemotron_parse_max_actors}, nemotron_parse_gpus_per_actor={self.nemotron_parse_gpus_per_actor}, nemotron_parse_batch_size={self.nemotron_parse_batch_size}, ocr_initial_actors={self.ocr_initial_actors}, ocr_min_actors={self.ocr_min_actors}, caption_gpus_per_actor={self.caption_gpus_per_actor}, ocr_max_actors={self.ocr_max_actors}, ocr_gpus_per_actor={self.ocr_gpus_per_actor}, ocr_batch_size={self.ocr_batch_size}, page_elements_initial_actors={self.page_elements_initial_actors}, page_elements_min_actors={self.page_elements_min_actors}, page_elements_max_actors={self.page_elements_max_actors}, page_elements_gpus_per_actor={self.page_elements_gpus_per_actor}, page_elements_batch_size={self.page_elements_batch_size}, table_structure_initial_actors={self.table_structure_initial_actors}, table_structure_min_actors={self.table_structure_min_actors}, table_structure_max_actors={self.table_structure_max_actors}, table_structure_gpus_per_actor={self.table_structure_gpus_per_actor}, table_structure_batch_size={self.table_structure_batch_size}, graphic_elements_initial_actors={self.graphic_elements_initial_actors}, graphic_elements_min_actors={self.graphic_elements_min_actors}, graphic_elements_max_actors={self.graphic_elements_max_actors}, graphic_elements_gpus_per_actor={self.graphic_elements_gpus_per_actor}, graphic_elements_batch_size={self.graphic_elements_batch_size}, pdf_extract_batch_size={self.pdf_extract_batch_size}, pdf_extract_cpus_per_task={self.pdf_extract_cpus_per_task}, pdf_extract_tasks={self.pdf_extract_tasks}, store_initial_actors={self.store_initial_actors}, store_min_actors={self.store_min_actors}, store_max_actors={self.store_max_actors}, store_cpus_per_actor={self.store_cpus_per_actor})"  # noqa: E501
+        return f"RequestedPlan(embed_initial_actors={self.embed_initial_actors}, embed_min_actors={self.embed_min_actors}, embed_max_actors={self.embed_max_actors}, embed_gpus_per_actor={self.embed_gpus_per_actor}, embed_batch_size={self.embed_batch_size}, nemotron_parse_initial_actors={self.nemotron_parse_initial_actors}, nemotron_parse_min_actors={self.nemotron_parse_min_actors}, nemotron_parse_max_actors={self.nemotron_parse_max_actors}, nemotron_parse_gpus_per_actor={self.nemotron_parse_gpus_per_actor}, nemotron_parse_batch_size={self.nemotron_parse_batch_size}, ocr_initial_actors={self.ocr_initial_actors}, ocr_min_actors={self.ocr_min_actors}, caption_gpus_per_actor={self.caption_gpus_per_actor}, ocr_max_actors={self.ocr_max_actors}, ocr_gpus_per_actor={self.ocr_gpus_per_actor}, ocr_batch_size={self.ocr_batch_size}, page_elements_initial_actors={self.page_elements_initial_actors}, page_elements_min_actors={self.page_elements_min_actors}, page_elements_max_actors={self.page_elements_max_actors}, page_elements_gpus_per_actor={self.page_elements_gpus_per_actor}, page_elements_batch_size={self.page_elements_batch_size}, table_structure_initial_actors={self.table_structure_initial_actors}, table_structure_min_actors={self.table_structure_min_actors}, table_structure_max_actors={self.table_structure_max_actors}, table_structure_gpus_per_actor={self.table_structure_gpus_per_actor}, table_structure_batch_size={self.table_structure_batch_size}, graphic_elements_initial_actors={self.graphic_elements_initial_actors}, graphic_elements_min_actors={self.graphic_elements_min_actors}, graphic_elements_max_actors={self.graphic_elements_max_actors}, graphic_elements_gpus_per_actor={self.graphic_elements_gpus_per_actor}, graphic_elements_batch_size={self.graphic_elements_batch_size}, pdf_extract_batch_size={self.pdf_extract_batch_size}, pdf_extract_cpus_per_task={self.pdf_extract_cpus_per_task}, pdf_extract_tasks={self.pdf_extract_tasks})"  # noqa: E501
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -469,10 +444,6 @@ class RequestedPlan(BaseModel):
                 self.pdf_extract_batch_size,
                 self.pdf_extract_cpus_per_task,
                 self.pdf_extract_tasks,
-                self.store_initial_actors,
-                self.store_min_actors,
-                self.store_max_actors,
-                self.store_cpus_per_actor,
             )
         )
 
@@ -514,10 +485,6 @@ class RequestedPlan(BaseModel):
             and self.pdf_extract_batch_size == other.pdf_extract_batch_size
             and self.pdf_extract_cpus_per_task == other.pdf_extract_cpus_per_task
             and self.pdf_extract_tasks == other.pdf_extract_tasks
-            and self.store_initial_actors == other.store_initial_actors
-            and self.store_min_actors == other.store_min_actors
-            and self.store_max_actors == other.store_max_actors
-            and self.store_cpus_per_actor == other.store_cpus_per_actor
         )
 
     def __ne__(self, other: object) -> bool:
@@ -560,10 +527,6 @@ def resolve_requested_plan(
     override_pdf_extract_batch_size: Optional[int] = None,
     override_pdf_extract_cpus_per_task: Optional[float] = None,
     override_pdf_extract_tasks: Optional[int] = None,
-    override_store_initial_actors: Optional[int] = None,
-    override_store_min_actors: Optional[int] = None,
-    override_store_max_actors: Optional[int] = None,
-    override_store_cpus_per_actor: Optional[float] = None,
     allow_no_gpu: bool = False,
     caption_enabled: bool = False,
     override_caption_gpus_per_actor: Optional[float] = None,
@@ -668,10 +631,6 @@ def resolve_requested_plan(
     pdf_extract_batch_size = _resolve_int(override_pdf_extract_batch_size, PDF_EXTRACT_BATCH_SIZE, False)
     pdf_extract_cpus_per_task = _resolve_float(override_pdf_extract_cpus_per_task, PDF_EXTRACT_CPUS_PER_TASK, False)
     pdf_extract_tasks = _resolve_int_actors(override_pdf_extract_tasks, PDF_EXTRACT_TASKS, True)
-    store_initial_actors = _resolve_int(override_store_initial_actors, STORE_INITIAL_ACTORS, False)
-    store_min_actors = _resolve_int(override_store_min_actors, STORE_MIN_ACTORS, False)
-    store_max_actors = _resolve_int(override_store_max_actors, STORE_MAX_ACTORS, False)
-    store_cpus_per_actor = _resolve_float(override_store_cpus_per_actor, STORE_CPUS_PER_ACTOR, False)
 
     # Caption GPU budget.  On a single GPU the caption actor (vLLM) must share
     # with OCR / page-elements / embed, so we halve its reservation and drop
@@ -728,8 +687,4 @@ def resolve_requested_plan(
         pdf_extract_batch_size=pdf_extract_batch_size,
         pdf_extract_cpus_per_task=pdf_extract_cpus_per_task,
         pdf_extract_tasks=pdf_extract_tasks,
-        store_initial_actors=store_initial_actors,
-        store_min_actors=store_min_actors,
-        store_max_actors=store_max_actors,
-        store_cpus_per_actor=store_cpus_per_actor,
     )

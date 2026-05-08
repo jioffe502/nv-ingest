@@ -260,8 +260,8 @@ class BatchTuningParams(_ParamsModel):
     nemotron_parse_workers: Optional[int] = None
     gpu_nemotron_parse: Optional[float] = None
     nemotron_parse_batch_size: Optional[int] = None
-    store_workers: Optional[int] = None
-    store_cpus_per_actor: Optional[float] = None
+    store_workers: Optional[int] = 4
+    store_cpus_per_actor: Optional[float] = 0.1
     inference_batch_size: int = 8
 
 

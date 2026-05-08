@@ -162,7 +162,7 @@ class TestBuildIngestor:
         assert captured["store_params"].batch_tuning.store_workers == 4
         assert captured["store_params"].batch_tuning.store_cpus_per_actor == 0.5
 
-    def test_default_store_tuning_leaves_store_params_defaults(self, monkeypatch, tmp_path: Path) -> None:
+    def test_default_store_tuning_uses_store_params_defaults(self, monkeypatch, tmp_path: Path) -> None:
         calls, captured = self._build_pdf_ingestor(
             monkeypatch,
             tmp_path,
@@ -172,8 +172,8 @@ class TestBuildIngestor:
 
         assert calls == ["files", "extract", "embed", "store"]
         assert captured["init"]["node_overrides"] is None
-        assert captured["store_params"].batch_tuning.store_workers is None
-        assert captured["store_params"].batch_tuning.store_cpus_per_actor is None
+        assert captured["store_params"].batch_tuning.store_workers == 4
+        assert captured["store_params"].batch_tuning.store_cpus_per_actor == 0.1
 
 
 def test_resolve_file_patterns_returns_existing_file_verbatim(tmp_path: Path) -> None:

@@ -150,11 +150,6 @@ def test_resolve_requested_plan_defaults_with_2_gpus() -> None:
     assert plan.pdf_extract_cpus_per_task == rh.PDF_EXTRACT_CPUS_PER_TASK
     assert plan.pdf_extract_tasks == rh.PDF_EXTRACT_TASKS * 2
 
-    assert plan.store_initial_actors == rh.STORE_INITIAL_ACTORS
-    assert plan.store_min_actors == rh.STORE_MIN_ACTORS
-    assert plan.store_max_actors == rh.STORE_MAX_ACTORS
-    assert plan.store_cpus_per_actor == rh.STORE_CPUS_PER_ACTOR
-
 
 def test_resolve_requested_plan_defaults_with_1_gpu() -> None:
     plan = rh.resolve_requested_plan(cluster_resources=_make_cluster(total_gpu=1))
@@ -183,19 +178,6 @@ def test_resolve_requested_plan_overrides() -> None:
     assert plan.ocr_gpus_per_actor == 0.5
     assert plan.page_elements_batch_size == 64
     assert plan.pdf_extract_tasks == 20
-
-
-def test_resolve_requested_plan_store_overrides() -> None:
-    plan = rh.resolve_requested_plan(
-        cluster_resources=_make_cluster(total_gpu=2),
-        override_store_max_actors=8,
-        override_store_cpus_per_actor=0.5,
-    )
-
-    assert plan.store_initial_actors == rh.STORE_INITIAL_ACTORS
-    assert plan.store_min_actors == rh.STORE_MIN_ACTORS
-    assert plan.store_max_actors == 8
-    assert plan.store_cpus_per_actor == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -261,11 +243,6 @@ def test_requested_plan_getters() -> None:
     assert plan.get_pdf_extract_batch_size() == plan.pdf_extract_batch_size
     assert plan.get_pdf_extract_cpus_per_task() == plan.pdf_extract_cpus_per_task
     assert plan.get_pdf_extract_tasks() == plan.pdf_extract_tasks
-
-    assert plan.get_store_initial_actors() == plan.store_initial_actors
-    assert plan.get_store_min_actors() == plan.store_min_actors
-    assert plan.get_store_max_actors() == plan.store_max_actors
-    assert plan.get_store_cpus_per_actor() == plan.store_cpus_per_actor
 
 
 def test_requested_plan_equality() -> None:

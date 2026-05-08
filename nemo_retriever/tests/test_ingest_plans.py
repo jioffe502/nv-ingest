@@ -315,11 +315,9 @@ def test_batch_tuning_to_node_overrides_auto_cpu_only_when_no_gpus(ocr_version: 
 
 
 def test_batch_tuning_to_node_overrides_adds_default_store_tuning() -> None:
-    resources = Resources(cpu_count=16, gpu_count=1)
     overrides = batch_tuning_to_node_overrides(
         extract_params=None,
         embed_params=None,
-        cluster_resources=ClusterResources(total_resources=resources, available_resources=resources),
         store_params=StoreParams(storage_uri="memory://stored"),
     )
 

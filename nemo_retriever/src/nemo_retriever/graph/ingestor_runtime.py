@@ -355,26 +355,16 @@ def batch_tuning_to_node_overrides(
 
     if store_params is not None:
         store_tuning = _batch_tuning(store_params)
-        store_workers = _resolve(
-            getattr(store_tuning, "store_workers", None) if store_tuning is not None else None,
-            plan.store_max_actors if plan else None,
-        )
-        store_cpus = _resolve(
-            getattr(store_tuning, "store_cpus_per_actor", None) if store_tuning is not None else None,
-            plan.store_cpus_per_actor if plan else None,
+        store_workers = _positive(getattr(store_tuning, "store_workers", None) if store_tuning is not None else None)
+        store_cpus = _positive(
+            getattr(store_tuning, "store_cpus_per_actor", None) if store_tuning is not None else None
         )
         if store_workers is not None or store_cpus is not None:
             store_override = overrides.setdefault(StoreOperator.__name__, {})
             if store_workers is not None:
                 store_workers = int(store_workers)
-                store_concurrency: int | tuple[int, int, int] = 1
-                if store_workers > 1:
-                    store_concurrency = (
-                        (plan.store_min_actors, store_workers, plan.store_initial_actors)
-                        if plan is not None
-                        else store_workers
-                    )
-                store_override["concurrency"] = store_concurrency
+                # Ray actor pool tuple is (min, max, initial); keep store lazy at startup.
+                store_override["concurrency"] = (1, store_workers, 1) if store_workers > 1 else 1
             if store_cpus is not None:
                 store_override["num_cpus"] = float(store_cpus)
 

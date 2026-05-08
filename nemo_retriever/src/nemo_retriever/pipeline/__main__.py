@@ -557,10 +557,11 @@ def _build_ingestor(
     ingestor = ingestor.embed(embed_params)
 
     if store_images_uri is not None:
-        store_batch_tuning = BatchTuningParams(
-            store_workers=store_actors or None,
-            store_cpus_per_actor=store_cpus_per_actor or None,
-        )
+        store_batch_tuning = BatchTuningParams()
+        if store_actors:
+            store_batch_tuning.store_workers = store_actors
+        if store_cpus_per_actor:
+            store_batch_tuning.store_cpus_per_actor = store_cpus_per_actor
         ingestor = ingestor.store(
             StoreParams(
                 storage_uri=store_images_uri,
