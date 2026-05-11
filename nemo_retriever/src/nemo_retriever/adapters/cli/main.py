@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 import typer
 
+from nemo_retriever.adapters.cli.simple_workflow import hits_to_json, ingest_documents, query_documents
 from nemo_retriever.audio import app as audio_app
 from nemo_retriever.utils.benchmark import app as benchmark_app
 from nemo_retriever.chart import app as chart_app
@@ -22,6 +25,12 @@ from nemo_retriever.service.cli import app as service_app
 from nemo_retriever.txt import __main__ as txt_main
 from nemo_retriever.vector_store import app as vector_store_app
 from nemo_retriever.version import get_version_info
+
+
+class SimpleRunMode(str, Enum):
+    inprocess = "inprocess"
+    batch = "batch"
+
 
 app = typer.Typer(help="Retriever")
 app.add_typer(audio_app, name="audio")
@@ -51,6 +60,40 @@ def _version_callback(value: bool) -> None:
 
 def main() -> None:
     app()
+
+
+@app.command("ingest")
+def ingest_command(
+    documents: list[str] = typer.Argument(..., help="One or more document paths or globs to ingest."),
+    lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
+    table_name: str = typer.Option("nv-ingest", "--table-name", help="LanceDB table name."),
+    run_mode: SimpleRunMode = typer.Option(
+        SimpleRunMode.inprocess,
+        "--run-mode",
+        help="Execution mode for the SDK ingestor.",
+    ),
+) -> None:
+    summary = ingest_documents(
+        documents,
+        run_mode=run_mode.value,
+        lancedb_uri=lancedb_uri,
+        table_name=table_name,
+    )
+    typer.echo(
+        f"Ingested {len(summary['documents'])} document(s) into LanceDB "
+        f"{summary['lancedb_uri']}/{summary['table_name']}."
+    )
+
+
+@app.command("query")
+def query_command(
+    query: str = typer.Argument(..., help="Query text."),
+    top_k: int = typer.Option(10, "--top-k", min=1, help="Number of hits to retrieve."),
+    lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
+    table_name: str = typer.Option("nv-ingest", "--table-name", help="LanceDB table name."),
+) -> None:
+    hits = query_documents(query, top_k=top_k, lancedb_uri=lancedb_uri, table_name=table_name)
+    typer.echo(hits_to_json(hits))
 
 
 @app.callback()
