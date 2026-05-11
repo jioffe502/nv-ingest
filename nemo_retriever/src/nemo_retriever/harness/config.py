@@ -22,9 +22,14 @@ VALID_BEIR_LOADERS = {"bo10k_csv", "bo767_csv", "earnings_csv", "financebench_js
 VALID_BEIR_DOC_ID_FIELDS = {"pdf_basename", "pdf_page", "pdf_page_modality", "source_id", "path"}
 VALID_EMBED_MODALITIES = {"text", "image", "text_image"}
 VALID_EMBED_GRANULARITIES = {"element", "page"}
+# The harness should eventually integrate these pipeline storage settings directly.
 REMOVED_HARNESS_KEY_MESSAGES = {
-    "image_elements_modality": "image_elements_modality is no longer supported by the harness; use embed_modality instead",
-    "store_images_uri": "store_images_uri is no longer supported by the harness; use the pipeline CLI store flags instead",
+    "image_elements_modality": (
+        "image_elements_modality is no longer supported by the harness; use embed_modality instead"
+    ),
+    "store_images_uri": (
+        "store_images_uri is no longer supported by the harness; use the pipeline CLI store flags instead"
+    ),
     "store_text": "store_text is no longer supported by the harness; use the pipeline CLI store flags instead",
     "strip_base64": "strip_base64 is no longer supported by the harness; use the pipeline CLI store flags instead",
 }

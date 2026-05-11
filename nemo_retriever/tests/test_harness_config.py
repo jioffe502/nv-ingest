@@ -840,6 +840,7 @@ def test_load_harness_config_supports_bo767_beir_defaults(monkeypatch: pytest.Mo
     assert cfg.beir_loader == "bo767_csv"
     assert cfg.beir_doc_id_field == "pdf_page"
 
+
 def test_load_harness_config_supports_jp20_beir_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     real_exists = Path.exists
     expected_dataset_dir = Path("/datasets/nv-ingest/jp20").resolve()
