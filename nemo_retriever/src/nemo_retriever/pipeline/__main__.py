@@ -424,6 +424,9 @@ def _build_ingestor(
     local ``batch`` or ``inprocess`` execution.
     """
 
+    if store_actors and store_images_uri is None:
+        logger.warning("Ignoring --store-actors because --store-images-uri was not provided.")
+
     if run_mode == "service":
         from nemo_retriever.service_ingestor import ServiceIngestor
 

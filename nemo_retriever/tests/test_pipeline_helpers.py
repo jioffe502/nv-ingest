@@ -63,7 +63,7 @@ class TestBuildIngestor:
         tmp_path: Path,
         *,
         run_mode: str,
-        store_images_uri: str,
+        store_images_uri: str | None,
         store_actors: int = 0,
     ) -> tuple[list[str], dict[str, Any]]:
         calls: list[str] = []
@@ -169,6 +169,22 @@ class TestBuildIngestor:
         assert calls == ["files", "extract", "embed", "store"]
         assert captured["init"]["node_overrides"] is None
         assert captured["store_params"].batch_tuning.store_workers is None
+
+    def test_store_actor_flag_without_uri_warns_and_skips_store(self, monkeypatch, tmp_path: Path, caplog) -> None:
+        with caplog.at_level("WARNING", logger=pipeline_main.__name__):
+            calls, captured = self._build_pdf_ingestor(
+                monkeypatch,
+                tmp_path,
+                run_mode="batch",
+                store_images_uri=None,
+                store_actors=4,
+            )
+
+        assert calls == ["files", "extract", "embed"]
+        assert captured["init"]["node_overrides"] is None
+        assert "store_params" not in captured
+        assert "--store-actors" in caplog.text
+        assert "--store-images-uri" in caplog.text
 
 
 def test_resolve_file_patterns_returns_existing_file_verbatim(tmp_path: Path) -> None:
