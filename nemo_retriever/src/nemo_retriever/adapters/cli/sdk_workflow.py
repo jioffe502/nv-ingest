@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-
-import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -62,7 +60,3 @@ def query_documents(
     """Run the minimal SDK query path used by the root CLI."""
     retriever = Retriever(top_k=top_k, vdb_kwargs={"uri": lancedb_uri, "table_name": table_name})
     return retriever.query(query)
-
-
-def hits_to_json(hits: Sequence[dict[str, Any]]) -> str:
-    return json.dumps(list(hits), indent=2, sort_keys=True, default=str)

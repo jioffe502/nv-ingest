@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 
 import typer
 
-from nemo_retriever.adapters.cli.sdk_workflow import hits_to_json, ingest_documents, query_documents
+from nemo_retriever.adapters.cli.sdk_workflow import ingest_documents, query_documents
 from nemo_retriever.audio import app as audio_app
 from nemo_retriever.utils.benchmark import app as benchmark_app
 from nemo_retriever.chart import app as chart_app
@@ -93,7 +94,7 @@ def query_command(
     table_name: str = typer.Option("nv-ingest", "--table-name", help="LanceDB table name."),
 ) -> None:
     hits = query_documents(query, top_k=top_k, lancedb_uri=lancedb_uri, table_name=table_name)
-    typer.echo(hits_to_json(hits))
+    typer.echo(json.dumps(list(hits), indent=2, sort_keys=True, default=str))
 
 
 @app.callback()

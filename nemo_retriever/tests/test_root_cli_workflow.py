@@ -144,8 +144,4 @@ def test_root_query_passes_query_options_and_prints_json(monkeypatch) -> None:
     assert retriever_calls == [{"top_k": 3, "vdb_kwargs": {"uri": "/tmp/lancedb", "table_name": "docs"}}]
     assert query_calls == ["Which animal is responsible for typos?"]
     assert json.loads(result.output) == hits
-    assert result.output == sdk_workflow.hits_to_json(hits) + "\n"
-
-
-def test_hits_to_json_sorts_keys_for_stable_output() -> None:
-    assert sdk_workflow.hits_to_json([{"z": 1, "a": "x"}]) == ('[\n  {\n    "a": "x",\n    "z": 1\n  }\n]')
+    assert result.output == json.dumps(hits, indent=2, sort_keys=True, default=str) + "\n"
