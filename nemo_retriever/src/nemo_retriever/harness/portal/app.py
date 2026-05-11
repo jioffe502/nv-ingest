@@ -857,9 +857,11 @@ async def run_retrieval_query(run_id: int, req: RetrievalQueryRequest):
         from nemo_retriever.retriever import Retriever
 
         retriever = Retriever(
-            vdb="lancedb",
-            vdb_kwargs={"uri": uri, "table_name": LANCEDB_TABLE},
-            embedder=embed_model,
+            vdb_kwargs={
+                "vdb_op": "lancedb",
+                "vdb_kwargs": {"uri": uri, "table_name": LANCEDB_TABLE},
+            },
+            embed_kwargs={"model_name": embed_model, "embed_model_name": embed_model},
             top_k=req.top_k,
         )
         hits = retriever.query(req.query)
@@ -1656,6 +1658,8 @@ async def update_managed_dataset(dataset_id: int, req: DatasetUpdateRequest):
 
     data = {k: v for k, v in req.model_dump().items() if v is not None}
     row = history.update_dataset(dataset_id, data)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
     return row
 
 

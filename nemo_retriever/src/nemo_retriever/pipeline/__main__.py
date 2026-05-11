@@ -32,6 +32,10 @@ Examples::
         --vdb-op <operator-key> \\
         --vdb-kwargs-json '<operator kwargs JSON object>'
 
+    # Extract + embed only (skip in-graph VDB; default run includes VDB for recall)
+    retriever pipeline run /data/pdfs \\
+        --no-vdb
+
     # Sidecar metadata (merged into each chunk's content_metadata, same triplet as nv-ingest-client)
     retriever pipeline run /data/pdfs \\
         --meta-dataframe ./meta.csv \\
@@ -64,6 +68,7 @@ from nemo_retriever.params import (
     ExtractParams,
     StoreParams,
     TextChunkParams,
+    VdbUploadParams,
     VideoFrameParams,
     VideoFrameTextDedupParams,
 )
@@ -396,6 +401,7 @@ def _build_ingestor(
     caption_top_p: Optional[float],
     caption_max_tokens: int,
     store_images_uri: Optional[str],
+    store_actors: Optional[int],
     segment_audio: bool,
     audio_split_type: str,
     audio_split_interval: int,
@@ -409,6 +415,7 @@ def _build_ingestor(
     service_url: str = "http://localhost:7670",
     service_concurrency: int = 8,
     service_api_token: Optional[str] = None,
+    vdb_upload_params: Optional[VdbUploadParams] = None,
 ) -> Any:
     """Construct an ingestor with all requested stages attached.
 
@@ -416,6 +423,9 @@ def _build_ingestor(
     remote retriever service; otherwise returns a :class:`GraphIngestor` for
     local ``batch`` or ``inprocess`` execution.
     """
+
+    if store_actors and store_images_uri is None:
+        logger.warning("Ignoring --store-actors because --store-images-uri was not provided.")
 
     if run_mode == "service":
         from nemo_retriever.service_ingestor import ServiceIngestor
@@ -549,11 +559,18 @@ def _build_ingestor(
     ingestor = ingestor.embed(embed_params)
 
     if store_images_uri is not None:
+        store_batch_tuning = BatchTuningParams()
+        if store_actors:
+            store_batch_tuning.store_workers = store_actors
         ingestor = ingestor.store(
             StoreParams(
                 storage_uri=store_images_uri,
+                batch_tuning=store_batch_tuning,
             )
         )
+
+    if vdb_upload_params is not None:
+        ingestor = ingestor.vdb_upload(vdb_upload_params)
 
     return ingestor
 
@@ -591,20 +608,6 @@ def _count_uploadable_vdb_records(records: list[dict[str, Any]]) -> int:
     from nemo_retriever.vdb.records import to_client_vdb_records
 
     return sum(len(batch) for batch in to_client_vdb_records(records))
-
-
-def _upload_vdb_records(records: list[dict[str, Any]], *, vdb_op: str, vdb_kwargs: dict[str, Any]) -> float:
-    """Upload materialized graph records through the configured VDB backend."""
-
-    from nemo_retriever.vdb import IngestVdbOperator
-
-    upload_start = time.perf_counter()
-    operator = IngestVdbOperator(
-        vdb_op=str(vdb_op),
-        vdb_kwargs=dict(vdb_kwargs or {}),
-    )
-    operator(records)
-    return time.perf_counter() - upload_start
 
 
 def _run_evaluation(
@@ -890,6 +893,16 @@ def run(
     embed_gpus_per_actor: Optional[float] = typer.Option(
         None, "--embed-gpus-per-actor", max=1.0, rich_help_panel=_PANEL_RAY
     ),
+    store_actors: Optional[int] = typer.Option(
+        0,
+        "--store-actors",
+        min=0,
+        help=(
+            "Maximum StoreOperator Ray actors. Store sinks autoscale from one actor to this cap; "
+            "0 uses the default cap."
+        ),
+        rich_help_panel=_PANEL_RAY,
+    ),
     pdf_split_batch_size: int = typer.Option(1, "--pdf-split-batch-size", min=1, rich_help_panel=_PANEL_RAY),
     pdf_extract_batch_size: Optional[int] = typer.Option(0, "--pdf-extract-batch-size", rich_help_panel=_PANEL_RAY),
     pdf_extract_tasks: Optional[int] = typer.Option(0, "--pdf-extract-tasks", rich_help_panel=_PANEL_RAY),
@@ -1001,13 +1014,22 @@ def run(
     vdb_op: str = typer.Option(
         DEFAULT_VDB_OP,
         "--vdb-op",
-        help="nv-ingest-client VDB operator key used for post-graph upload.",
+        help="nv-ingest-client VDB operator key for in-graph upload after embed/store (skipped with --no-vdb).",
         rich_help_panel=_PANEL_VDB,
     ),
     vdb_kwargs_json: Optional[str] = typer.Option(
         None,
         "--vdb-kwargs-json",
-        help="JSON object forwarded as constructor kwargs to the selected VDB operator.",
+        help=(
+            "JSON object forwarded as constructor kwargs to the selected VDB operator "
+            "(optional; backends such as LanceDB use sensible defaults when omitted)."
+        ),
+        rich_help_panel=_PANEL_VDB,
+    ),
+    no_vdb: bool = typer.Option(
+        False,
+        "--no-vdb",
+        help="Skip in-graph vector DB upload (extract+embed only; default run uploads for recall/eval).",
         rich_help_panel=_PANEL_VDB,
     ),
     meta_dataframe: Optional[Path] = typer.Option(
@@ -1055,7 +1077,13 @@ def run(
     ),
     runtime_metrics_prefix: Optional[str] = typer.Option(None, "--runtime-metrics-prefix", rich_help_panel=_PANEL_OBS),
     # --- Evaluation -----------------------------------------------------
-    evaluation_mode: str = typer.Option("recall", "--evaluation-mode", rich_help_panel=_PANEL_EVAL),
+    evaluation_mode: str = typer.Option(
+        "recall",
+        "--evaluation-mode",
+        help="Post-ingest evaluation: default 'recall' runs when a \
+        query CSV exists (after VDB upload unless --no-vdb).",
+        rich_help_panel=_PANEL_EVAL,
+    ),
     query_csv: Path = typer.Option(
         "./data/bo767_query_gt.csv",
         "--query-csv",
@@ -1275,6 +1303,12 @@ def run(
         enable_caption = caption or caption_invoke_url is not None
         enable_dedup = dedup if dedup is not None else enable_caption
 
+        # In-graph VDB by default (supports default recall); opt out with --no-vdb.
+        enable_in_graph_vdb_upload = run_mode != "service" and not no_vdb
+        pipeline_vdb_upload: Optional[VdbUploadParams] = None
+        if enable_in_graph_vdb_upload:
+            pipeline_vdb_upload = VdbUploadParams(vdb_op=resolved_vdb_op, vdb_kwargs=resolved_vdb_kwargs)
+
         logger.info("Building graph pipeline (run_mode=%s) for %s ...", run_mode, input_path)
         ingestor = _build_ingestor(
             run_mode=run_mode,
@@ -1299,6 +1333,7 @@ def run(
             caption_top_p=caption_top_p,
             caption_max_tokens=caption_max_tokens,
             store_images_uri=store_images_uri,
+            store_actors=store_actors,
             segment_audio=segment_audio,
             audio_split_type=audio_split_type,
             audio_split_interval=audio_split_interval,
@@ -1312,6 +1347,7 @@ def run(
             service_url=service_url,
             service_concurrency=service_concurrency,
             service_api_token=service_api_token,
+            vdb_upload_params=pipeline_vdb_upload,
         )
 
         # --- Execute ---------------------------------------------------
@@ -1337,23 +1373,19 @@ def run(
             vdb_upload_time = 0.0
         else:
             uploadable_vdb_records = _count_uploadable_vdb_records(ingest_local_results)
+            vdb_upload_time = 0.0
             if uploadable_vdb_records == 0:
                 logger.warning(
-                    "No uploadable VDB records produced; skipping VDB upload and %s evaluation.",
+                    "No uploadable VDB records produced; skipping %s evaluation.",
                     evaluation_mode,
                 )
-                vdb_upload_time = 0.0
-            else:
+            elif enable_in_graph_vdb_upload:
                 logger.info(
-                    "Uploading %s graph records (%s VDB records) to VDB backend %s ...",
-                    len(ingest_local_results),
+                    "Prepared %s uploadable VDB records (%s graph rows) for in-graph upload to %s "
+                    "(row conversion count, not backend-confirmed writes; see VDB/operator logs for persistence).",
                     uploadable_vdb_records,
+                    len(ingest_local_results),
                     resolved_vdb_op,
-                )
-                vdb_upload_time = _upload_vdb_records(
-                    ingest_local_results,
-                    vdb_op=resolved_vdb_op,
-                    vdb_kwargs=resolved_vdb_kwargs,
                 )
 
         if save_intermediate is not None:
