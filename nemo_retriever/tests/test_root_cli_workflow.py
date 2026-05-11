@@ -91,7 +91,7 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
         [
             "ingest",
             str(first_document),
-            str(tmp_path / "b" / "*.pdf"),
+            str(globbed_document.parent),
             "--run-mode",
             "batch",
             "--lancedb-uri",

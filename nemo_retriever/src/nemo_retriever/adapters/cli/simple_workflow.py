@@ -5,12 +5,29 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Sequence
 
 from nemo_retriever.ingestor import create_ingestor
 from nemo_retriever.params import VdbUploadParams
 from nemo_retriever.retriever import Retriever
-from nemo_retriever.utils.input_files import expand_input_file_patterns
+from nemo_retriever.utils.input_files import expand_input_file_patterns, resolve_input_files
+
+
+def _expand_ingest_documents(documents: Sequence[str]) -> list[str]:
+    inputs: list[str] = []
+    for document in documents:
+        raw_document = str(document)
+        path = Path(raw_document).expanduser()
+        if path.is_dir():
+            directory_files = resolve_input_files(path, "pdf")
+            if not directory_files:
+                raise FileNotFoundError(f"No PDF files found under directory: {path}")
+            inputs.extend(str(file) for file in directory_files)
+        else:
+            inputs.append(raw_document)
+
+    return expand_input_file_patterns(inputs)
 
 
 def ingest_documents(
@@ -21,7 +38,7 @@ def ingest_documents(
     table_name: str = "nv-ingest",
 ) -> dict[str, Any]:
     """Run the minimal SDK ingestion chain used by the root CLI."""
-    document_list = expand_input_file_patterns(str(document) for document in documents)
+    document_list = _expand_ingest_documents(documents)
     params = VdbUploadParams(vdb_kwargs={"uri": lancedb_uri, "table_name": table_name})
 
     result = create_ingestor(run_mode=run_mode).files(document_list).extract().embed().vdb_upload(params).ingest()
