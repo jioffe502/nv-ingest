@@ -8,6 +8,7 @@ import importlib
 import json
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 import nemo_retriever.adapters.cli.sdk_workflow as sdk_workflow
@@ -44,9 +45,11 @@ class _FakeIngestor:
         return [{"status": "ok"}]
 
 
-def test_root_ingest_runs_default_sdk_chain(monkeypatch) -> None:
+def test_root_ingest_runs_default_sdk_chain(monkeypatch, tmp_path) -> None:
     fake_ingestor = _FakeIngestor()
     create_calls: list[dict[str, Any]] = []
+    document = tmp_path / "multimodal_test.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
 
     def fake_create_ingestor(**kwargs: Any) -> _FakeIngestor:
         create_calls.append(kwargs)
@@ -54,7 +57,7 @@ def test_root_ingest_runs_default_sdk_chain(monkeypatch) -> None:
 
     monkeypatch.setattr(sdk_workflow, "create_ingestor", fake_create_ingestor)
 
-    result = RUNNER.invoke(cli_main.app, ["ingest", "data/multimodal_test.pdf"])
+    result = RUNNER.invoke(cli_main.app, ["ingest", str(document)])
 
     assert result.exit_code == 0
     assert create_calls == [{"run_mode": "inprocess"}]
@@ -65,7 +68,7 @@ def test_root_ingest_runs_default_sdk_chain(monkeypatch) -> None:
         "vdb_upload",
         "ingest",
     ]
-    assert fake_ingestor.calls[0] == ("files", ["data/multimodal_test.pdf"])
+    assert fake_ingestor.calls[0] == ("files", [str(document)])
     assert fake_ingestor.vdb_upload_params.vdb_op == "lancedb"
     assert fake_ingestor.vdb_upload_params.vdb_kwargs == {"uri": "lancedb", "table_name": "nv-ingest"}
     assert "Ingested 1 document(s) into LanceDB lancedb/nv-ingest." in result.output
@@ -106,6 +109,33 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
     assert fake_ingestor.calls[0] == ("files", [str(first_document), str(globbed_document)])
     assert fake_ingestor.vdb_upload_params.vdb_kwargs == {"uri": "/tmp/lancedb", "table_name": "docs"}
     assert "Ingested 2 document(s) into LanceDB /tmp/lancedb/docs." in result.output
+
+
+def test_root_ingest_reports_empty_directory_error(tmp_path) -> None:
+    result = RUNNER.invoke(cli_main.app, ["ingest", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "No PDF files found under directory" in result.output
+
+
+def test_root_ingest_rejects_non_pdf_inputs(tmp_path) -> None:
+    document = tmp_path / "notes.txt"
+    document.write_text("not a pdf", encoding="utf-8")
+
+    result = RUNNER.invoke(cli_main.app, ["ingest", str(document)])
+
+    assert result.exit_code == 1
+    assert "Only PDF inputs are supported by retriever ingest" in result.output
+
+
+def test_ingest_documents_validates_run_mode_before_creating_ingestor(monkeypatch) -> None:
+    def fail_create_ingestor(**_kwargs: Any) -> _FakeIngestor:
+        raise AssertionError("create_ingestor should not be called for an invalid run mode")
+
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", fail_create_ingestor)
+
+    with pytest.raises(ValueError, match="run_mode must be one of"):
+        sdk_workflow.ingest_documents(["ignored.pdf"], run_mode="parallel")  # type: ignore[arg-type]
 
 
 def test_root_query_passes_query_options_and_prints_json(monkeypatch) -> None:
