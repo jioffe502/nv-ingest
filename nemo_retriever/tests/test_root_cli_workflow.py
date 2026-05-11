@@ -7,51 +7,36 @@ from __future__ import annotations
 import importlib
 import json
 from typing import Any
+from unittest.mock import create_autospec
 
 import pytest
 from typer.testing import CliRunner
 
 import nemo_retriever.adapters.cli.sdk_workflow as sdk_workflow
+from nemo_retriever.ingestor import ingestor as IngestorInterface
 
 
 RUNNER = CliRunner()
 cli_main = importlib.import_module("nemo_retriever.adapters.cli.main")
 
 
-class _FakeIngestor:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, Any]] = []
-        self.vdb_upload_params = None
-
-    def files(self, documents: list[str]) -> "_FakeIngestor":
-        self.calls.append(("files", documents))
-        return self
-
-    def extract(self) -> "_FakeIngestor":
-        self.calls.append(("extract", None))
-        return self
-
-    def embed(self) -> "_FakeIngestor":
-        self.calls.append(("embed", None))
-        return self
-
-    def vdb_upload(self, params: Any) -> "_FakeIngestor":
-        self.calls.append(("vdb_upload", params))
-        self.vdb_upload_params = params
-        return self
-
-    def ingest(self) -> list[dict[str, str]]:
-        self.calls.append(("ingest", None))
-        return [{"status": "ok"}]
+def _make_fake_ingestor() -> Any:
+    fake_ingestor = create_autospec(IngestorInterface, instance=True, spec_set=True)
+    fake_ingestor.files.return_value = fake_ingestor
+    fake_ingestor.extract.return_value = fake_ingestor
+    fake_ingestor.embed.return_value = fake_ingestor
+    fake_ingestor.vdb_upload.return_value = fake_ingestor
+    fake_ingestor.ingest.return_value = [{"status": "ok"}]
+    return fake_ingestor
 
 
 def test_root_ingest_runs_default_sdk_chain(monkeypatch, tmp_path) -> None:
-    fake_ingestor = _FakeIngestor()
+    fake_ingestor = _make_fake_ingestor()
     create_calls: list[dict[str, Any]] = []
     document = tmp_path / "multimodal_test.pdf"
     document.write_bytes(b"%PDF-1.4\n")
 
-    def fake_create_ingestor(**kwargs: Any) -> _FakeIngestor:
+    def fake_create_ingestor(**kwargs: Any) -> Any:
         create_calls.append(kwargs)
         return fake_ingestor
 
@@ -61,21 +46,22 @@ def test_root_ingest_runs_default_sdk_chain(monkeypatch, tmp_path) -> None:
 
     assert result.exit_code == 0
     assert create_calls == [{"run_mode": "inprocess"}]
-    assert [name for name, _value in fake_ingestor.calls] == [
+    assert [method_call[0] for method_call in fake_ingestor.method_calls] == [
         "files",
         "extract",
         "embed",
         "vdb_upload",
         "ingest",
     ]
-    assert fake_ingestor.calls[0] == ("files", [str(document)])
-    assert fake_ingestor.vdb_upload_params.vdb_op == "lancedb"
-    assert fake_ingestor.vdb_upload_params.vdb_kwargs == {"uri": "lancedb", "table_name": "nv-ingest"}
+    assert fake_ingestor.files.call_args.args == ([str(document)],)
+    vdb_upload_params = fake_ingestor.vdb_upload.call_args.args[0]
+    assert vdb_upload_params.vdb_op == "lancedb"
+    assert vdb_upload_params.vdb_kwargs == {"uri": "lancedb", "table_name": "nv-ingest"}
     assert "Ingested 1 document(s) into LanceDB lancedb/nv-ingest." in result.output
 
 
 def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> None:
-    fake_ingestor = _FakeIngestor()
+    fake_ingestor = _make_fake_ingestor()
     create_calls: list[dict[str, Any]] = []
     first_document = tmp_path / "a.pdf"
     globbed_document = tmp_path / "b" / "c.pdf"
@@ -83,7 +69,7 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
     globbed_document.parent.mkdir()
     globbed_document.write_bytes(b"%PDF-1.4\n")
 
-    def fake_create_ingestor(**kwargs: Any) -> _FakeIngestor:
+    def fake_create_ingestor(**kwargs: Any) -> Any:
         create_calls.append(kwargs)
         return fake_ingestor
 
@@ -106,8 +92,8 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
 
     assert result.exit_code == 0
     assert create_calls == [{"run_mode": "batch"}]
-    assert fake_ingestor.calls[0] == ("files", [str(first_document), str(globbed_document)])
-    assert fake_ingestor.vdb_upload_params.vdb_kwargs == {"uri": "/tmp/lancedb", "table_name": "docs"}
+    assert fake_ingestor.files.call_args.args == ([str(first_document), str(globbed_document)],)
+    assert fake_ingestor.vdb_upload.call_args.args[0].vdb_kwargs == {"uri": "/tmp/lancedb", "table_name": "docs"}
     assert "Ingested 2 document(s) into LanceDB /tmp/lancedb/docs." in result.output
 
 
@@ -129,7 +115,7 @@ def test_root_ingest_rejects_non_pdf_inputs(tmp_path) -> None:
 
 
 def test_ingest_documents_validates_run_mode_before_creating_ingestor(monkeypatch) -> None:
-    def fail_create_ingestor(**_kwargs: Any) -> _FakeIngestor:
+    def fail_create_ingestor(**_kwargs: Any) -> Any:
         raise AssertionError("create_ingestor should not be called for an invalid run mode")
 
     monkeypatch.setattr(sdk_workflow, "create_ingestor", fail_create_ingestor)
