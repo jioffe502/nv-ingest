@@ -8,7 +8,7 @@ from enum import Enum
 
 import typer
 
-from nemo_retriever.adapters.cli.root_workflow import hits_to_json, ingest_documents, query_documents
+from nemo_retriever.adapters.cli.sdk_workflow import hits_to_json, ingest_documents, query_documents
 from nemo_retriever.audio import app as audio_app
 from nemo_retriever.utils.benchmark import app as benchmark_app
 from nemo_retriever.chart import app as chart_app
