@@ -10,7 +10,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-import nemo_retriever.adapters.cli.simple_workflow as simple_workflow
+import nemo_retriever.adapters.cli.root_workflow as root_workflow
 
 
 RUNNER = CliRunner()
@@ -52,7 +52,7 @@ def test_root_ingest_runs_default_sdk_chain(monkeypatch) -> None:
         create_calls.append(kwargs)
         return fake_ingestor
 
-    monkeypatch.setattr(simple_workflow, "create_ingestor", fake_create_ingestor)
+    monkeypatch.setattr(root_workflow, "create_ingestor", fake_create_ingestor)
 
     result = RUNNER.invoke(cli_main.app, ["ingest", "data/multimodal_test.pdf"])
 
@@ -84,7 +84,7 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
         create_calls.append(kwargs)
         return fake_ingestor
 
-    monkeypatch.setattr(simple_workflow, "create_ingestor", fake_create_ingestor)
+    monkeypatch.setattr(root_workflow, "create_ingestor", fake_create_ingestor)
 
     result = RUNNER.invoke(
         cli_main.app,
@@ -124,7 +124,7 @@ def test_root_query_passes_query_options_and_prints_json(monkeypatch) -> None:
             query_calls.append(query)
             return hits
 
-    monkeypatch.setattr(simple_workflow, "Retriever", FakeRetriever)
+    monkeypatch.setattr(root_workflow, "Retriever", FakeRetriever)
 
     result = RUNNER.invoke(
         cli_main.app,
@@ -144,8 +144,8 @@ def test_root_query_passes_query_options_and_prints_json(monkeypatch) -> None:
     assert retriever_calls == [{"top_k": 3, "vdb_kwargs": {"uri": "/tmp/lancedb", "table_name": "docs"}}]
     assert query_calls == ["Which animal is responsible for typos?"]
     assert json.loads(result.output) == hits
-    assert result.output == simple_workflow.hits_to_json(hits) + "\n"
+    assert result.output == root_workflow.hits_to_json(hits) + "\n"
 
 
 def test_hits_to_json_sorts_keys_for_stable_output() -> None:
-    assert simple_workflow.hits_to_json([{"z": 1, "a": "x"}]) == ('[\n  {\n    "a": "x",\n    "z": 1\n  }\n]')
+    assert root_workflow.hits_to_json([{"z": 1, "a": "x"}]) == ('[\n  {\n    "a": "x",\n    "z": 1\n  }\n]')

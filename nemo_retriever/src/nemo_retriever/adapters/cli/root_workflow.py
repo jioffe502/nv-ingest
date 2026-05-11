@@ -14,6 +14,8 @@ from nemo_retriever.retriever import Retriever
 from nemo_retriever.utils.input_files import expand_input_file_patterns, resolve_input_files
 
 
+# Root ingest accepts bare dataset directories; expand those to PDFs before
+# passing file/glob inputs through the shared input normalizer.
 def _expand_ingest_documents(documents: Sequence[str]) -> list[str]:
     inputs: list[str] = []
     for document in documents:

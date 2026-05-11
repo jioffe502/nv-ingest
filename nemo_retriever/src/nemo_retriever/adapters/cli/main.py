@@ -8,7 +8,7 @@ from enum import Enum
 
 import typer
 
-from nemo_retriever.adapters.cli.simple_workflow import hits_to_json, ingest_documents, query_documents
+from nemo_retriever.adapters.cli.root_workflow import hits_to_json, ingest_documents, query_documents
 from nemo_retriever.audio import app as audio_app
 from nemo_retriever.utils.benchmark import app as benchmark_app
 from nemo_retriever.chart import app as chart_app
@@ -27,7 +27,7 @@ from nemo_retriever.vector_store import app as vector_store_app
 from nemo_retriever.version import get_version_info
 
 
-class SimpleRunMode(str, Enum):
+class IngestRunMode(str, Enum):
     inprocess = "inprocess"
     batch = "batch"
 
@@ -67,8 +67,8 @@ def ingest_command(
     documents: list[str] = typer.Argument(..., help="One or more document paths or globs to ingest."),
     lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
     table_name: str = typer.Option("nv-ingest", "--table-name", help="LanceDB table name."),
-    run_mode: SimpleRunMode = typer.Option(
-        SimpleRunMode.inprocess,
+    run_mode: IngestRunMode = typer.Option(
+        IngestRunMode.inprocess,
         "--run-mode",
         help="Execution mode for the SDK ingestor.",
     ),
