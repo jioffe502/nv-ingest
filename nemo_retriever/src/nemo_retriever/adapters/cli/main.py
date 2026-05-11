@@ -65,7 +65,7 @@ def main() -> None:
 
 @app.command("ingest")
 def ingest_command(
-    documents: list[str] = typer.Argument(..., help="One or more document paths or globs to ingest."),
+    documents: list[str] = typer.Argument(..., help="One or more document paths, directories, or globs to ingest."),
     lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
     table_name: str = typer.Option("nv-ingest", "--table-name", help="LanceDB table name."),
     run_mode: IngestRunMode = typer.Option(
