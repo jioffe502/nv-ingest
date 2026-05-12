@@ -11,6 +11,7 @@ from nemo_retriever.ingestor import create_ingestor
 from nemo_retriever.params import EmbedParams, ExtractParams, VdbUploadParams
 from nemo_retriever.retriever import Retriever
 from nemo_retriever.utils.input_files import expand_input_file_patterns, resolve_input_files
+from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 
 
 IngestRunModeValue = Literal["inprocess", "batch"]
@@ -59,6 +60,21 @@ def _build_embed_kwargs(embed_invoke_url: str | None, embed_model_name: str | No
         embed_kwargs["model_name"] = embed_model_name
         embed_kwargs["embed_model_name"] = embed_model_name
     return embed_kwargs
+
+
+def _build_rerank_kwargs(reranker_invoke_url: str | None) -> dict[str, str]:
+    if reranker_invoke_url is None:
+        return {}
+
+    reranker_url = reranker_invoke_url.strip()
+    if not reranker_url:
+        return {}
+
+    rerank_kwargs = {"rerank_invoke_url": reranker_url}
+    api_key = resolve_remote_api_key()
+    if api_key is not None:
+        rerank_kwargs["api_key"] = api_key
+    return rerank_kwargs
 
 
 def ingest_documents(
@@ -114,15 +130,20 @@ def query_documents(
     table_name: str = "nv-ingest",
     embed_invoke_url: str | None = None,
     embed_model_name: str | None = None,
+    reranker_invoke_url: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run the minimal SDK query path used by the root CLI."""
     embed_kwargs = _build_embed_kwargs(embed_invoke_url, embed_model_name)
+    rerank_kwargs = _build_rerank_kwargs(reranker_invoke_url)
     retriever_kwargs: dict[str, Any] = {
         "top_k": top_k,
         "vdb_kwargs": {"uri": lancedb_uri, "table_name": table_name},
     }
     if embed_kwargs:
         retriever_kwargs["embed_kwargs"] = embed_kwargs
+    if rerank_kwargs:
+        retriever_kwargs["rerank"] = True
+        retriever_kwargs["rerank_kwargs"] = rerank_kwargs
 
     retriever = Retriever(**retriever_kwargs)
     return retriever.query(query)

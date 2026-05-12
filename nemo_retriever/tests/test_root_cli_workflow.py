@@ -268,6 +268,47 @@ def test_root_query_passes_embed_options(monkeypatch) -> None:
     assert json.loads(result.output) == []
 
 
+def test_root_query_passes_reranker_url(monkeypatch) -> None:
+    retriever_calls: list[dict[str, Any]] = []
+    query_calls: list[str] = []
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+
+    class FakeRetriever:
+        def __init__(self, **kwargs: Any) -> None:
+            retriever_calls.append(kwargs)
+
+        def query(self, query: str) -> list[dict[str, Any]]:
+            query_calls.append(query)
+            return []
+
+    monkeypatch.setattr(sdk_workflow, "Retriever", FakeRetriever)
+
+    result = RUNNER.invoke(
+        cli_main.app,
+        [
+            "query",
+            "Which passages mention deployment?",
+            "--reranker-invoke-url",
+            "http://rerank:8000/v1/ranking",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert retriever_calls == [
+        {
+            "top_k": 10,
+            "vdb_kwargs": {"uri": "lancedb", "table_name": "nv-ingest"},
+            "rerank": True,
+            "rerank_kwargs": {
+                "rerank_invoke_url": "http://rerank:8000/v1/ranking",
+                "api_key": "nvapi-test",
+            },
+        }
+    ]
+    assert query_calls == ["Which passages mention deployment?"]
+    assert json.loads(result.output) == []
+
+
 def test_root_query_reports_os_errors(monkeypatch) -> None:
     def fail_query_documents(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
         raise OSError("database unavailable")

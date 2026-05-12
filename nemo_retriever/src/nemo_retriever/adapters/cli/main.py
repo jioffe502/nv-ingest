@@ -141,6 +141,7 @@ def query_command(
         "--embed-model-name",
         help="Optional embedding model name override.",
     ),
+    reranker_invoke_url: str | None = typer.Option(None, "--reranker-invoke-url", help="Reranker NIM endpoint URL."),
 ) -> None:
     try:
         hits = query_documents(
@@ -150,6 +151,7 @@ def query_command(
             table_name=table_name,
             embed_invoke_url=embed_invoke_url,
             embed_model_name=embed_model_name,
+            reranker_invoke_url=reranker_invoke_url,
         )
     except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)

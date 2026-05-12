@@ -55,7 +55,8 @@ retriever ingest ./data/multimodal_test.pdf \
 
 retriever query "What is in this document?" \
   --embed-invoke-url https://integrate.api.nvidia.com/v1/embeddings \
-  --embed-model-name nvidia/llama-nemotron-embed-1b-v2
+  --embed-model-name nvidia/llama-nemotron-embed-1b-v2 \
+  --reranker-invoke-url https://ai.api.nvidia.com/v1/retrieval/nvidia/llama-nemotron-rerank-vl-1b-v2/reranking
 ```
 
 `NVIDIA_API_KEY` is required only when those URLs point at hosted
