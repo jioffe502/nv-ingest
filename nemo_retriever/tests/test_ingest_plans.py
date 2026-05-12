@@ -233,6 +233,34 @@ def test_build_graph_resolves_endpoint_configured_nodes_to_cpu_variants(
     assert issubclass(classes["_BatchEmbedActor"], CPUOperator)
 
 
+def test_build_graph_keeps_partial_graphic_endpoint_on_gpu_for_local_ocr() -> None:
+    graph = build_graph(
+        extract_params=ExtractParams(
+            method="ocr",
+            extract_text=True,
+            extract_tables=False,
+            extract_charts=True,
+            extract_infographics=False,
+            page_elements_invoke_url="http://page.example/v1",
+            graphic_elements_invoke_url="http://graphic.example/v1",
+            ocr_invoke_url=None,
+            ocr_version="v1",
+        ),
+        embed_params=EmbedParams(
+            model_name="nvidia/llama-nemotron-embed-1b-v2", embed_invoke_url="http://embed.example/v1"
+        ),
+    )
+
+    resolved = graph.resolve(Resources(cpu_count=8, gpu_count=4))
+    classes = {node.name: node.operator_class for node in _linear_nodes(resolved)}
+
+    assert classes["PageElementDetectionActor"].__name__ == "PageElementDetectionCPUActor"
+    assert classes["GraphicElementsActor"].__name__ == "GraphicElementsActor"
+    assert classes["OCRActor"].__name__ == "OCRActor"
+    assert issubclass(classes["GraphicElementsActor"], GPUOperator)
+    assert issubclass(classes["OCRActor"], GPUOperator)
+
+
 @pytest.mark.parametrize(
     "ocr_version, expected_node_name, expected_archetype_class",
     [

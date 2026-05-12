@@ -226,6 +226,21 @@ class TestTableStructureCPUActor:
         actor = TableStructureCPUActor(table_structure_invoke_url="http://custom1")
         assert actor._table_structure_invoke_url == "http://custom1"
 
+    @patch("nemo_retriever.table.cpu_actor.probe_endpoint")
+    def test_custom_table_url_does_not_default_ocr_endpoint(self, mock_probe):
+        from nemo_retriever.table.cpu_actor import TableStructureCPUActor
+
+        actor = TableStructureCPUActor(table_structure_invoke_url="http://custom1")
+
+        assert actor._table_structure_invoke_url == "http://custom1"
+        assert actor._ocr_invoke_url == ""
+        mock_probe.assert_called_once_with(
+            "http://custom1",
+            name="table-structure",
+            prefix="TableStructureCPUActor",
+            api_key=None,
+        )
+
     @patch("nemo_retriever.table.cpu_actor.table_structure_ocr_page_elements")
     def test_process(self, mock_fn):
         from nemo_retriever.table.cpu_actor import TableStructureCPUActor

@@ -28,10 +28,9 @@ class GraphicElementsActor(ArchetypeOperator):
     @classmethod
     def prefers_cpu_variant(cls, operator_kwargs: dict[str, Any] | None = None) -> bool:
         kwargs = operator_kwargs or {}
-        return bool(
-            str(kwargs.get("graphic_elements_invoke_url") or "").strip()
-            or str(kwargs.get("ocr_invoke_url") or kwargs.get("invoke_url") or "").strip()
-        )
+        graphic_url = str(kwargs.get("graphic_elements_invoke_url") or "").strip()
+        ocr_url = str(kwargs.get("ocr_invoke_url") or kwargs.get("invoke_url") or "").strip()
+        return bool(graphic_url and ocr_url)
 
     @classmethod
     def cpu_variant_class(cls):

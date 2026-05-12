@@ -8,7 +8,12 @@ import json
 
 import typer
 
-from nemo_retriever.adapters.cli.sdk_workflow import IngestRunModeValue, ingest_documents, query_documents
+from nemo_retriever.adapters.cli.sdk_workflow import (
+    IngestRunModeValue,
+    OcrVersionValue,
+    ingest_documents,
+    query_documents,
+)
 from nemo_retriever.audio import app as audio_app
 from nemo_retriever.utils.benchmark import app as benchmark_app
 from nemo_retriever.chart import app as chart_app
@@ -70,6 +75,33 @@ def ingest_command(
         "--run-mode",
         help="Execution mode for the SDK ingestor.",
     ),
+    page_elements_invoke_url: str | None = typer.Option(
+        None,
+        "--page-elements-invoke-url",
+        help="Page-elements NIM endpoint URL.",
+    ),
+    ocr_invoke_url: str | None = typer.Option(None, "--ocr-invoke-url", help="OCR NIM endpoint URL."),
+    ocr_version: OcrVersionValue | None = typer.Option(
+        None,
+        "--ocr-version",
+        help="OCR engine version for extraction.",
+    ),
+    graphic_elements_invoke_url: str | None = typer.Option(
+        None,
+        "--graphic-elements-invoke-url",
+        help="Graphic-elements NIM endpoint URL.",
+    ),
+    table_structure_invoke_url: str | None = typer.Option(
+        None,
+        "--table-structure-invoke-url",
+        help="Table-structure NIM endpoint URL.",
+    ),
+    embed_invoke_url: str | None = typer.Option(None, "--embed-invoke-url", help="Embedding NIM endpoint URL."),
+    embed_model_name: str | None = typer.Option(
+        None,
+        "--embed-model-name",
+        help="Optional embedding model name override.",
+    ),
 ) -> None:
     try:
         summary = ingest_documents(
@@ -77,6 +109,13 @@ def ingest_command(
             run_mode=run_mode,
             lancedb_uri=lancedb_uri,
             table_name=table_name,
+            page_elements_invoke_url=page_elements_invoke_url,
+            ocr_invoke_url=ocr_invoke_url,
+            ocr_version=ocr_version,
+            graphic_elements_invoke_url=graphic_elements_invoke_url,
+            table_structure_invoke_url=table_structure_invoke_url,
+            embed_invoke_url=embed_invoke_url,
+            embed_model_name=embed_model_name,
         )
     except (FileNotFoundError, IsADirectoryError, RuntimeError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -94,9 +133,22 @@ def query_command(
     top_k: int = typer.Option(10, "--top-k", min=1, help="Number of hits to retrieve."),
     lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
     table_name: str = typer.Option("nv-ingest", "--table-name", help="LanceDB table name."),
+    embed_invoke_url: str | None = typer.Option(None, "--embed-invoke-url", help="Embedding NIM endpoint URL."),
+    embed_model_name: str | None = typer.Option(
+        None,
+        "--embed-model-name",
+        help="Optional embedding model name override.",
+    ),
 ) -> None:
     try:
-        hits = query_documents(query, top_k=top_k, lancedb_uri=lancedb_uri, table_name=table_name)
+        hits = query_documents(
+            query,
+            top_k=top_k,
+            lancedb_uri=lancedb_uri,
+            table_name=table_name,
+            embed_invoke_url=embed_invoke_url,
+            embed_model_name=embed_model_name,
+        )
     except (FileNotFoundError, IsADirectoryError, RuntimeError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
