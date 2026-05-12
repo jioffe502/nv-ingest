@@ -49,6 +49,8 @@ app.add_typer(txt_main.app, name="txt")
 app.add_typer(html_main.app, name="html")
 app.add_typer(pipeline_main.app, name="pipeline")
 
+_ROOT_CLI_ERRORS = (OSError, RuntimeError, ValueError)
+
 
 def _version_callback(value: bool) -> None:
     if not value:
@@ -117,7 +119,7 @@ def ingest_command(
             embed_invoke_url=embed_invoke_url,
             embed_model_name=embed_model_name,
         )
-    except (FileNotFoundError, IsADirectoryError, RuntimeError, ValueError) as exc:
+    except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
@@ -149,7 +151,7 @@ def query_command(
             embed_invoke_url=embed_invoke_url,
             embed_model_name=embed_model_name,
         )
-    except (FileNotFoundError, IsADirectoryError, RuntimeError, ValueError) as exc:
+    except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 

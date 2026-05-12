@@ -55,6 +55,7 @@ def _build_embed_kwargs(embed_invoke_url: str | None, embed_model_name: str | No
     if embed_invoke_url is not None:
         embed_kwargs["embed_invoke_url"] = embed_invoke_url
     if embed_model_name is not None:
+        # Remote HTTP embedding reads model_name; local/GPU paths read embed_model_name.
         embed_kwargs["model_name"] = embed_model_name
         embed_kwargs["embed_model_name"] = embed_model_name
     return embed_kwargs

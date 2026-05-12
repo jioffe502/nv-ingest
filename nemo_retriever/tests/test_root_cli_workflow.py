@@ -165,6 +165,18 @@ def test_root_ingest_rejects_non_pdf_inputs(tmp_path) -> None:
     assert "Only PDF inputs are supported by retriever ingest" in result.output
 
 
+def test_root_ingest_reports_os_errors(monkeypatch) -> None:
+    def fail_ingest_documents(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(cli_main, "ingest_documents", fail_ingest_documents)
+
+    result = RUNNER.invoke(cli_main.app, ["ingest", "blocked.pdf"])
+
+    assert result.exit_code == 1
+    assert "Error: permission denied" in result.output
+
+
 def test_ingest_documents_validates_run_mode_before_creating_ingestor(monkeypatch) -> None:
     def fail_create_ingestor(**_kwargs: Any) -> Any:
         raise AssertionError("create_ingestor should not be called for an invalid run mode")
@@ -254,3 +266,15 @@ def test_root_query_passes_embed_options(monkeypatch) -> None:
     ]
     assert query_calls == ["Which passages mention deployment?"]
     assert json.loads(result.output) == []
+
+
+def test_root_query_reports_os_errors(monkeypatch) -> None:
+    def fail_query_documents(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(cli_main, "query_documents", fail_query_documents)
+
+    result = RUNNER.invoke(cli_main.app, ["query", "hello"])
+
+    assert result.exit_code == 1
+    assert "Error: database unavailable" in result.output

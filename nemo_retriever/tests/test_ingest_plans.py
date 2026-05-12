@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from tests import _have_ffmpeg_binary
@@ -233,7 +235,8 @@ def test_build_graph_resolves_endpoint_configured_nodes_to_cpu_variants(
     assert issubclass(classes["_BatchEmbedActor"], CPUOperator)
 
 
-def test_build_graph_keeps_partial_graphic_endpoint_on_gpu_for_local_ocr() -> None:
+def test_build_graph_keeps_partial_graphic_endpoint_on_gpu_for_local_ocr(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="nemo_retriever.chart.chart_detection")
     graph = build_graph(
         extract_params=ExtractParams(
             method="ocr",
@@ -258,6 +261,7 @@ def test_build_graph_keeps_partial_graphic_endpoint_on_gpu_for_local_ocr() -> No
     assert classes["GraphicElementsActor"].__name__ == "GraphicElementsActor"
     assert classes["OCRActor"].__name__ == "OCRActor"
     assert issubclass(classes["GraphicElementsActor"], GPUOperator)
+    assert "received graphic_elements_invoke_url without ocr_invoke_url" in caplog.text
     assert issubclass(classes["OCRActor"], GPUOperator)
 
 
