@@ -235,11 +235,19 @@ def handle_lancedb(
 ) -> Dict[str, Any]:
     """Write flattened extraction rows into LanceDB and build indices.
 
-    ``mode`` is accepted for API compatibility; writes use ``overwrite`` semantics
-    via :class:`LanceDBConfig` when creating the table.
+    ``mode`` accepts ``"overwrite"`` or ``"append"`` and is mapped to the
+    corresponding :class:`LanceDBConfig.overwrite` value.
     """
-    _ = mode
-    lancedb_config = LanceDBConfig(uri=uri, table_name=table_name, hybrid=hybrid)
+    mode_normalized = str(mode or "overwrite").strip().lower()
+    if mode_normalized not in {"overwrite", "append"}:
+        raise ValueError(f"mode must be 'overwrite' or 'append'; got {mode!r}")
+
+    lancedb_config = LanceDBConfig(
+        uri=uri,
+        table_name=table_name,
+        overwrite=mode_normalized == "overwrite",
+        hybrid=hybrid,
+    )
     db = lancedb.connect(uri=lancedb_config.uri)
     cleaned_rows = _build_lancedb_rows_from_df(rows)
     if not cleaned_rows:

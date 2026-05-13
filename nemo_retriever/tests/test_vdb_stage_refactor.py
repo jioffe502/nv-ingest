@@ -7,8 +7,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from nemo_retriever.vdb import lancedb_bulk
-from nemo_retriever.vdb.lancedb_bulk import LanceDBConfig, write_text_embeddings_dir_to_lancedb
+from nemo_retriever.vdb.lancedb_bulk import LanceDBConfig, handle_lancedb, write_text_embeddings_dir_to_lancedb
 
 
 def test_local_stage6_reexports_moved_vdb_stage_app() -> None:
@@ -76,3 +78,29 @@ def test_text_embeddings_dir_upload_uses_canonical_lancedb(monkeypatch, tmp_path
     assert info["n_files"] == 1
     assert info["processed"] == 1
     assert info["skipped"] == 0
+
+
+def test_handle_lancedb_honors_append_mode(monkeypatch) -> None:
+    write_calls: list[LanceDBConfig] = []
+    index_calls: list[LanceDBConfig] = []
+
+    class FakeDb:
+        @staticmethod
+        def open_table(_table_name: str) -> object:
+            return object()
+
+    monkeypatch.setattr(lancedb_bulk.lancedb, "connect", lambda uri: FakeDb())
+    monkeypatch.setattr(lancedb_bulk, "_build_lancedb_rows_from_df", lambda rows: [{"vector": [0.1, 0.2]}])
+    monkeypatch.setattr(lancedb_bulk, "_write_rows_to_lancedb", lambda rows, *, cfg: write_calls.append(cfg))
+    monkeypatch.setattr(lancedb_bulk, "create_lancedb_index", lambda table, *, cfg: index_calls.append(cfg))
+
+    info = handle_lancedb([{"text": "hello"}], uri="db", table_name="docs", mode="append")
+
+    assert info == {"rows_written": 1}
+    assert write_calls[0].overwrite is False
+    assert index_calls[0].overwrite is False
+
+
+def test_handle_lancedb_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="mode must be 'overwrite' or 'append'"):
+        handle_lancedb([], uri="db", table_name="docs", mode="merge")
