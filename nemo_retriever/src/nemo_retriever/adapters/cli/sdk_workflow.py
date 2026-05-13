@@ -9,6 +9,7 @@ from typing import Any, Literal, Sequence, cast
 
 from nemo_retriever.ingestor import create_ingestor
 from nemo_retriever.params import EmbedParams, ExtractParams, VdbUploadParams
+from nemo_retriever.params.utils import normalize_embed_kwargs
 from nemo_retriever.retriever import Retriever
 from nemo_retriever.utils.input_files import expand_input_file_patterns, resolve_input_files
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
@@ -51,15 +52,15 @@ def _expand_pdf_ingest_documents(documents: Sequence[str]) -> list[str]:
     return document_list
 
 
-def _build_embed_kwargs(embed_invoke_url: str | None, embed_model_name: str | None) -> dict[str, str]:
-    embed_kwargs: dict[str, str] = {}
+def _build_embed_kwargs(embed_invoke_url: str | None, embed_model_name: str | None) -> dict[str, Any]:
+    embed_kwargs: dict[str, Any] = {}
     if embed_invoke_url is not None:
         embed_kwargs["embed_invoke_url"] = embed_invoke_url
     if embed_model_name is not None:
         # Remote HTTP embedding reads model_name; local/GPU paths read embed_model_name.
         embed_kwargs["model_name"] = embed_model_name
         embed_kwargs["embed_model_name"] = embed_model_name
-    return embed_kwargs
+    return normalize_embed_kwargs(embed_kwargs)
 
 
 def _build_rerank_kwargs(reranker_invoke_url: str | None) -> dict[str, str]:

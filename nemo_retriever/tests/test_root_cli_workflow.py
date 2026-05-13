@@ -144,6 +144,7 @@ def test_root_ingest_passes_nim_url_options(monkeypatch, tmp_path) -> None:
     embed_params = fake_ingestor.embed.call_args.args[0]
     assert isinstance(embed_params, EmbedParams)
     assert embed_params.embed_invoke_url == "http://embed:8000/v1/embeddings"
+    assert embed_params.embedding_endpoint == "http://embed:8000/v1/embeddings"
     assert embed_params.model_name == "nvidia/llama-nemotron-embed-1b-v2"
     assert embed_params.embed_model_name == "nvidia/llama-nemotron-embed-1b-v2"
 
@@ -259,6 +260,7 @@ def test_root_query_passes_embed_options(monkeypatch) -> None:
             "vdb_kwargs": {"uri": "lancedb", "table_name": "nv-ingest"},
             "embed_kwargs": {
                 "embed_invoke_url": "http://embed:8000/v1/embeddings",
+                "embedding_endpoint": "http://embed:8000/v1/embeddings",
                 "model_name": "nvidia/llama-nemotron-embed-1b-v2",
                 "embed_model_name": "nvidia/llama-nemotron-embed-1b-v2",
             },
