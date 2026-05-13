@@ -75,6 +75,14 @@ def ingest_command(
         "--run-mode",
         help="Execution mode for the SDK ingestor.",
     ),
+    overwrite: bool = typer.Option(
+        True,
+        "--overwrite/--append",
+        help=(
+            "Overwrite the target LanceDB table by default. Use --append to add rows to an existing "
+            "table without duplicate checks; rerunning the same inputs in append mode creates duplicates."
+        ),
+    ),
 ) -> None:
     try:
         summary = ingest_documents(
@@ -82,6 +90,7 @@ def ingest_command(
             run_mode=run_mode,
             lancedb_uri=lancedb_uri,
             table_name=table_name,
+            overwrite=overwrite,
         )
     except (FileNotFoundError, IsADirectoryError, RuntimeError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)

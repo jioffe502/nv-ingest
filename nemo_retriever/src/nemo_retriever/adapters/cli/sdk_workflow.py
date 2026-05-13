@@ -55,11 +55,12 @@ def ingest_documents(
     run_mode: IngestRunModeValue = "inprocess",
     lancedb_uri: str = "lancedb",
     table_name: str = "nv-ingest",
+    overwrite: bool = True,
 ) -> dict[str, Any]:
     """Run the minimal SDK ingestion chain used by the root CLI."""
     validated_run_mode = _validate_run_mode(run_mode)
     document_list = _expand_pdf_ingest_documents(documents)
-    params = VdbUploadParams(vdb_kwargs={"uri": lancedb_uri, "table_name": table_name})
+    params = VdbUploadParams(vdb_kwargs={"uri": lancedb_uri, "table_name": table_name, "overwrite": bool(overwrite)})
 
     result = (
         create_ingestor(run_mode=validated_run_mode).files(document_list).extract().embed().vdb_upload(params).ingest()
