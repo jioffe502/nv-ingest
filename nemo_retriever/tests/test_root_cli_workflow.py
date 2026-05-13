@@ -30,6 +30,13 @@ def _make_fake_ingestor() -> Any:
     return fake_ingestor
 
 
+def test_root_help_does_not_register_legacy_vector_store() -> None:
+    result = RUNNER.invoke(cli_main.app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "vector-store" not in result.output
+
+
 def test_root_ingest_runs_default_sdk_chain(monkeypatch, tmp_path) -> None:
     fake_ingestor = _make_fake_ingestor()
     create_calls: list[dict[str, Any]] = []
