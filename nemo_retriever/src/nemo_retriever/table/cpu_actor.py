@@ -28,7 +28,6 @@ class TableStructureCPUActor(AbstractOperator, CPUOperator):
     """
 
     DEFAULT_TABLE_STRUCTURE_INVOKE_URL = "https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-table-structure-v1"
-    DEFAULT_OCR_INVOKE_URL = "https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v1"
 
     def __init__(
         self,
@@ -46,17 +45,10 @@ class TableStructureCPUActor(AbstractOperator, CPUOperator):
         remote_max_429_retries: int = 5,
     ) -> None:
         super().__init__()
-        table_url_was_explicit = bool(str(table_structure_invoke_url or invoke_url or "").strip())
         self._table_structure_invoke_url = (
             table_structure_invoke_url or invoke_url or self.DEFAULT_TABLE_STRUCTURE_INVOKE_URL
         ).strip()
-        explicit_ocr_url = str(ocr_invoke_url or "").strip()
-        if explicit_ocr_url:
-            self._ocr_invoke_url = explicit_ocr_url
-        elif table_url_was_explicit:
-            self._ocr_invoke_url = ""
-        else:
-            self._ocr_invoke_url = self.DEFAULT_OCR_INVOKE_URL
+        self._ocr_invoke_url = str(ocr_invoke_url or "").strip()
         self._api_key = api_key
         self._request_timeout_s = float(request_timeout_s)
         self._inference_batch_size = int(inference_batch_size)
