@@ -40,7 +40,6 @@ _LAZY_SUBAPPS: list[tuple[str, str, str]] = [
     ("eval", "nemo_retriever.evaluation.cli", "app"),
     ("benchmark", "nemo_retriever.utils.benchmark", "app"),
     ("harness", "nemo_retriever.harness", "app"),
-    ("vector-store", "nemo_retriever.vector_store", "app"),
     ("recall", "nemo_retriever.recall", "app"),
     ("txt", "nemo_retriever.txt.__main__", "app"),
     ("html", "nemo_retriever.html.__main__", "app"),
@@ -82,6 +81,14 @@ def ingest_command(
         "--run-mode",
         help="Execution mode for the SDK ingestor.",
     ),
+    overwrite: bool = typer.Option(
+        True,
+        "--overwrite/--append",
+        help=(
+            "Overwrite the target LanceDB table by default. Use --append to add rows to an existing "
+            "table without duplicate checks; rerunning the same inputs in append mode creates duplicates."
+        ),
+    ),
     page_elements_invoke_url: str | None = typer.Option(
         None,
         "--page-elements-invoke-url",
@@ -116,6 +123,7 @@ def ingest_command(
             run_mode=run_mode,
             lancedb_uri=lancedb_uri,
             table_name=table_name,
+            overwrite=overwrite,
             page_elements_invoke_url=page_elements_invoke_url,
             ocr_invoke_url=ocr_invoke_url,
             ocr_version=ocr_version,

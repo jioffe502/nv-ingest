@@ -84,6 +84,7 @@ def ingest_documents(
     run_mode: IngestRunModeValue = "inprocess",
     lancedb_uri: str = "lancedb",
     table_name: str = "nv-ingest",
+    overwrite: bool = True,
     page_elements_invoke_url: str | None = None,
     ocr_invoke_url: str | None = None,
     ocr_version: OcrVersionValue | None = None,
@@ -109,7 +110,9 @@ def ingest_documents(
     embed_kwargs = _build_embed_kwargs(embed_invoke_url, embed_model_name)
     extract_params = ExtractParams(**extract_kwargs) if extract_kwargs else None
     embed_params = EmbedParams(**embed_kwargs) if embed_kwargs else None
-    vdb_params = VdbUploadParams(vdb_kwargs={"uri": lancedb_uri, "table_name": table_name})
+    vdb_params = VdbUploadParams(
+        vdb_kwargs={"uri": lancedb_uri, "table_name": table_name, "overwrite": bool(overwrite)}
+    )
 
     ingestor = create_ingestor(run_mode=validated_run_mode).files(document_list)
     ingestor = ingestor.extract(extract_params) if extract_params is not None else ingestor.extract()

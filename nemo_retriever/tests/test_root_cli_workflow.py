@@ -59,7 +59,7 @@ def test_root_ingest_runs_default_sdk_chain(monkeypatch, tmp_path) -> None:
     assert fake_ingestor.embed.call_args.args == ()
     vdb_upload_params = fake_ingestor.vdb_upload.call_args.args[0]
     assert vdb_upload_params.vdb_op == "lancedb"
-    assert vdb_upload_params.vdb_kwargs == {"uri": "lancedb", "table_name": "nv-ingest"}
+    assert vdb_upload_params.vdb_kwargs == {"uri": "lancedb", "table_name": "nv-ingest", "overwrite": True}
     assert "Ingested 1 document(s) into LanceDB lancedb/nv-ingest." in result.output
 
 
@@ -96,8 +96,29 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
     assert result.exit_code == 0
     assert create_calls == [{"run_mode": "batch"}]
     assert fake_ingestor.files.call_args.args == ([str(first_document), str(globbed_document)],)
-    assert fake_ingestor.vdb_upload.call_args.args[0].vdb_kwargs == {"uri": "/tmp/lancedb", "table_name": "docs"}
+    assert fake_ingestor.vdb_upload.call_args.args[0].vdb_kwargs == {
+        "uri": "/tmp/lancedb",
+        "table_name": "docs",
+        "overwrite": True,
+    }
     assert "Ingested 2 document(s) into LanceDB /tmp/lancedb/docs." in result.output
+
+
+def test_root_ingest_append_forwards_overwrite_false(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    document = tmp_path / "multimodal_test.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
+
+    result = RUNNER.invoke(cli_main.app, ["ingest", str(document), "--append"])
+
+    assert result.exit_code == 0
+    assert fake_ingestor.vdb_upload.call_args.args[0].vdb_kwargs == {
+        "uri": "lancedb",
+        "table_name": "nv-ingest",
+        "overwrite": False,
+    }
 
 
 def test_root_ingest_passes_nim_url_options(monkeypatch, tmp_path) -> None:
