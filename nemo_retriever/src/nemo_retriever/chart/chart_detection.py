@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 class GraphicElementsActor(ArchetypeOperator):
     """Graph-facing graphic-elements archetype."""
 
+    _LOCAL_OCR_SELECTOR_KEYS = frozenset({"ocr_version", "ocr_lang"})
+
     @classmethod
     def prefers_cpu_variant(cls, operator_kwargs: dict[str, Any] | None = None) -> bool:
         kwargs = operator_kwargs or {}
@@ -55,6 +57,14 @@ class GraphicElementsActor(ArchetypeOperator):
         from nemo_retriever.chart.gpu_actor import GraphicElementsActor as GraphicElementsGPUActor
 
         return GraphicElementsGPUActor
+
+    @classmethod
+    def variant_operator_kwargs(cls, operator_class, operator_kwargs: dict[str, Any] | None = None) -> dict[str, Any]:
+        kwargs = super().variant_operator_kwargs(operator_class, operator_kwargs)
+        if operator_class is cls.cpu_variant_class():
+            for key in cls._LOCAL_OCR_SELECTOR_KEYS:
+                kwargs.pop(key, None)
+        return kwargs
 
     def __init__(self, **detect_kwargs: Any) -> None:
         super().__init__(**detect_kwargs)

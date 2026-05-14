@@ -227,6 +227,7 @@ class TestTableStructureCPUActor:
             prefix="TableStructureCPUActor",
             api_key=None,
         )
+        assert "nemotron-ocr-v1" in actor._ocr_invoke_url
 
     def test_creates_with_custom_urls(self):
         from nemo_retriever.table.cpu_actor import TableStructureCPUActor
