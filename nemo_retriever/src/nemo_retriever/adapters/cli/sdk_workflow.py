@@ -93,6 +93,7 @@ def _build_extract_batch_tuning(
         for key, value in {
             "pdf_extract_workers": pdf_extract_workers,
             "pdf_extract_batch_size": pdf_extract_batch_size,
+            # BatchTuningParams names this per-Ray-task reservation num_cpus.
             "pdf_extract_num_cpus": pdf_extract_cpus_per_task,
             "page_elements_workers": page_elements_workers,
             "page_elements_batch_size": page_elements_batch_size,
@@ -168,7 +169,14 @@ def ingest_documents(
     embed_batch_size: int | None = None,
     embed_cpus_per_actor: float | None = None,
 ) -> dict[str, Any]:
-    """Run the minimal SDK ingestion chain used by the root CLI."""
+    """Run the root CLI ingestion path through the SDK adapter.
+
+    ``ray_address`` and ``ray_log_to_driver`` are forwarded only when the
+    caller sets them, preserving the default ``create_ingestor`` behavior.
+    Batch tuning arguments are opt-in and are translated into
+    ``BatchTuningParams`` for extraction or embedding; they are meaningful for
+    ``run_mode="batch"`` and ignored by callers that leave them unset.
+    """
     validated_run_mode = _validate_run_mode(run_mode)
     document_list = _expand_pdf_ingest_documents(documents)
     extract_kwargs = {
