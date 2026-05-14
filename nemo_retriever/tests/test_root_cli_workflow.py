@@ -170,6 +170,84 @@ def test_root_ingest_passes_nim_url_options(monkeypatch, tmp_path) -> None:
     assert embed_params.embed_model_name == "nvidia/llama-nemotron-embed-1b-v2"
 
 
+def test_root_ingest_passes_batch_tuning_options(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    create_calls: list[dict[str, Any]] = []
+    document = tmp_path / "batch-tuned.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    def fake_create_ingestor(**kwargs: Any) -> Any:
+        create_calls.append(kwargs)
+        return fake_ingestor
+
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", fake_create_ingestor)
+
+    result = RUNNER.invoke(
+        cli_main.app,
+        [
+            "ingest",
+            str(document),
+            "--run-mode",
+            "batch",
+            "--ray-address",
+            "ray://cluster:10001",
+            "--no-ray-log-to-driver",
+            "--pdf-extract-workers",
+            "4",
+            "--pdf-extract-batch-size",
+            "2",
+            "--pdf-extract-cpus-per-task",
+            "1.5",
+            "--page-elements-workers",
+            "3",
+            "--page-elements-batch-size",
+            "8",
+            "--page-elements-cpus-per-actor",
+            "0.5",
+            "--ocr-workers",
+            "5",
+            "--ocr-batch-size",
+            "6",
+            "--ocr-cpus-per-actor",
+            "0.75",
+            "--embed-workers",
+            "7",
+            "--embed-batch-size",
+            "16",
+            "--embed-cpus-per-actor",
+            "0.25",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert create_calls == [
+        {
+            "run_mode": "batch",
+            "ray_address": "ray://cluster:10001",
+            "ray_log_to_driver": False,
+        }
+    ]
+
+    extract_params = fake_ingestor.extract.call_args.args[0]
+    assert isinstance(extract_params, ExtractParams)
+    assert extract_params.batch_tuning.pdf_extract_workers == 4
+    assert extract_params.batch_tuning.pdf_extract_batch_size == 2
+    assert extract_params.batch_tuning.pdf_extract_num_cpus == 1.5
+    assert extract_params.batch_tuning.page_elements_workers == 3
+    assert extract_params.batch_tuning.page_elements_batch_size == 8
+    assert extract_params.batch_tuning.page_elements_cpus_per_actor == 0.5
+    assert extract_params.batch_tuning.ocr_workers == 5
+    assert extract_params.batch_tuning.ocr_inference_batch_size == 6
+    assert extract_params.batch_tuning.ocr_cpus_per_actor == 0.75
+
+    embed_params = fake_ingestor.embed.call_args.args[0]
+    assert isinstance(embed_params, EmbedParams)
+    assert embed_params.batch_tuning.embed_workers == 7
+    assert embed_params.batch_tuning.embed_batch_size == 16
+    assert embed_params.batch_tuning.embed_cpus_per_actor == 0.25
+    assert "Ingested 1 document(s) into LanceDB lancedb/nv-ingest." in result.output
+
+
 def test_root_ingest_reports_empty_directory_error(tmp_path) -> None:
     result = RUNNER.invoke(cli_main.app, ["ingest", str(tmp_path)])
 
