@@ -76,7 +76,7 @@ def run(
     )
     console.print(
         f"[green]Done[/green] files={info['n_files']} processed={info['processed']} skipped={info['skipped']} "
-        f"failed={info['failed']} lancedb_uri={cfg.uri} table={cfg.table_name}"
+        f"lancedb_uri={cfg.uri} table={cfg.table_name}"
     )
 
 

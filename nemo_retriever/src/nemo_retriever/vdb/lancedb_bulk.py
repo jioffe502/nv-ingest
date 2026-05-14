@@ -177,7 +177,6 @@ def write_text_embeddings_dir_to_lancedb(
 
     processed = 0
     skipped = 0
-    failed = 0
 
     ldb = LanceDB(
         uri=cfg.uri,
@@ -210,7 +209,6 @@ def write_text_embeddings_dir_to_lancedb(
             "n_files": len(files),
             "processed": 0,
             "skipped": skipped,
-            "failed": failed,
             "lancedb": {"uri": cfg.uri, "table_name": cfg.table_name, "overwrite": cfg.overwrite},
         }
 
@@ -221,7 +219,6 @@ def write_text_embeddings_dir_to_lancedb(
         "n_files": len(files),
         "processed": processed,
         "skipped": skipped,
-        "failed": failed,
         "lancedb": {"uri": cfg.uri, "table_name": cfg.table_name, "overwrite": cfg.overwrite},
     }
 
