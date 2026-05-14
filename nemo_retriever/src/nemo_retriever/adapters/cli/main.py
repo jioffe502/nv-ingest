@@ -10,7 +10,12 @@ import logging
 
 import typer
 
-from nemo_retriever.adapters.cli.sdk_workflow import IngestRunModeValue, ingest_documents, query_documents
+from nemo_retriever.adapters.cli.sdk_workflow import (
+    IngestRunModeValue,
+    OcrVersionValue,
+    ingest_documents,
+    query_documents,
+)
 from nemo_retriever.version import get_version_info
 
 logger = logging.getLogger(__name__)
@@ -48,6 +53,8 @@ for _name, _module, _attr in _LAZY_SUBAPPS:
     except Exception:
         logger.debug("Skipping '%s' sub-command (import failed)", _name)
 
+_ROOT_CLI_ERRORS = (OSError, RuntimeError, ValueError)
+
 
 def _version_callback(value: bool) -> None:
     if not value:
@@ -82,6 +89,33 @@ def ingest_command(
             "table without duplicate checks; rerunning the same inputs in append mode creates duplicates."
         ),
     ),
+    page_elements_invoke_url: str | None = typer.Option(
+        None,
+        "--page-elements-invoke-url",
+        help="Page-elements NIM endpoint URL.",
+    ),
+    ocr_invoke_url: str | None = typer.Option(None, "--ocr-invoke-url", help="OCR NIM endpoint URL."),
+    ocr_version: OcrVersionValue | None = typer.Option(
+        None,
+        "--ocr-version",
+        help="OCR engine version for extraction.",
+    ),
+    graphic_elements_invoke_url: str | None = typer.Option(
+        None,
+        "--graphic-elements-invoke-url",
+        help="Graphic-elements NIM endpoint URL.",
+    ),
+    table_structure_invoke_url: str | None = typer.Option(
+        None,
+        "--table-structure-invoke-url",
+        help="Table-structure NIM endpoint URL.",
+    ),
+    embed_invoke_url: str | None = typer.Option(None, "--embed-invoke-url", help="Embedding NIM endpoint URL."),
+    embed_model_name: str | None = typer.Option(
+        None,
+        "--embed-model-name",
+        help="Optional embedding model name override.",
+    ),
 ) -> None:
     try:
         summary = ingest_documents(
@@ -90,8 +124,15 @@ def ingest_command(
             lancedb_uri=lancedb_uri,
             table_name=table_name,
             overwrite=overwrite,
+            page_elements_invoke_url=page_elements_invoke_url,
+            ocr_invoke_url=ocr_invoke_url,
+            ocr_version=ocr_version,
+            graphic_elements_invoke_url=graphic_elements_invoke_url,
+            table_structure_invoke_url=table_structure_invoke_url,
+            embed_invoke_url=embed_invoke_url,
+            embed_model_name=embed_model_name,
         )
-    except (FileNotFoundError, IsADirectoryError, RuntimeError, ValueError) as exc:
+    except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
@@ -107,10 +148,25 @@ def query_command(
     top_k: int = typer.Option(10, "--top-k", min=1, help="Number of hits to retrieve."),
     lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
     table_name: str = typer.Option("nv-ingest", "--table-name", help="LanceDB table name."),
+    embed_invoke_url: str | None = typer.Option(None, "--embed-invoke-url", help="Embedding NIM endpoint URL."),
+    embed_model_name: str | None = typer.Option(
+        None,
+        "--embed-model-name",
+        help="Optional embedding model name override.",
+    ),
+    reranker_invoke_url: str | None = typer.Option(None, "--reranker-invoke-url", help="Reranker NIM endpoint URL."),
 ) -> None:
     try:
-        hits = query_documents(query, top_k=top_k, lancedb_uri=lancedb_uri, table_name=table_name)
-    except (FileNotFoundError, IsADirectoryError, RuntimeError, ValueError) as exc:
+        hits = query_documents(
+            query,
+            top_k=top_k,
+            lancedb_uri=lancedb_uri,
+            table_name=table_name,
+            embed_invoke_url=embed_invoke_url,
+            embed_model_name=embed_model_name,
+            reranker_invoke_url=reranker_invoke_url,
+        )
+    except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
