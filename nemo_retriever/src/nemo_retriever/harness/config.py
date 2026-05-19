@@ -127,7 +127,7 @@ class HarnessConfig:
     api_key: str | None = None
 
     pdf_extract_workers: int = 8
-    pdf_extract_num_cpus: float = 2.0
+    pdf_extract_num_cpus: float = 1.0
     pdf_extract_batch_size: int = 4
     pdf_split_batch_size: int = 1
     page_elements_batch_size: int = 4
@@ -136,9 +136,9 @@ class HarnessConfig:
     ocr_batch_size: int = 16
     embed_workers: int = 3
     embed_batch_size: int = 32
-    page_elements_cpus_per_actor: float = 1.0
-    ocr_cpus_per_actor: float = 1.0
-    embed_cpus_per_actor: float = 1.0
+    page_elements_cpus_per_actor: float = 0.25
+    ocr_cpus_per_actor: float = 0.25
+    embed_cpus_per_actor: float = 0.25
     gpu_page_elements: float = 0.1
     gpu_ocr: float = 0.1
     gpu_embed: float = 0.25
