@@ -67,7 +67,7 @@ def test_root_ingest_runs_default_sdk_chain(monkeypatch, tmp_path) -> None:
     ]
     assert fake_ingestor.files.call_args.args == ([str(document)],)
     assert isinstance(fake_ingestor.extract.call_args.args[0], ExtractParams)
-    assert fake_ingestor.extract.call_args.kwargs == {"extraction_mode": "pdf"}
+    assert fake_ingestor.extract.call_args.kwargs == {}
     assert fake_ingestor.embed.call_args.args == ()
     vdb_upload_params = fake_ingestor.vdb_upload.call_args.args[0]
     assert vdb_upload_params.vdb_op == "lancedb"
@@ -109,7 +109,7 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
     assert create_calls == [{"run_mode": "batch"}]
     assert fake_ingestor.files.call_args.args == ([str(first_document), str(globbed_document)],)
     assert isinstance(fake_ingestor.extract.call_args.args[0], ExtractParams)
-    assert fake_ingestor.extract.call_args.kwargs == {"extraction_mode": "pdf"}
+    assert fake_ingestor.extract.call_args.kwargs == {}
     assert fake_ingestor.vdb_upload.call_args.args[0].vdb_kwargs == {
         "uri": "/tmp/lancedb",
         "table_name": "docs",
@@ -410,7 +410,7 @@ def test_root_ingest_reports_unknown_default_input_type(tmp_path) -> None:
     assert "Unsupported input file type(s) for retriever ingest" in result.output
 
 
-def test_root_ingest_routes_text_inputs_by_default(monkeypatch, tmp_path) -> None:
+def test_root_ingest_routes_text_inputs_by_default_to_auto_planner(monkeypatch, tmp_path) -> None:
     fake_ingestor = _make_fake_ingestor()
     document = tmp_path / "notes.txt"
     document.write_text("not a pdf", encoding="utf-8")
@@ -421,9 +421,24 @@ def test_root_ingest_routes_text_inputs_by_default(monkeypatch, tmp_path) -> Non
 
     assert result.exit_code == 0
     assert fake_ingestor.files.call_args.args == ([str(document)],)
+    assert isinstance(fake_ingestor.extract.call_args.args[0], ExtractParams)
+    assert fake_ingestor.extract.call_args.kwargs == {}
+    fake_ingestor.extract_txt.assert_not_called()
+
+
+def test_root_ingest_routes_explicit_text_inputs(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    document = tmp_path / "notes.txt"
+    document.write_text("not a pdf", encoding="utf-8")
+
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
+
+    result = RUNNER.invoke(cli_main.app, ["ingest", str(document), "--input-type", "txt"])
+
+    assert result.exit_code == 0
     text_params = fake_ingestor.extract_txt.call_args.args[0]
     assert isinstance(text_params, TextChunkParams)
-    assert fake_ingestor.extract.call_count == 0
+    fake_ingestor.extract.assert_not_called()
 
 
 def test_root_ingest_routes_explicit_image_inputs(monkeypatch, tmp_path) -> None:
@@ -441,7 +456,7 @@ def test_root_ingest_routes_explicit_image_inputs(monkeypatch, tmp_path) -> None
     assert fake_ingestor.extract.call_count == 0
 
 
-def test_root_ingest_routes_tiff_inputs_by_default(monkeypatch, tmp_path) -> None:
+def test_root_ingest_routes_tiff_inputs_by_default_to_auto_planner(monkeypatch, tmp_path) -> None:
     fake_ingestor = _make_fake_ingestor()
     document = tmp_path / "scan.tiff"
     document.write_bytes(b"tiff")
@@ -452,9 +467,9 @@ def test_root_ingest_routes_tiff_inputs_by_default(monkeypatch, tmp_path) -> Non
 
     assert result.exit_code == 0
     assert fake_ingestor.files.call_args.args == ([str(document)],)
-    extract_params = fake_ingestor.extract_image_files.call_args.args[0]
-    assert isinstance(extract_params, ExtractParams)
-    assert fake_ingestor.extract.call_count == 0
+    assert isinstance(fake_ingestor.extract.call_args.args[0], ExtractParams)
+    assert fake_ingestor.extract.call_args.kwargs == {}
+    fake_ingestor.extract_image_files.assert_not_called()
 
 
 def test_root_ingest_routes_audio_inputs(monkeypatch, tmp_path) -> None:
@@ -511,11 +526,10 @@ def test_root_ingest_auto_mixed_directory_uses_auto_extraction(monkeypatch, tmp_
 
     assert result.exit_code == 0
     assert set(fake_ingestor.files.call_args.args[0]) == {str(pdf.resolve()), str(text.resolve()), str(image.resolve())}
-    assert fake_ingestor.extract.call_args.kwargs["extraction_mode"] == "auto"
-    assert isinstance(fake_ingestor.extract.call_args.kwargs["text_params"], TextChunkParams)
-    assert "asr_params" not in fake_ingestor.extract.call_args.kwargs
-    assert "video_frame_params" not in fake_ingestor.extract.call_args.kwargs
+    assert fake_ingestor.extract.call_args.kwargs == {}
     assert isinstance(fake_ingestor.extract.call_args.args[0], ExtractParams)
+    fake_ingestor.extract_txt.assert_not_called()
+    fake_ingestor.extract_image_files.assert_not_called()
 
 
 def test_root_ingest_reports_os_errors(monkeypatch) -> None:

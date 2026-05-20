@@ -27,7 +27,6 @@ from nemo_retriever.utils.input_files import (
     AUTO_INPUT_EXTENSIONS,
     INPUT_TYPE_EXTENSIONS,
     expand_input_file_patterns,
-    input_type_for_path,
     resolve_input_files,
 )
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
@@ -65,10 +64,6 @@ def _validate_input_type(input_type: str) -> IngestInputTypeValue:
     if input_type not in _SUPPORTED_INPUT_TYPES:
         raise ValueError(f"input_type must be one of {', '.join(_SUPPORTED_INPUT_TYPES)}, got {input_type!r}.")
     return cast(IngestInputTypeValue, input_type)
-
-
-def _input_type_for_extension(path: str) -> IngestInputTypeValue | None:
-    return cast(IngestInputTypeValue | None, input_type_for_path(path))
 
 
 def _validate_ingest_document_types(
@@ -115,30 +110,6 @@ def _expand_ingest_documents(
     return document_list
 
 
-def _resolve_effective_input_type(
-    documents: Sequence[str],
-    *,
-    input_type: IngestInputTypeValue,
-) -> IngestInputTypeValue:
-    if input_type != "auto":
-        return "pdf" if input_type == "doc" else input_type
-
-    observed = {
-        resolved
-        for document in documents
-        if not any(ch in str(document) for ch in "*?[")
-        if (resolved := _input_type_for_extension(str(document))) is not None
-    }
-    if not observed:
-        return "auto"
-    if observed <= {"pdf", "doc"}:
-        return "pdf"
-    if len(observed) == 1:
-        only = next(iter(observed))
-        return "pdf" if only == "doc" else only
-    return "auto"
-
-
 def _default_asr_params() -> Any:
     from nemo_retriever.audio import asr_params_from_env
 
@@ -151,7 +122,7 @@ def _attach_extract_stage(
     input_type: IngestInputTypeValue,
     extract_params: ExtractParams | None,
 ) -> Any:
-    if input_type == "pdf":
+    if input_type in {"pdf", "doc"}:
         params = extract_params or ExtractParams()
         return ingestor.extract(params, extraction_mode="pdf")
     if input_type == "txt":
@@ -184,12 +155,7 @@ def _attach_extract_stage(
             av_fuse_params=AudioVisualFuseParams(enabled=True),
             extract_params=extract_params or ExtractParams(),
         )
-    return ingestor.extract(
-        extract_params or ExtractParams(),
-        extraction_mode="auto",
-        text_params=TextChunkParams(),
-        html_params=HtmlChunkParams(),
-    )
+    return ingestor.extract(extract_params or ExtractParams())
 
 
 def _build_embed_kwargs(
@@ -372,7 +338,6 @@ def ingest_documents(
     validated_run_mode = _validate_run_mode(run_mode)
     validated_input_type = _validate_input_type(input_type)
     document_list = _expand_ingest_documents(documents, input_type=validated_input_type)
-    effective_input_type = _resolve_effective_input_type(document_list, input_type=validated_input_type)
     extract_kwargs = {
         key: value
         for key, value in {
@@ -431,7 +396,7 @@ def ingest_documents(
     ingestor = create_ingestor(**create_kwargs).files(document_list)
     ingestor = _attach_extract_stage(
         ingestor,
-        input_type=effective_input_type,
+        input_type=validated_input_type,
         extract_params=extract_params,
     )
     ingestor = ingestor.embed(embed_params) if embed_params is not None else ingestor.embed()

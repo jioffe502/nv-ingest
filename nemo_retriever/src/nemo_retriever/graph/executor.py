@@ -212,7 +212,7 @@ class RayDataExecutor(AbstractExecutor):
             node = node.children[0] if node.children else None
         return ordered
 
-    def ingest(self, data: Any, **kwargs: Any) -> Any:
+    def ingest(self, data: Any, *, materialize: bool = True, **kwargs: Any) -> Any:
         """Build and execute a Ray Data pipeline from the graph.
 
         Parameters
@@ -380,4 +380,4 @@ class RayDataExecutor(AbstractExecutor):
                 **overrides,
             )
 
-        return ds.to_pandas()
+        return ds.to_pandas() if materialize else ds
