@@ -10,41 +10,46 @@ alongside it as a new-CLI counterpart you can link to or migrate to.
 ## Supported vs development / experimental subcommands
 
 For product use and published examples, treat only these top-level subcommands as
-**supported**:
+the **supported public path**:
 
 - **`retriever ingest`** — ingest documents into LanceDB
 - **`retriever query`** — query an existing LanceDB table
-- **`retriever pipeline`** — run the graph ingestion pipeline (for example `retriever pipeline run`)
 
-Any other top-level `retriever` subcommand — including but not limited to `pdf`, `html`,
-`txt`, `audio`, `chart`, `benchmark`, `harness`, `eval`, `recall`, `service`, `local`,
-`compare`, `image`, and `skill-eval` — is **development and experimental**. These commands
-may change or be removed without notice and **carry no compatibility, stability, or
-behavior guarantees**.
+`retriever pipeline` remains available as a **development / compatibility**
+wrapper, including `retriever pipeline run`, while ingestion behavior migrates
+onto the same implementation used by `retriever ingest`. Prefer `retriever
+ingest` and `retriever query` for user-facing workflows.
+
+Any other top-level `retriever` subcommand — including but not limited to
+`pipeline`, `pdf`, `html`, `txt`, `audio`, `chart`, `benchmark`, `harness`,
+`eval`, `recall`, `service`, `local`, `compare`, `image`, and `skill-eval` —
+is **development and experimental**. These commands may change without public
+compatibility guarantees.
 
 ## Key shape difference
 
 The legacy **ingestion-service** CLI was a **single command that talks to a running REST service on
 `localhost:7670`** and composes work via repeated `--task extract|split|caption|embed|dedup|filter|udf`.
 
-`retriever` is a **multi-subcommand Typer app**. Most of the old CLI examples
-map to `retriever pipeline run INPUT_PATH`, which runs the graph pipeline
-locally (in-process or via Ray) and writes results to LanceDB and, optionally,
-to Parquet / object storage. Other subcommands cover focused tasks:
+`retriever` is a **multi-subcommand Typer app**. Public ingest/query examples
+should map to `retriever ingest INPUT_PATH` followed by `retriever query ...`.
+`retriever pipeline run INPUT_PATH` is still present for development workflows
+that need pipeline-only evaluation, runtime summaries, Parquet export, or
+service-mode compatibility.
 
 | Old intent | New subcommand |
 |------------|----------------|
-| Extract + embed + store a batch of documents | `retriever pipeline run` |
+| Extract + embed + store a batch of documents | `retriever ingest` |
 | Run an ad-hoc PDF extraction stage | `retriever pdf stage` |
 | Run an HTML / text / audio / chart stage | `retriever html run`, `retriever txt run`, `retriever audio extract`, `retriever chart run` |
-| Upload stage output to LanceDB | `retriever ingest` or `retriever pipeline run` |
+| Upload stage output to LanceDB | `retriever ingest` |
 | Query LanceDB + compute recall@k | `retriever recall vdb-recall` |
 | Run a QA evaluation sweep | `retriever eval run` |
 | Serve / submit to the online REST API | `retriever online serve` / `retriever online stream-pdf` |
 | Benchmark stage throughput | `retriever benchmark {split,extract,audio-extract,page-elements,ocr,all}` |
 | Benchmark orchestration | `retriever harness {run,sweep,nightly,summary,compare}` |
 
-Rows that use subcommands other than `ingest`, `query`, or `pipeline` are
+Rows that use subcommands other than `ingest` or `query` are
 [development and experimental](#supported-vs-development--experimental-subcommands).
 
 ## Contents
@@ -59,8 +64,9 @@ Rows that use subcommands other than `ingest`, `query`, or `pipeline` are
 
 <!-- --8<-- [start:quickstart] -->
 
-> Only `retriever ingest`, `retriever query`, and `retriever pipeline` are supported for
-> product use; see [Supported vs development / experimental subcommands](#supported-vs-development--experimental-subcommands).
+> Use `retriever ingest` and `retriever query` for product-facing workflows.
+> `retriever pipeline` is development / compatibility only; see
+> [Supported vs development / experimental subcommands](#supported-vs-development--experimental-subcommands).
 
 ## Quick start
 
@@ -75,20 +81,22 @@ Helm install guides.
 ### Ingest a PDF
 
 ```bash
-retriever pipeline run ./data/multimodal_test.pdf \
-  --input-type pdf \
+retriever ingest ./data/multimodal_test.pdf \
   --method pdfium \
   --extract-text --extract-tables --extract-charts \
-  --store-images-uri ./processed_docs/images \
-  --save-intermediate ./processed_docs
+  --use-table-structure \
+  --embed-model-name nvidia/llama-nemotron-embed-1b-v2
 ```
 
-For a lightweight PDF-only workflow:
+Then query the LanceDB table:
 
 ```bash
-retriever ingest ./data/multimodal_test.pdf
 retriever query "What is in this document?"
 ```
+
+Development-only pipeline features such as `--save-intermediate`,
+`--store-images-uri`, runtime summaries, and post-ingest evaluation remain on
+`retriever pipeline run` while the public path is restricted to ingest/query.
 
 Route stages to self-hosted or hosted NIM endpoints by passing only the URLs you
 want to override:
@@ -152,28 +160,24 @@ running self-hosted NIM containers.
 ### What you get
 
 - Extracted text, tables, and charts as rows in LanceDB at `./lancedb` (default
-  table name `nv-ingest`).
-- Extraction Parquet at `./processed_docs/extraction.parquet` (`--save-intermediate`).
-- Image assets under `./processed_docs/images/` (`--store-images-uri`).
+  table name `nemo-retriever`).
+- Compact JSON retrieval hits from `retriever query`, including source, page,
+  and text fields.
+- Pipeline-only development artifacts such as extraction Parquet and image
+  assets are still available through `retriever pipeline run`.
 - Progress and stage logs on stderr.
 
 ### Inspect the results
 
 ```bash
-ls ./processed_docs
-ls ./processed_docs/images
 ls ./lancedb
 ```
 
 ```python
-import pyarrow.parquet as pq
 import lancedb
 
-df = pq.read_table("./processed_docs/extraction.parquet").to_pandas()
-print(df.head())
-
 db = lancedb.connect("./lancedb")
-tbl = db.open_table("nv-ingest")
+tbl = db.open_table("nemo-retriever")
 print(tbl.to_pandas().head())
 ```
 
@@ -182,7 +186,7 @@ Or query via the Retriever Python client (`nemo_retriever/README.md`):
 ```python
 from nemo_retriever.retriever import Retriever
 
-retriever = Retriever(vdb_kwargs={"uri": "lancedb", "table_name": "nv-ingest"}, top_k=5)
+retriever = Retriever(vdb_kwargs={"uri": "lancedb", "table_name": "nemo-retriever"}, top_k=5)
 hits = retriever.query(
     "Given their activities, which animal is responsible for the typos?"
 )
@@ -196,6 +200,47 @@ hits = retriever.query(
   `--ocr-batch-size`, `--embed-workers`, and `--embed-batch-size`.
 - For CI or debugging: `--run-mode inprocess` skips Ray startup.
 
+### Root CLI eval gate
+
+For root ingest/query migration PRs, the shipping gate is an eval-driven DGX
+run against jp20 and bo767. The helper script records the command matrix,
+stdout/stderr logs, LanceDB row/index checks, representative query hits, and
+JSON summaries:
+
+```bash
+python3 scripts/root_cli_eval_gate.py --profile pr
+```
+
+Profiles keep the development loop explicit:
+
+- `smoke`: jp20 in `inprocess` mode.
+- `pr`: jp20 in `batch` and `inprocess`, plus bo767 in `batch`.
+- `stress`: bo767 in `inprocess`.
+- `full`: jp20 and bo767 in both `batch` and `inprocess`.
+
+By default, the script looks for datasets under `/datasets/nv-ingest` and then
+`/localhome/local-jioffe/datasets/nv-ingest`. Override with `--dataset-root`
+when running on a differently mounted DGX. Model downloads are isolated under
+`<output-root>/cache` by default; override with `--cache-root` if the run should
+reuse a prepared cache.
+
+Use `--ingest-timeout-seconds` and `--query-timeout-seconds` to bound long
+development runs. The defaults are unlimited for canonical eval runs.
+
+For a PR that graduates new root ingest flags, exercise them explicitly with
+repeated `--extra-ingest-arg` values, for example:
+
+```bash
+python3 scripts/root_cli_eval_gate.py \
+  --extra-ingest-arg=--embed-modality --extra-ingest-arg=text \
+  --extra-ingest-arg=--embed-granularity --extra-ingest-arg=element \
+  --extra-ingest-arg=--use-table-structure \
+  --extra-ingest-arg=--use-graphic-elements
+```
+
+Use `python3 scripts/root_cli_eval_gate.py --dry-run` to print the exact
+commands without starting an ingest.
+
 <!-- --8<-- [end:quickstart] -->
 
 ## CLI reference
@@ -203,27 +248,27 @@ hits = retriever.query(
 `retriever` is the Typer app installed with the `nemo-retriever` package. Subcommand
 support policy: [Supported vs development / experimental subcommands](#supported-vs-development--experimental-subcommands).
 
-Document ingestion is usually `retriever pipeline run INPUT_PATH`, which runs the graph pipeline
-locally (in-process or Ray) and writes rows to LanceDB and optional Parquet.
+Document ingestion for users is `retriever ingest INPUT_PATH`, followed by
+`retriever query` for retrieval. `retriever pipeline run INPUT_PATH` is retained
+as a development / compatibility wrapper for pipeline-only behavior.
 
 ```bash
 retriever --version
 retriever --help
-retriever pipeline run --help
+retriever ingest --help
+retriever query --help
 ```
 
 ### Extract a PDF with defaults
 
 ```bash
-retriever pipeline run ./data/test.pdf \
-  --input-type pdf \
-  --run-mode inprocess \
-  --save-intermediate ./processed_docs
+retriever ingest ./data/test.pdf \
+  --run-mode inprocess
 ```
 
-Results go to LanceDB (`./lancedb`, table `nv-ingest` by default) and, with
-`--save-intermediate`, to `./processed_docs/extraction.parquet`. Inspect rows with
-`pyarrow.parquet` or LanceDB queries (not per-content-type `*.metadata.json` files).
+Results go to LanceDB (`./lancedb`, table `nemo-retriever` by default). Use
+`retriever pipeline run --save-intermediate` only when you need development
+Parquet artifacts.
 
 ### Text chunking and PDF page batches
 

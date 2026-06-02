@@ -231,6 +231,77 @@ def test_root_ingest_passes_nim_url_options(monkeypatch, tmp_path) -> None:
     assert embed_params.embed_model_name == "nvidia/llama-nemotron-embed-1b-v2"
 
 
+def test_root_ingest_passes_migrated_extraction_and_embedding_flags(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    document = tmp_path / "jp20-style.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
+
+    result = RUNNER.invoke(
+        cli_main.app,
+        [
+            "ingest",
+            str(document),
+            "--use-graphic-elements",
+            "--use-table-structure",
+            "--embed-modality",
+            "text_image",
+            "--embed-granularity",
+            "element",
+            "--text-elements-modality",
+            "text",
+            "--structured-elements-modality",
+            "image",
+        ],
+    )
+
+    assert result.exit_code == 0
+    extract_params = fake_ingestor.extract.call_args.args[0]
+    assert isinstance(extract_params, ExtractParams)
+    assert extract_params.use_graphic_elements is True
+    assert extract_params.use_table_structure is True
+
+    embed_params = fake_ingestor.embed.call_args.args[0]
+    assert isinstance(embed_params, EmbedParams)
+    assert embed_params.embed_modality == "text_image"
+    assert embed_params.embed_granularity == "element"
+    assert embed_params.text_elements_modality == "text"
+    assert embed_params.structured_elements_modality == "image"
+
+
+def test_root_ingest_text_chunk_builds_split_config(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    document = tmp_path / "chunked.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
+
+    result = RUNNER.invoke(
+        cli_main.app,
+        [
+            "ingest",
+            str(document),
+            "--text-chunk",
+            "--text-chunk-max-tokens",
+            "512",
+            "--text-chunk-overlap-tokens",
+            "64",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert fake_ingestor.extract.call_args.kwargs["split_config"] == {
+        "pdf": {
+            "max_tokens": 512,
+            "overlap_tokens": 64,
+            "tokenizer_model_id": None,
+            "encoding": "utf-8",
+            "tokenizer_cache_dir": None,
+        }
+    }
+
+
 def test_root_ingest_passes_ocr_lang_option(monkeypatch, tmp_path) -> None:
     fake_ingestor = _make_fake_ingestor()
     document = tmp_path / "english-ocr.pdf"
@@ -384,6 +455,32 @@ def test_ingest_documents_accepts_legacy_public_api_kwargs(monkeypatch, tmp_path
     assert embed_params.batch_tuning.gpu_embed == 0.5
 
 
+def test_execute_ingest_plan_returns_structured_execution_data(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    document = tmp_path / "execution-result.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "_count_lancedb_rows", lambda *_, **__: 9)
+
+    plan = sdk_workflow.resolve_ingest_plan(
+        [str(document)],
+        run_mode="inprocess",
+        lancedb_uri="/tmp/nemo-test-lancedb",
+        table_name="execution_result",
+    )
+    execution = sdk_workflow.execute_ingest_plan(plan)
+
+    assert execution.documents == [str(document)]
+    assert execution.lancedb_uri == "/tmp/nemo-test-lancedb"
+    assert execution.table_name == "execution_result"
+    assert execution.lancedb_target == "/tmp/nemo-test-lancedb/execution_result"
+    assert execution.n_rows == 9
+    assert execution.result == [{"status": "ok"}]
+    assert execution.metadata["branch_summary"]
+    assert execution.to_summary_dict()["n_rows"] == 9
+
+
 def test_root_ingest_reports_empty_directory_error(tmp_path) -> None:
     result = RUNNER.invoke(cli_main.app, ["ingest", str(tmp_path)])
 
@@ -424,6 +521,14 @@ def test_root_ingest_help_does_not_expose_input_type() -> None:
     assert "--profile" in result.output
     assert "[auto|fast-text]" in result.output
     assert "--extract-images" in result.output
+    # Rich help truncates long option names in narrow test terminals.
+    assert "--use-graphic-el" in result.output
+    assert "--use-table-stru" in result.output
+    assert "--embed-modality" in result.output
+    assert "--embed-granular" in result.output
+    assert "--text-elements-" in result.output
+    assert "--structured-ele" in result.output
+    assert "--text-chunk" in result.output
     assert "--caption" in result.output
     assert "Defaults to" in result.output
     assert "[default: batch]" in result.output

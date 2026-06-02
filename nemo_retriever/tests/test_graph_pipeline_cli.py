@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 from typer.testing import CliRunner
 
+import nemo_retriever.adapters.cli.sdk_workflow as sdk_workflow
 import nemo_retriever.examples.graph_pipeline as batch_pipeline
 import nemo_retriever.model as model_module
 import nemo_retriever.pipeline.__main__ as pipeline_main
@@ -55,6 +56,7 @@ class _FakeErrorRows:
 class _FakeIngestor:
     def __init__(self) -> None:
         self.extract_params = None
+        self.extract_kwargs = {}
         self.audio_extract_params = None
         self.audio_asr_params = None
         self.embed_params = None
@@ -64,8 +66,11 @@ class _FakeIngestor:
         self.file_patterns = file_patterns
         return self
 
-    def extract(self, params):
+    def extract(self, params=None, **kwargs):
         self.extract_params = params
+        self.extract_kwargs = kwargs
+        self.audio_extract_params = kwargs.get("audio_chunk_params")
+        self.audio_asr_params = kwargs.get("asr_params")
         return self
 
     def extract_image_files(self, params):
@@ -133,7 +138,7 @@ def test_graph_pipeline_cli_accepts_multimodal_embed_and_page_image_flags(tmp_pa
     missing_query_csv = tmp_path / "missing.csv"
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setitem(
         sys.modules,
         "ray",
@@ -185,7 +190,7 @@ def test_graph_pipeline_cli_defaults_vdb_overwrite(tmp_path, monkeypatch) -> Non
     (dataset_dir / "sample.pdf").write_text("placeholder", encoding="utf-8")
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setitem(
         sys.modules,
         "ray",
@@ -205,7 +210,7 @@ def test_graph_pipeline_cli_vdb_append_forwards_overwrite_false(tmp_path, monkey
     (dataset_dir / "sample.pdf").write_text("placeholder", encoding="utf-8")
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setitem(
         sys.modules,
         "ray",
@@ -225,7 +230,7 @@ def test_graph_pipeline_cli_vdb_flag_overrides_json(tmp_path, monkeypatch) -> No
     (dataset_dir / "sample.pdf").write_text("placeholder", encoding="utf-8")
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setitem(
         sys.modules,
         "ray",
@@ -259,13 +264,12 @@ def test_graph_pipeline_cli_routes_audio_input_to_audio_ingestor(tmp_path, monke
     missing_query_csv = tmp_path / "missing.csv"
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setitem(
         sys.modules,
         "ray",
         SimpleNamespace(shutdown=lambda: None, is_initialized=lambda: True),
     )
-    monkeypatch.setattr(pipeline_main, "asr_params_from_env", lambda: SimpleNamespace(model_copy=lambda update: update))
 
     class _FakeTable:
         def count_rows(self) -> int:
@@ -304,7 +308,7 @@ def test_graph_pipeline_cli_routes_audio_input_to_audio_ingestor(tmp_path, monke
     assert isinstance(fake_ingestor.file_patterns, list)
     assert fake_ingestor.audio_extract_params.split_type == "time"
     assert fake_ingestor.audio_extract_params.split_interval == 45
-    assert fake_ingestor.audio_asr_params["segment_audio"] is True
+    assert fake_ingestor.audio_asr_params.segment_audio is True
 
 
 def test_graph_pipeline_cli_allows_default_evaluation_for_pdf_inputs(tmp_path, monkeypatch) -> None:
@@ -313,7 +317,7 @@ def test_graph_pipeline_cli_allows_default_evaluation_for_pdf_inputs(tmp_path, m
     (dataset_dir / "sample.pdf").write_text("placeholder", encoding="utf-8")
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setitem(
         sys.modules,
         "ray",
@@ -360,7 +364,7 @@ def test_graph_pipeline_cli_routes_beir_mode_to_evaluator(tmp_path, monkeypatch)
     (dataset_dir / "sample.pdf").write_text("placeholder", encoding="utf-8")
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setattr(pipeline_main, "_count_uploadable_vdb_records", lambda _records: 1)
     monkeypatch.setattr(detection_summary_module, "print_run_summary", lambda *args, **kwargs: None)
 
@@ -424,7 +428,7 @@ def test_graph_pipeline_cli_accepts_harness_runtime_metric_flags(tmp_path, monke
     runtime_dir = tmp_path / "runtime_metrics"
 
     fake_ingestor = _FakeIngestor()
-    monkeypatch.setattr(pipeline_main, "GraphIngestor", lambda *args, **kwargs: fake_ingestor)
+    monkeypatch.setattr(sdk_workflow, "create_ingestor", lambda **_kwargs: fake_ingestor)
     monkeypatch.setitem(
         sys.modules,
         "ray",
