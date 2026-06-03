@@ -610,6 +610,38 @@ def test_resolved_ingest_plan_runs_through_workflow(monkeypatch, tmp_path) -> No
     assert embed_params.batch_tuning.gpu_embed == 0.5
 
 
+def test_build_ingest_pipeline_attaches_store_after_embed_with_tuning(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    document = tmp_path / "stored.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(ingest_execution, "create_ingestor", lambda **_kwargs: fake_ingestor)
+
+    plan = ingest_plan.resolve_ingest_plan(
+        ingest_plan.IngestPlanRequest(
+            source=ingest_plan.IngestSourceOptions(documents=[str(document)], input_type="pdf"),
+            image_store=ingest_plan.IngestImageStoreOptions(
+                images_uri=str(tmp_path / "stored-images"),
+                workers=4,
+            ),
+        )
+    )
+    ingestor = ingest_execution.build_ingest_pipeline(plan)
+
+    assert ingestor is fake_ingestor
+    assert [method_call[0] for method_call in fake_ingestor.method_calls] == [
+        "files",
+        "extract",
+        "embed",
+        "store",
+        "vdb_upload",
+    ]
+    store_params = fake_ingestor.store.call_args.args[0]
+    assert isinstance(store_params, StoreParams)
+    assert store_params.storage_uri.endswith("/stored-images")
+    assert store_params.batch_tuning.store_workers == 4
+
+
 def test_execute_ingest_plan_returns_structured_execution_data(monkeypatch, tmp_path) -> None:
     fake_ingestor = _make_fake_ingestor()
     document = tmp_path / "execution-result.pdf"
