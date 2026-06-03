@@ -24,19 +24,13 @@ class IngestExecutionResult:
     result: object
     n_rows: int | None
     initial_n_rows: int | None
+    lancedb_uri: str
+    table_name: str
     metadata: dict[str, Any]
 
     @property
     def documents(self) -> list[str]:
         return list(self.plan.documents)
-
-    @property
-    def lancedb_uri(self) -> str:
-        return self.plan.lancedb_uri
-
-    @property
-    def table_name(self) -> str:
-        return self.plan.table_name
 
     @property
     def lancedb_target(self) -> str:
@@ -68,9 +62,9 @@ def ingest_pipeline_stages_from_plan(plan: ResolvedIngestPlan) -> IngestPipeline
     return IngestPipelineStages(
         create_kwargs=dict(plan.create_kwargs),
         split_config=plan.split_config,
-        dedup_params=None,
+        dedup_params=plan.dedup_params,
         caption_params=plan.caption_params,
-        store_params=None,
+        store_params=plan.store_params,
         vdb_params=plan.vdb_params,
     )
 
@@ -112,7 +106,6 @@ def build_ingest_pipeline(
 def execute_ingest_plan(
     plan: ResolvedIngestPlan,
     *,
-    overwrite: bool = True,
     verify_rows: bool = True,
     raise_on_empty: bool = True,
     stages: IngestPipelineStages | None = None,
@@ -124,21 +117,21 @@ def execute_ingest_plan(
     shared plan/build/ingest path and layering their own reporting afterward.
     """
 
+    effective_stages = stages or ingest_pipeline_stages_from_plan(plan)
+    lancedb_uri, table_name, overwrite = _resolve_lancedb_stage(plan, effective_stages)
+
     initial_n_rows = None
     if verify_rows and not overwrite:
-        initial_n_rows = _count_lancedb_rows(plan.lancedb_uri, plan.table_name)
+        initial_n_rows = _count_lancedb_rows(lancedb_uri, table_name)
 
-    result = build_ingest_pipeline(
-        plan,
-        stages=stages,
-    ).ingest()
+    result = build_ingest_pipeline(plan, stages=effective_stages).ingest()
 
-    n_rows = _count_lancedb_rows(plan.lancedb_uri, plan.table_name) if verify_rows else None
+    n_rows = _count_lancedb_rows(lancedb_uri, table_name) if verify_rows else None
     if verify_rows and raise_on_empty:
         _raise_for_empty_ingest(
             documents=plan.documents,
-            lancedb_uri=plan.lancedb_uri,
-            table_name=plan.table_name,
+            lancedb_uri=lancedb_uri,
+            table_name=table_name,
             n_rows=n_rows,
             initial_n_rows=initial_n_rows,
         )
@@ -148,12 +141,22 @@ def execute_ingest_plan(
         result=result,
         n_rows=n_rows,
         initial_n_rows=initial_n_rows,
+        lancedb_uri=lancedb_uri,
+        table_name=table_name,
         metadata={
-            "lancedb_target": f"{plan.lancedb_uri}/{plan.table_name}",
+            "lancedb_target": f"{lancedb_uri}/{table_name}",
             "profile": plan.profile,
             "branch_summary": format_branch_summary(plan.branches),
         },
     )
+
+
+def _resolve_lancedb_stage(plan: ResolvedIngestPlan, stages: IngestPipelineStages) -> tuple[str, str, bool]:
+    vdb_kwargs = dict((stages.vdb_params or plan.vdb_params).vdb_kwargs)
+    lancedb_uri = str(vdb_kwargs.get("uri") or vdb_kwargs.get("lancedb_uri") or plan.lancedb_uri)
+    table_name = str(vdb_kwargs.get("table_name") or vdb_kwargs.get("lancedb_table") or plan.table_name)
+    overwrite = bool(vdb_kwargs.get("overwrite", True))
+    return lancedb_uri, table_name, overwrite
 
 
 def _raise_for_empty_ingest(

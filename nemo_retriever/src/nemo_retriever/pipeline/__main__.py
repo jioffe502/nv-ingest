@@ -60,11 +60,14 @@ import typer
 
 from nemo_retriever.ingest.execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
 from nemo_retriever.ingest.plan import (
+    IngestCaptionOptions,
     IngestChunkOptions,
+    IngestDedupOptions,
     IngestEmbedBatchOptions,
     IngestEmbedOptions,
     IngestExtractBatchOptions,
     IngestExtractOptions,
+    IngestImageStoreOptions,
     IngestMediaOptions,
     IngestPlanRequest,
     IngestRuntimeOptions,
@@ -1687,29 +1690,8 @@ def run(
                 vdb_upload_params=pipeline_vdb_upload,
             )
         else:
-            dedup_params = DedupParams(iou_threshold=dedup_iou_threshold) if enable_dedup else None
-            caption_params = None
-            if enable_caption:
-                caption_params = CaptionParams(
-                    endpoint_url=caption_invoke_url,
-                    api_key=caption_remote_api_key,
-                    model_name=caption_model_name,
-                    device=caption_device,
-                    context_text_max_chars=caption_context_text_max_chars,
-                    gpu_memory_utilization=caption_gpu_memory_utilization,
-                    temperature=caption_temperature,
-                    top_p=caption_top_p,
-                    max_tokens=caption_max_tokens,
-                )
-
-            store_params = None
             if store_actors and store_images_uri is None:
                 logger.warning("Ignoring --store-actors because --store-images-uri was not provided.")
-            if store_images_uri is not None:
-                store_batch_tuning = BatchTuningParams()
-                if store_actors:
-                    store_batch_tuning.store_workers = store_actors
-                store_params = StoreParams(storage_uri=store_images_uri, batch_tuning=store_batch_tuning)
 
             plan_lancedb_uri = str(
                 resolved_vdb_kwargs.get("uri") or resolved_vdb_kwargs.get("lancedb_uri") or "lancedb"
@@ -1777,6 +1759,22 @@ def run(
                         video_frame_text_dedup_max_dropped_frames=video_frame_text_dedup_max_dropped_frames,
                         video_av_fuse=video_av_fuse,
                     ),
+                    caption=IngestCaptionOptions(
+                        enabled=enable_caption,
+                        caption_invoke_url=caption_invoke_url if enable_caption else None,
+                        caption_api_key=caption_remote_api_key if enable_caption else None,
+                        caption_model_name=caption_model_name if enable_caption else None,
+                        caption_device=caption_device if enable_caption else None,
+                        caption_context_text_max_chars=caption_context_text_max_chars if enable_caption else None,
+                        caption_gpu_memory_utilization=(caption_gpu_memory_utilization if enable_caption else None),
+                        caption_temperature=caption_temperature if enable_caption else None,
+                        caption_top_p=caption_top_p if enable_caption else None,
+                        caption_max_tokens=caption_max_tokens if enable_caption else None,
+                    ),
+                    dedup=IngestDedupOptions(
+                        enabled=enable_dedup,
+                        iou_threshold=dedup_iou_threshold if enable_dedup else None,
+                    ),
                     chunk=IngestChunkOptions(
                         enabled=enable_text_chunk,
                         text_chunk_max_tokens=text_chunk_params.max_tokens if enable_text_chunk else None,
@@ -1798,6 +1796,10 @@ def run(
                             embed_gpus_per_actor=embed_gpus_per_actor,
                         ),
                     ),
+                    image_store=IngestImageStoreOptions(
+                        images_uri=store_images_uri,
+                        workers=store_actors,
+                    ),
                     storage=IngestStorageOptions(
                         lancedb_uri=plan_lancedb_uri,
                         table_name=plan_table_name,
@@ -1811,13 +1813,9 @@ def run(
             stages = replace(
                 ingest_pipeline_stages_from_plan(ingest_plan),
                 create_kwargs=stage_create_kwargs,
-                dedup_params=dedup_params,
-                caption_params=caption_params,
-                store_params=store_params,
                 vdb_params=pipeline_vdb_upload,
             )
             local_execute_kwargs = {
-                "overwrite": bool(resolved_vdb_kwargs.get("overwrite", True)),
                 "verify_rows": False,
                 "raise_on_empty": False,
                 "stages": stages,

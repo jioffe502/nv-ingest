@@ -4,30 +4,13 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
-from nemo_retriever.ingest.execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
+from nemo_retriever.ingest.execution import execute_ingest_plan
 from nemo_retriever.ingest.plan import ResolvedIngestPlan
 from nemo_retriever.ingest_manifest import format_branch_summary
-from nemo_retriever.params import DedupParams, StoreParams
 
 _DRY_RUN_SECRET_FIELD_PATTERNS = ("api_key", "password", "secret", "credential", "bearer")
-
-
-def _build_dedup_params(
-    *,
-    dedup: bool,
-    dedup_iou_threshold: float | None,
-) -> DedupParams | None:
-    if not dedup:
-        if dedup_iou_threshold is not None:
-            raise ValueError("Dedup options require --dedup: dedup_iou_threshold.")
-        return None
-    dedup_kwargs = {}
-    if dedup_iou_threshold is not None:
-        dedup_kwargs["iou_threshold"] = dedup_iou_threshold
-    return DedupParams(**dedup_kwargs)
 
 
 def params_to_dry_run_dict(params: Any | None) -> dict[str, Any] | None:
@@ -91,8 +74,10 @@ def ingest_plan_to_dry_run_data(plan: ResolvedIngestPlan) -> dict[str, Any]:
         "video_frame_text_dedup": params_to_dry_run_dict(plan.video_text_dedup_params),
         "audio_visual_fuse": params_to_dry_run_dict(plan.av_fuse_params),
         "split_config": params_to_dry_run_dict(plan.split_config),
+        "dedup": params_to_dry_run_dict(plan.dedup_params),
         "caption": params_to_dry_run_dict(plan.caption_params),
         "embed": params_to_dry_run_dict(plan.embed_params),
+        "store": params_to_dry_run_dict(plan.store_params),
         "vdb_upload": params_to_dry_run_dict(plan.vdb_params),
     }
 
@@ -101,27 +86,9 @@ def run_ingest_workflow(
     plan: ResolvedIngestPlan,
     *,
     dry_run: bool = False,
-    dedup: bool = False,
-    dedup_iou_threshold: float | None = None,
-    store_images_uri: str | None = None,
-    overwrite: bool = True,
 ) -> dict[str, Any]:
     """Apply root ingest workflow policy to an already-resolved plan."""
-    dedup_params = _build_dedup_params(dedup=dedup, dedup_iou_threshold=dedup_iou_threshold)
-    store_params = StoreParams(storage_uri=store_images_uri) if store_images_uri is not None else None
-    stages = replace(
-        ingest_pipeline_stages_from_plan(plan),
-        dedup_params=dedup_params,
-        store_params=store_params,
-    )
     if dry_run:
-        dry_run_data = ingest_plan_to_dry_run_data(plan)
-        dry_run_data["dedup"] = params_to_dry_run_dict(dedup_params)
-        dry_run_data["store"] = params_to_dry_run_dict(store_params)
-        return dry_run_data
+        return ingest_plan_to_dry_run_data(plan)
 
-    return execute_ingest_plan(
-        plan,
-        overwrite=overwrite,
-        stages=stages,
-    ).to_summary_dict()
+    return execute_ingest_plan(plan).to_summary_dict()

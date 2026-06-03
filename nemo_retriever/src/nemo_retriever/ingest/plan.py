@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence, cast
 
-from nemo_retriever.embed_options import build_embed_kwargs
+from nemo_retriever.params.embed import build_embed_option_kwargs
 from nemo_retriever.ingest_manifest import (
     ExtractionBranchPlan,
     build_input_manifest,
@@ -21,9 +21,11 @@ from nemo_retriever.params import (
     AudioVisualFuseParams,
     BatchTuningParams,
     CaptionParams,
+    DedupParams,
     EmbedParams,
     ExtractParams,
     HtmlChunkParams,
+    StoreParams,
     TextChunkParams,
     VdbUploadParams,
     VideoFrameParams,
@@ -145,8 +147,19 @@ class IngestCaptionOptions:
     caption_invoke_url: str | None = None
     caption_api_key: str | None = None
     caption_model_name: str | None = None
+    caption_device: str | None = None
     caption_context_text_max_chars: int | None = None
+    caption_gpu_memory_utilization: float | None = None
+    caption_temperature: float | None = None
+    caption_top_p: float | None = None
+    caption_max_tokens: int | None = None
     caption_infographics: bool | None = None
+
+
+@dataclass(frozen=True)
+class IngestDedupOptions:
+    enabled: bool = False
+    iou_threshold: float | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +191,12 @@ class IngestEmbedOptions:
 
 
 @dataclass(frozen=True)
+class IngestImageStoreOptions:
+    images_uri: str | None = None
+    workers: int | None = None
+
+
+@dataclass(frozen=True)
 class IngestStorageOptions:
     lancedb_uri: str = "lancedb"
     table_name: str = "nemo-retriever"
@@ -191,8 +210,10 @@ class IngestPlanRequest:
     extract: IngestExtractOptions = field(default_factory=IngestExtractOptions)
     media: IngestMediaOptions = field(default_factory=IngestMediaOptions)
     caption: IngestCaptionOptions = field(default_factory=IngestCaptionOptions)
+    dedup: IngestDedupOptions = field(default_factory=IngestDedupOptions)
     chunk: IngestChunkOptions = field(default_factory=IngestChunkOptions)
     embed: IngestEmbedOptions = field(default_factory=IngestEmbedOptions)
+    image_store: IngestImageStoreOptions = field(default_factory=IngestImageStoreOptions)
     storage: IngestStorageOptions = field(default_factory=IngestStorageOptions)
 
 
@@ -269,8 +290,10 @@ class ResolvedIngestPlan:
     video_text_dedup_params: VideoFrameTextDedupParams | None
     av_fuse_params: AudioVisualFuseParams | None
     split_config: dict[str, Any] | None
+    dedup_params: DedupParams | None
     caption_params: CaptionParams | None
     embed_params: EmbedParams | None
+    store_params: StoreParams | None
     vdb_params: VdbUploadParams
     lancedb_uri: str
     table_name: str
@@ -397,7 +420,12 @@ def _build_caption_params(caption: IngestCaptionOptions) -> CaptionParams | None
     overrides = {
         "caption_invoke_url": caption.caption_invoke_url,
         "caption_model_name": caption.caption_model_name,
+        "caption_device": caption.caption_device,
         "caption_context_text_max_chars": caption.caption_context_text_max_chars,
+        "caption_gpu_memory_utilization": caption.caption_gpu_memory_utilization,
+        "caption_temperature": caption.caption_temperature,
+        "caption_top_p": caption.caption_top_p,
+        "caption_max_tokens": caption.caption_max_tokens,
         "caption_infographics": caption.caption_infographics,
     }
     if not caption.enabled:
@@ -414,12 +442,38 @@ def _build_caption_params(caption: IngestCaptionOptions) -> CaptionParams | None
             "endpoint_url": caption.caption_invoke_url,
             "api_key": caption.caption_api_key,
             "model_name": caption.caption_model_name,
+            "device": caption.caption_device,
             "context_text_max_chars": caption.caption_context_text_max_chars,
+            "gpu_memory_utilization": caption.caption_gpu_memory_utilization,
+            "temperature": caption.caption_temperature,
+            "top_p": caption.caption_top_p,
+            "max_tokens": caption.caption_max_tokens,
             "caption_infographics": caption.caption_infographics,
         }.items()
         if value is not None
     }
     return CaptionParams(**caption_kwargs)
+
+
+def _build_dedup_params(dedup: IngestDedupOptions) -> DedupParams | None:
+    if not dedup.enabled:
+        if dedup.iou_threshold is not None:
+            raise ValueError("Dedup options require --dedup: dedup_iou_threshold.")
+        return None
+    dedup_kwargs = {}
+    if dedup.iou_threshold is not None:
+        dedup_kwargs["iou_threshold"] = dedup.iou_threshold
+    return DedupParams(**dedup_kwargs)
+
+
+def _build_store_params(image_store: IngestImageStoreOptions) -> StoreParams | None:
+    if image_store.images_uri is None:
+        return None
+
+    store_kwargs: dict[str, Any] = {"storage_uri": image_store.images_uri}
+    if image_store.workers:
+        store_kwargs["batch_tuning"] = BatchTuningParams(store_workers=image_store.workers)
+    return StoreParams(**store_kwargs)
 
 
 def _build_extract_batch_tuning(batch: IngestExtractBatchOptions) -> BatchTuningParams | None:
@@ -556,7 +610,7 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
     if extract_tuning is not None:
         extract_kwargs["batch_tuning"] = extract_tuning
 
-    embed_kwargs = build_embed_kwargs(
+    embed_kwargs = build_embed_option_kwargs(
         embed.embed_invoke_url,
         embed.embed_model_name,
         local_ingest_embed_backend=embed.local_ingest_embed_backend,
@@ -580,6 +634,8 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
         }
     )
     caption_params = _build_caption_params(request.caption)
+    dedup_params = _build_dedup_params(request.dedup)
+    store_params = _build_store_params(request.image_store)
 
     families = _branch_families(branches)
     text_chunk_enabled, text_chunk_kwargs = _build_text_chunk_kwargs(chunk)
@@ -626,8 +682,10 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
         video_text_dedup_params=video_text_dedup_params,
         av_fuse_params=av_fuse_params,
         split_config=split_config,
+        dedup_params=dedup_params,
         caption_params=caption_params,
         embed_params=embed_params,
+        store_params=store_params,
         vdb_params=vdb_params,
         lancedb_uri=storage.lancedb_uri,
         table_name=storage.table_name,

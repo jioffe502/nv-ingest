@@ -20,10 +20,12 @@ from nemo_retriever.ingest.plan import (
     AudioSplitTypeValue,
     IngestCaptionOptions,
     IngestChunkOptions,
+    IngestDedupOptions,
     IngestEmbedBatchOptions,
     IngestEmbedOptions,
     IngestExtractBatchOptions,
     IngestExtractOptions,
+    IngestImageStoreOptions,
     IngestMediaOptions,
     IngestPlanRequest,
     IngestProfileValue,
@@ -657,6 +659,10 @@ def ingest_command(
                         caption_context_text_max_chars=caption_context_text_max_chars,
                         caption_infographics=caption_infographics,
                     ),
+                    dedup=IngestDedupOptions(
+                        enabled=dedup,
+                        iou_threshold=dedup_iou_threshold,
+                    ),
                     chunk=IngestChunkOptions(
                         enabled=text_chunk,
                         text_chunk_max_tokens=text_chunk_max_tokens,
@@ -678,6 +684,7 @@ def ingest_command(
                             embed_gpus_per_actor=embed_gpus_per_actor,
                         ),
                     ),
+                    image_store=IngestImageStoreOptions(images_uri=store_images_uri),
                     storage=IngestStorageOptions(
                         lancedb_uri=lancedb_uri,
                         table_name=table_name,
@@ -688,10 +695,6 @@ def ingest_command(
             summary = run_ingest_workflow(
                 ingest_plan,
                 dry_run=dry_run,
-                dedup=dedup,
-                dedup_iou_threshold=dedup_iou_threshold,
-                store_images_uri=store_images_uri,
-                overwrite=overwrite,
             )
     except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)

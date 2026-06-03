@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from nemo_retriever.params import BatchTuningParams
+from nemo_retriever.params.models import BatchTuningParams
 from nemo_retriever.params.utils import normalize_embed_kwargs
 
 
-def build_embed_kwargs(
+def build_embed_option_kwargs(
     embed_invoke_url: str | None,
     embed_model_name: str | None,
     local_ingest_embed_backend: str | None = None,

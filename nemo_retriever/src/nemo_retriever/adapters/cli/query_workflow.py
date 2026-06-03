@@ -6,9 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from nemo_retriever.embed_options import (
-    build_embed_kwargs,
-)
+from nemo_retriever.params.embed import build_embed_option_kwargs
 from nemo_retriever.retriever import Retriever
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 from nemo_retriever.vdb.records import RetrievalHit
@@ -21,7 +19,7 @@ def _build_rerank_kwargs(
     reranker_model_name: str | None = None,
     reranker_backend: str | None = None,
 ) -> dict[str, str]:
-    """Build kwargs for the rerank stage. Mirrors :func:`build_embed_kwargs`:
+    """Build kwargs for the rerank stage. Mirrors :func:`build_embed_option_kwargs`:
     if ``reranker_invoke_url`` is given the remote NIM path is configured;
     otherwise the local GPU reranker runs with ``reranker_model_name`` (or the
     matching VL default to pair with the local VL embedder).
@@ -71,7 +69,7 @@ def query_documents(
     Reranking is opt-in: pass ``rerank=True`` (or any of the rerank-related
     args via the CLI, which implicitly set ``rerank=True``) to enable.
     """
-    embed_kwargs = build_embed_kwargs(embed_invoke_url, embed_model_name)
+    embed_kwargs = build_embed_option_kwargs(embed_invoke_url, embed_model_name)
     retriever_kwargs: dict[str, Any] = {
         "top_k": top_k,
         "vdb_kwargs": {"uri": lancedb_uri, "table_name": table_name},
