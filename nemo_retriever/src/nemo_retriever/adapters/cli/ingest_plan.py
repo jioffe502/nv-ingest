@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence, cast
 
@@ -12,7 +12,6 @@ from nemo_retriever.adapters.cli.embed_options import build_embed_kwargs
 from nemo_retriever.ingest_manifest import (
     ExtractionBranchPlan,
     build_input_manifest,
-    format_branch_summary,
     plan_extraction_branches,
 )
 from nemo_retriever.ocr.config import OCRLang, OCRVersion
@@ -63,7 +62,138 @@ _VIDEO_FRAME_FPS = 0.5
 _VIDEO_TEXT_DEDUP_MAX_DROPPED_FRAMES = 2
 _DEFAULT_TEXT_CHUNK_MAX_TOKENS = 1024
 _DEFAULT_TEXT_CHUNK_OVERLAP_TOKENS = 150
-_DRY_RUN_SECRET_FIELD_PATTERNS = ("api_key", "password", "secret", "credential", "bearer")
+
+
+@dataclass(frozen=True)
+class IngestSourceOptions:
+    documents: Sequence[str]
+    profile: IngestProfileValue = "auto"
+    input_type: IngestInputTypeValue = "auto"
+
+
+@dataclass(frozen=True)
+class IngestRuntimeOptions:
+    run_mode: IngestRunModeValue = "batch"
+    ray_address: str | None = None
+    ray_log_to_driver: bool | None = None
+
+
+@dataclass(frozen=True)
+class IngestExtractBatchOptions:
+    pdf_split_batch_size: int | None = None
+    pdf_extract_workers: int | None = None
+    pdf_extract_batch_size: int | None = None
+    pdf_extract_cpus_per_task: float | None = None
+    page_elements_workers: int | None = None
+    page_elements_batch_size: int | None = None
+    page_elements_cpus_per_actor: float | None = None
+    page_elements_gpus_per_actor: float | None = None
+    ocr_workers: int | None = None
+    ocr_batch_size: int | None = None
+    ocr_cpus_per_actor: float | None = None
+    ocr_gpus_per_actor: float | None = None
+    table_structure_workers: int | None = None
+    table_structure_batch_size: int | None = None
+    table_structure_cpus_per_actor: float | None = None
+    table_structure_gpus_per_actor: float | None = None
+    nemotron_parse_workers: int | None = None
+    nemotron_parse_batch_size: int | None = None
+    nemotron_parse_gpus_per_actor: float | None = None
+
+
+@dataclass(frozen=True)
+class IngestExtractOptions:
+    method: str | None = None
+    dpi: int | None = None
+    extract_text: bool | None = None
+    extract_images: bool | None = None
+    extract_tables: bool | None = None
+    extract_charts: bool | None = None
+    extract_infographics: bool | None = None
+    extract_page_as_image: bool | None = None
+    use_page_elements: bool | None = None
+    use_graphic_elements: bool | None = None
+    use_table_structure: bool | None = None
+    page_elements_invoke_url: str | None = None
+    ocr_invoke_url: str | None = None
+    ocr_version: OcrVersionValue | None = None
+    ocr_lang: OcrLangValue | None = None
+    graphic_elements_invoke_url: str | None = None
+    table_structure_invoke_url: str | None = None
+    table_output_format: TableOutputFormatValue | None = None
+    extract_api_key: str | None = None
+    batch: IngestExtractBatchOptions = field(default_factory=IngestExtractBatchOptions)
+
+
+@dataclass(frozen=True)
+class IngestMediaOptions:
+    segment_audio: bool | None = None
+    audio_split_type: AudioSplitTypeValue = "size"
+    audio_split_interval: int | None = None
+    video_extract_audio: bool | None = None
+    video_extract_frames: bool | None = None
+    video_frame_fps: float | None = None
+    video_frame_dedup: bool | None = None
+    video_frame_text_dedup: bool | None = None
+    video_frame_text_dedup_max_dropped_frames: int | None = None
+    video_av_fuse: bool | None = None
+
+
+@dataclass(frozen=True)
+class IngestCaptionOptions:
+    enabled: bool = False
+    caption_invoke_url: str | None = None
+    caption_api_key: str | None = None
+    caption_model_name: str | None = None
+    caption_context_text_max_chars: int | None = None
+    caption_infographics: bool | None = None
+
+
+@dataclass(frozen=True)
+class IngestChunkOptions:
+    enabled: bool = False
+    text_chunk_max_tokens: int | None = None
+    text_chunk_overlap_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class IngestEmbedBatchOptions:
+    embed_workers: int | None = None
+    embed_batch_size: int | None = None
+    embed_cpus_per_actor: float | None = None
+    embed_gpus_per_actor: float | None = None
+
+
+@dataclass(frozen=True)
+class IngestEmbedOptions:
+    embed_invoke_url: str | None = None
+    embed_model_name: str | None = None
+    local_ingest_embed_backend: LocalIngestEmbedBackendValue | None = None
+    embed_api_key: str | None = None
+    embed_modality: str | None = None
+    text_elements_modality: str | None = None
+    structured_elements_modality: str | None = None
+    embed_granularity: str | None = None
+    batch: IngestEmbedBatchOptions = field(default_factory=IngestEmbedBatchOptions)
+
+
+@dataclass(frozen=True)
+class IngestStorageOptions:
+    lancedb_uri: str = "lancedb"
+    table_name: str = "nemo-retriever"
+    overwrite: bool = True
+
+
+@dataclass(frozen=True)
+class IngestPlanRequest:
+    source: IngestSourceOptions
+    runtime: IngestRuntimeOptions = field(default_factory=IngestRuntimeOptions)
+    extract: IngestExtractOptions = field(default_factory=IngestExtractOptions)
+    media: IngestMediaOptions = field(default_factory=IngestMediaOptions)
+    caption: IngestCaptionOptions = field(default_factory=IngestCaptionOptions)
+    chunk: IngestChunkOptions = field(default_factory=IngestChunkOptions)
+    embed: IngestEmbedOptions = field(default_factory=IngestEmbedOptions)
+    storage: IngestStorageOptions = field(default_factory=IngestStorageOptions)
 
 
 def _validate_run_mode(run_mode: str) -> IngestRunModeValue:
@@ -160,72 +290,6 @@ class ResolvedIngestPlan:
                 kwargs[key] = value
         return kwargs
 
-    def dry_run_data(self) -> dict[str, Any]:
-        return {
-            "dry_run": True,
-            "profile": self.profile,
-            "documents": list(self.documents),
-            "branches": [
-                {
-                    "family": branch.family,
-                    "extraction_mode": branch.extraction_mode,
-                    "count": len(branch.input_paths),
-                    "input_paths": list(branch.input_paths),
-                }
-                for branch in self.branches
-            ],
-            "branch_summary": format_branch_summary(self.branches),
-            "create_ingestor": dict(self.create_kwargs),
-            "extract": params_to_dry_run_dict(self.extract_params),
-            "text": params_to_dry_run_dict(self.text_params),
-            "html": params_to_dry_run_dict(self.html_params),
-            "audio": params_to_dry_run_dict(self.audio_chunk_params),
-            "asr": params_to_dry_run_dict(self.asr_params),
-            "video_frames": params_to_dry_run_dict(self.video_frame_params),
-            "video_frame_text_dedup": params_to_dry_run_dict(self.video_text_dedup_params),
-            "audio_visual_fuse": params_to_dry_run_dict(self.av_fuse_params),
-            "split_config": params_to_dry_run_dict(self.split_config),
-            "caption": params_to_dry_run_dict(self.caption_params),
-            "embed": params_to_dry_run_dict(self.embed_params),
-            "vdb_upload": params_to_dry_run_dict(self.vdb_params),
-        }
-
-
-def params_to_dry_run_dict(params: Any | None) -> dict[str, Any] | None:
-    if params is None:
-        return None
-    if hasattr(params, "model_dump"):
-        data = params.model_dump(mode="json")
-    elif isinstance(params, dict):
-        data = dict(params)
-    else:
-        return {"value": str(params)}
-    return _strip_secret_values(data)
-
-
-def _is_dry_run_secret_field(key: Any) -> bool:
-    normalized_key = str(key).lower().replace("-", "_")
-    return normalized_key.endswith("token") or any(
-        pattern in normalized_key for pattern in _DRY_RUN_SECRET_FIELD_PATTERNS
-    )
-
-
-def _strip_secret_values(value: Any) -> Any:
-    """Redact secrets from dry-run reporting only."""
-    if hasattr(value, "model_dump"):
-        return _strip_secret_values(value.model_dump(mode="json"))
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, nested in value.items():
-            if _is_dry_run_secret_field(key):
-                out[key] = "<redacted>" if nested else nested
-            else:
-                out[key] = _strip_secret_values(nested)
-        return out
-    if isinstance(value, list):
-        return [_strip_secret_values(item) for item in value]
-    return value
-
 
 def _branch_families(branches: Sequence[ExtractionBranchPlan]) -> set[str]:
     return {branch.family for branch in branches}
@@ -282,16 +346,8 @@ def _build_asr_params(*, segment_audio: bool | None, needed: bool) -> ASRParams 
 def _resolve_media_params(
     *,
     branches: Sequence[ExtractionBranchPlan],
-    segment_audio: bool | None,
+    media: IngestMediaOptions,
     audio_split_type: AudioSplitTypeValue,
-    audio_split_interval: int | None,
-    video_extract_audio: bool | None,
-    video_extract_frames: bool | None,
-    video_frame_fps: float | None,
-    video_frame_dedup: bool | None,
-    video_frame_text_dedup: bool | None,
-    video_frame_text_dedup_max_dropped_frames: int | None,
-    video_av_fuse: bool | None,
 ) -> tuple[
     AudioChunkParams | None,
     ASRParams | None,
@@ -303,140 +359,114 @@ def _resolve_media_params(
     needs_audio = bool(families & {"audio", "video"})
     needs_video = "video" in families
     if not needs_audio and not needs_video:
-        return None, _build_asr_params(segment_audio=segment_audio, needed=False), None, None, None
+        return None, _build_asr_params(segment_audio=media.segment_audio, needed=False), None, None, None
 
-    split_interval = int(audio_split_interval) if audio_split_interval is not None else _AUDIO_SPLIT_INTERVAL
+    split_interval = (
+        int(media.audio_split_interval) if media.audio_split_interval is not None else _AUDIO_SPLIT_INTERVAL
+    )
     audio_chunk_params = AudioChunkParams(
-        enabled=bool(video_extract_audio) if video_extract_audio is not None and needs_video else True,
+        enabled=bool(media.video_extract_audio) if media.video_extract_audio is not None and needs_video else True,
         split_type=audio_split_type,
         split_interval=split_interval,
     )
-    asr_params = _build_asr_params(segment_audio=segment_audio, needed=needs_audio)
+    asr_params = _build_asr_params(segment_audio=media.segment_audio, needed=needs_audio)
 
     if not needs_video:
         return audio_chunk_params, asr_params, None, None, None
 
     video_frame_params = VideoFrameParams(
-        enabled=bool(video_extract_frames) if video_extract_frames is not None else True,
-        fps=float(video_frame_fps) if video_frame_fps is not None else _VIDEO_FRAME_FPS,
-        dedup=bool(video_frame_dedup) if video_frame_dedup is not None else True,
+        enabled=bool(media.video_extract_frames) if media.video_extract_frames is not None else True,
+        fps=float(media.video_frame_fps) if media.video_frame_fps is not None else _VIDEO_FRAME_FPS,
+        dedup=bool(media.video_frame_dedup) if media.video_frame_dedup is not None else True,
     )
     video_text_dedup_params = VideoFrameTextDedupParams(
-        enabled=bool(video_frame_text_dedup) if video_frame_text_dedup is not None else True,
+        enabled=bool(media.video_frame_text_dedup) if media.video_frame_text_dedup is not None else True,
         max_dropped_frames=(
-            int(video_frame_text_dedup_max_dropped_frames)
-            if video_frame_text_dedup_max_dropped_frames is not None
+            int(media.video_frame_text_dedup_max_dropped_frames)
+            if media.video_frame_text_dedup_max_dropped_frames is not None
             else _VIDEO_TEXT_DEDUP_MAX_DROPPED_FRAMES
         ),
     )
-    av_fuse_params = AudioVisualFuseParams(enabled=bool(video_av_fuse) if video_av_fuse is not None else True)
+    av_fuse_params = AudioVisualFuseParams(
+        enabled=bool(media.video_av_fuse) if media.video_av_fuse is not None else True
+    )
     return audio_chunk_params, asr_params, video_frame_params, video_text_dedup_params, av_fuse_params
 
 
-def _build_caption_params(
-    *,
-    caption: bool,
-    caption_invoke_url: str | None,
-    caption_api_key: str | None,
-    caption_model_name: str | None,
-    caption_context_text_max_chars: int | None,
-    caption_infographics: bool | None,
-) -> CaptionParams | None:
+def _build_caption_params(caption: IngestCaptionOptions) -> CaptionParams | None:
     overrides = {
-        "caption_invoke_url": caption_invoke_url,
-        "caption_model_name": caption_model_name,
-        "caption_context_text_max_chars": caption_context_text_max_chars,
-        "caption_infographics": caption_infographics,
+        "caption_invoke_url": caption.caption_invoke_url,
+        "caption_model_name": caption.caption_model_name,
+        "caption_context_text_max_chars": caption.caption_context_text_max_chars,
+        "caption_infographics": caption.caption_infographics,
     }
-    if not caption:
+    if not caption.enabled:
         provided = [name for name, value in overrides.items() if value is not None]
         if provided:
             raise ValueError(f"Caption options require --caption: {', '.join(provided)}.")
         return None
-    if caption_context_text_max_chars is not None and caption_context_text_max_chars < 0:
+    if caption.caption_context_text_max_chars is not None and caption.caption_context_text_max_chars < 0:
         raise ValueError("caption_context_text_max_chars must be >= 0.")
 
     caption_kwargs = {
         key: value
         for key, value in {
-            "endpoint_url": caption_invoke_url,
-            "api_key": caption_api_key,
-            "model_name": caption_model_name,
-            "context_text_max_chars": caption_context_text_max_chars,
-            "caption_infographics": caption_infographics,
+            "endpoint_url": caption.caption_invoke_url,
+            "api_key": caption.caption_api_key,
+            "model_name": caption.caption_model_name,
+            "context_text_max_chars": caption.caption_context_text_max_chars,
+            "caption_infographics": caption.caption_infographics,
         }.items()
         if value is not None
     }
     return CaptionParams(**caption_kwargs)
 
 
-def _build_extract_batch_tuning(
-    *,
-    pdf_split_batch_size: int | None,
-    pdf_extract_workers: int | None,
-    pdf_extract_batch_size: int | None,
-    pdf_extract_cpus_per_task: float | None,
-    page_elements_workers: int | None,
-    page_elements_batch_size: int | None,
-    page_elements_cpus_per_actor: float | None,
-    page_elements_gpus_per_actor: float | None,
-    ocr_workers: int | None,
-    ocr_batch_size: int | None,
-    ocr_cpus_per_actor: float | None,
-    ocr_gpus_per_actor: float | None,
-    table_structure_workers: int | None,
-    table_structure_batch_size: int | None,
-    table_structure_cpus_per_actor: float | None,
-    table_structure_gpus_per_actor: float | None,
-    nemotron_parse_workers: int | None,
-    nemotron_parse_batch_size: int | None,
-    nemotron_parse_gpus_per_actor: float | None,
-) -> BatchTuningParams | None:
+def _build_extract_batch_tuning(batch: IngestExtractBatchOptions) -> BatchTuningParams | None:
     tuning_kwargs = {
         key: value
         for key, value in {
-            "pdf_split_batch_size": pdf_split_batch_size,
-            "pdf_extract_workers": pdf_extract_workers,
-            "pdf_extract_batch_size": pdf_extract_batch_size,
+            "pdf_split_batch_size": batch.pdf_split_batch_size,
+            "pdf_extract_workers": batch.pdf_extract_workers,
+            "pdf_extract_batch_size": batch.pdf_extract_batch_size,
             # BatchTuningParams names this per-Ray-task reservation num_cpus.
-            "pdf_extract_num_cpus": pdf_extract_cpus_per_task,
-            "page_elements_workers": page_elements_workers,
-            "page_elements_batch_size": page_elements_batch_size,
-            "page_elements_cpus_per_actor": page_elements_cpus_per_actor,
-            "gpu_page_elements": page_elements_gpus_per_actor,
-            "ocr_workers": ocr_workers,
-            "ocr_inference_batch_size": ocr_batch_size,
-            "ocr_cpus_per_actor": ocr_cpus_per_actor,
-            "gpu_ocr": ocr_gpus_per_actor,
-            "table_structure_workers": table_structure_workers,
-            "table_structure_batch_size": table_structure_batch_size,
-            "table_structure_cpus_per_actor": table_structure_cpus_per_actor,
-            "gpu_table_structure": table_structure_gpus_per_actor,
-            "nemotron_parse_workers": nemotron_parse_workers,
-            "nemotron_parse_batch_size": nemotron_parse_batch_size,
-            "gpu_nemotron_parse": nemotron_parse_gpus_per_actor,
+            "pdf_extract_num_cpus": batch.pdf_extract_cpus_per_task,
+            "page_elements_workers": batch.page_elements_workers,
+            "page_elements_batch_size": batch.page_elements_batch_size,
+            "page_elements_cpus_per_actor": batch.page_elements_cpus_per_actor,
+            "gpu_page_elements": batch.page_elements_gpus_per_actor,
+            "ocr_workers": batch.ocr_workers,
+            "ocr_inference_batch_size": batch.ocr_batch_size,
+            "ocr_cpus_per_actor": batch.ocr_cpus_per_actor,
+            "gpu_ocr": batch.ocr_gpus_per_actor,
+            "table_structure_workers": batch.table_structure_workers,
+            "table_structure_batch_size": batch.table_structure_batch_size,
+            "table_structure_cpus_per_actor": batch.table_structure_cpus_per_actor,
+            "gpu_table_structure": batch.table_structure_gpus_per_actor,
+            "nemotron_parse_workers": batch.nemotron_parse_workers,
+            "nemotron_parse_batch_size": batch.nemotron_parse_batch_size,
+            "gpu_nemotron_parse": batch.nemotron_parse_gpus_per_actor,
         }.items()
         if value is not None
     }
     return BatchTuningParams(**tuning_kwargs) if tuning_kwargs else None
 
 
-def _build_text_chunk_kwargs(
-    *,
-    text_chunk: bool,
-    text_chunk_max_tokens: int | None,
-    text_chunk_overlap_tokens: int | None,
-) -> tuple[bool, dict[str, int]]:
-    enabled = bool(text_chunk) or text_chunk_max_tokens is not None or text_chunk_overlap_tokens is not None
+def _build_text_chunk_kwargs(chunk: IngestChunkOptions) -> tuple[bool, dict[str, int]]:
+    enabled = (
+        bool(chunk.enabled) or chunk.text_chunk_max_tokens is not None or chunk.text_chunk_overlap_tokens is not None
+    )
     if not enabled:
         return False, {}
     return True, {
         "max_tokens": (
-            int(text_chunk_max_tokens) if text_chunk_max_tokens is not None else _DEFAULT_TEXT_CHUNK_MAX_TOKENS
+            int(chunk.text_chunk_max_tokens)
+            if chunk.text_chunk_max_tokens is not None
+            else _DEFAULT_TEXT_CHUNK_MAX_TOKENS
         ),
         "overlap_tokens": (
-            int(text_chunk_overlap_tokens)
-            if text_chunk_overlap_tokens is not None
+            int(chunk.text_chunk_overlap_tokens)
+            if chunk.text_chunk_overlap_tokens is not None
             else _DEFAULT_TEXT_CHUNK_OVERLAP_TOKENS
         ),
     }
@@ -465,100 +495,29 @@ def _split_config_for_families(
     return split_config or None
 
 
-def resolve_ingest_plan(
-    documents: Sequence[str],
-    *,
-    profile: IngestProfileValue = "auto",
-    input_type: IngestInputTypeValue = "auto",
-    run_mode: IngestRunModeValue = "batch",
-    method: str | None = None,
-    dpi: int | None = None,
-    extract_text: bool | None = None,
-    extract_images: bool | None = None,
-    extract_tables: bool | None = None,
-    extract_charts: bool | None = None,
-    extract_infographics: bool | None = None,
-    extract_page_as_image: bool | None = None,
-    use_page_elements: bool | None = None,
-    use_graphic_elements: bool | None = None,
-    use_table_structure: bool | None = None,
-    segment_audio: bool | None = None,
-    audio_split_type: AudioSplitTypeValue = "size",
-    audio_split_interval: int | None = None,
-    video_extract_audio: bool | None = None,
-    video_extract_frames: bool | None = None,
-    video_frame_fps: float | None = None,
-    video_frame_dedup: bool | None = None,
-    video_frame_text_dedup: bool | None = None,
-    video_frame_text_dedup_max_dropped_frames: int | None = None,
-    video_av_fuse: bool | None = None,
-    caption: bool = False,
-    caption_invoke_url: str | None = None,
-    caption_api_key: str | None = None,
-    caption_model_name: str | None = None,
-    caption_context_text_max_chars: int | None = None,
-    caption_infographics: bool | None = None,
-    ray_address: str | None = None,
-    ray_log_to_driver: bool | None = None,
-    lancedb_uri: str = "lancedb",
-    table_name: str = "nemo-retriever",
-    overwrite: bool = True,
-    page_elements_invoke_url: str | None = None,
-    ocr_invoke_url: str | None = None,
-    ocr_version: OcrVersionValue | None = None,
-    ocr_lang: OcrLangValue | None = None,
-    graphic_elements_invoke_url: str | None = None,
-    table_structure_invoke_url: str | None = None,
-    table_output_format: TableOutputFormatValue | None = None,
-    extract_api_key: str | None = None,
-    embed_invoke_url: str | None = None,
-    embed_model_name: str | None = None,
-    local_ingest_embed_backend: LocalIngestEmbedBackendValue | None = None,
-    embed_api_key: str | None = None,
-    embed_modality: str | None = None,
-    text_elements_modality: str | None = None,
-    structured_elements_modality: str | None = None,
-    embed_granularity: str | None = None,
-    text_chunk: bool = False,
-    text_chunk_max_tokens: int | None = None,
-    text_chunk_overlap_tokens: int | None = None,
-    pdf_split_batch_size: int | None = None,
-    pdf_extract_workers: int | None = None,
-    pdf_extract_batch_size: int | None = None,
-    pdf_extract_cpus_per_task: float | None = None,
-    page_elements_workers: int | None = None,
-    page_elements_batch_size: int | None = None,
-    page_elements_cpus_per_actor: float | None = None,
-    page_elements_gpus_per_actor: float | None = None,
-    ocr_workers: int | None = None,
-    ocr_batch_size: int | None = None,
-    ocr_cpus_per_actor: float | None = None,
-    ocr_gpus_per_actor: float | None = None,
-    table_structure_workers: int | None = None,
-    table_structure_batch_size: int | None = None,
-    table_structure_cpus_per_actor: float | None = None,
-    table_structure_gpus_per_actor: float | None = None,
-    nemotron_parse_workers: int | None = None,
-    nemotron_parse_batch_size: int | None = None,
-    nemotron_parse_gpus_per_actor: float | None = None,
-    embed_workers: int | None = None,
-    embed_batch_size: int | None = None,
-    embed_cpus_per_actor: float | None = None,
-    embed_gpus_per_actor: float | None = None,
-) -> ResolvedIngestPlan:
+def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
     """Resolve root ingest options into ordinary params for one extract call.
 
     Root ``retriever ingest`` intentionally defaults to ``run_mode="batch"``.
     Programmatic callers that need Ray-free local execution should pass
-    ``run_mode="inprocess"`` explicitly. ``input_type`` remains a private
-    expansion/validation constraint; extraction still routes from the manifest.
+    ``run_mode="inprocess"`` in ``request.runtime`` explicitly. ``input_type``
+    remains a private expansion/validation constraint; extraction still routes
+    from the manifest.
     """
 
-    validated_run_mode = _validate_run_mode(run_mode)
-    validated_profile = _validate_profile(profile)
-    validated_input_type = _validate_input_type(input_type)
-    validated_audio_split_type = _validate_audio_split_type(audio_split_type)
-    document_list = _expand_ingest_documents(documents, input_type=validated_input_type)
+    source = request.source
+    runtime = request.runtime
+    extract = request.extract
+    media = request.media
+    chunk = request.chunk
+    embed = request.embed
+    storage = request.storage
+
+    validated_run_mode = _validate_run_mode(runtime.run_mode)
+    validated_profile = _validate_profile(source.profile)
+    validated_input_type = _validate_input_type(source.input_type)
+    validated_audio_split_type = _validate_audio_split_type(media.audio_split_type)
+    document_list = _expand_ingest_documents(source.documents, input_type=validated_input_type)
     branches = plan_extraction_branches(build_input_manifest(document_list))
     _validate_profile_manifest(validated_profile, branches)
 
@@ -567,90 +526,63 @@ def resolve_ingest_plan(
         {
             key: value
             for key, value in {
-                "method": method,
-                "dpi": dpi,
-                "extract_text": extract_text,
-                "extract_images": extract_images,
-                "extract_tables": extract_tables,
-                "extract_charts": extract_charts,
-                "extract_infographics": extract_infographics,
-                "extract_page_as_image": extract_page_as_image,
-                "use_page_elements": use_page_elements,
-                "use_graphic_elements": use_graphic_elements,
-                "use_table_structure": use_table_structure,
-                "page_elements_invoke_url": page_elements_invoke_url,
-                "ocr_invoke_url": ocr_invoke_url,
-                "ocr_version": ocr_version,
-                "ocr_lang": ocr_lang,
-                "graphic_elements_invoke_url": graphic_elements_invoke_url,
-                "table_structure_invoke_url": table_structure_invoke_url,
-                "table_output_format": table_output_format,
-                "api_key": extract_api_key,
+                "method": extract.method,
+                "dpi": extract.dpi,
+                "extract_text": extract.extract_text,
+                "extract_images": extract.extract_images,
+                "extract_tables": extract.extract_tables,
+                "extract_charts": extract.extract_charts,
+                "extract_infographics": extract.extract_infographics,
+                "extract_page_as_image": extract.extract_page_as_image,
+                "use_page_elements": extract.use_page_elements,
+                "use_graphic_elements": extract.use_graphic_elements,
+                "use_table_structure": extract.use_table_structure,
+                "page_elements_invoke_url": extract.page_elements_invoke_url,
+                "ocr_invoke_url": extract.ocr_invoke_url,
+                "ocr_version": extract.ocr_version,
+                "ocr_lang": extract.ocr_lang,
+                "graphic_elements_invoke_url": extract.graphic_elements_invoke_url,
+                "table_structure_invoke_url": extract.table_structure_invoke_url,
+                "table_output_format": extract.table_output_format,
+                "api_key": extract.extract_api_key,
             }.items()
             if value is not None
         }
     )
-    if table_output_format == "markdown":
+    if extract.table_output_format == "markdown":
         extract_kwargs["use_table_structure"] = True
 
-    extract_tuning = _build_extract_batch_tuning(
-        pdf_split_batch_size=pdf_split_batch_size,
-        pdf_extract_workers=pdf_extract_workers,
-        pdf_extract_batch_size=pdf_extract_batch_size,
-        pdf_extract_cpus_per_task=pdf_extract_cpus_per_task,
-        page_elements_workers=page_elements_workers,
-        page_elements_batch_size=page_elements_batch_size,
-        page_elements_cpus_per_actor=page_elements_cpus_per_actor,
-        page_elements_gpus_per_actor=page_elements_gpus_per_actor,
-        ocr_workers=ocr_workers,
-        ocr_batch_size=ocr_batch_size,
-        ocr_cpus_per_actor=ocr_cpus_per_actor,
-        ocr_gpus_per_actor=ocr_gpus_per_actor,
-        table_structure_workers=table_structure_workers,
-        table_structure_batch_size=table_structure_batch_size,
-        table_structure_cpus_per_actor=table_structure_cpus_per_actor,
-        table_structure_gpus_per_actor=table_structure_gpus_per_actor,
-        nemotron_parse_workers=nemotron_parse_workers,
-        nemotron_parse_batch_size=nemotron_parse_batch_size,
-        nemotron_parse_gpus_per_actor=nemotron_parse_gpus_per_actor,
-    )
+    extract_tuning = _build_extract_batch_tuning(extract.batch)
     if extract_tuning is not None:
         extract_kwargs["batch_tuning"] = extract_tuning
 
     embed_kwargs = build_embed_kwargs(
-        embed_invoke_url,
-        embed_model_name,
-        local_ingest_embed_backend=local_ingest_embed_backend,
-        embed_api_key=embed_api_key,
-        embed_modality=embed_modality,
-        text_elements_modality=text_elements_modality,
-        structured_elements_modality=structured_elements_modality,
-        embed_granularity=embed_granularity,
-        embed_workers=embed_workers,
-        embed_batch_size=embed_batch_size,
-        embed_cpus_per_actor=embed_cpus_per_actor,
-        embed_gpus_per_actor=embed_gpus_per_actor,
+        embed.embed_invoke_url,
+        embed.embed_model_name,
+        local_ingest_embed_backend=embed.local_ingest_embed_backend,
+        embed_api_key=embed.embed_api_key,
+        embed_modality=embed.embed_modality,
+        text_elements_modality=embed.text_elements_modality,
+        structured_elements_modality=embed.structured_elements_modality,
+        embed_granularity=embed.embed_granularity,
+        embed_workers=embed.batch.embed_workers,
+        embed_batch_size=embed.batch.embed_batch_size,
+        embed_cpus_per_actor=embed.batch.embed_cpus_per_actor,
+        embed_gpus_per_actor=embed.batch.embed_gpus_per_actor,
     )
     extract_params = ExtractParams(**extract_kwargs)
     embed_params = EmbedParams(**embed_kwargs) if embed_kwargs else None
     vdb_params = VdbUploadParams(
-        vdb_kwargs={"uri": lancedb_uri, "table_name": table_name, "overwrite": bool(overwrite)}
+        vdb_kwargs={
+            "uri": storage.lancedb_uri,
+            "table_name": storage.table_name,
+            "overwrite": bool(storage.overwrite),
+        }
     )
-    caption_params = _build_caption_params(
-        caption=caption,
-        caption_invoke_url=caption_invoke_url,
-        caption_api_key=caption_api_key,
-        caption_model_name=caption_model_name,
-        caption_context_text_max_chars=caption_context_text_max_chars,
-        caption_infographics=caption_infographics,
-    )
+    caption_params = _build_caption_params(request.caption)
 
     families = _branch_families(branches)
-    text_chunk_enabled, text_chunk_kwargs = _build_text_chunk_kwargs(
-        text_chunk=text_chunk,
-        text_chunk_max_tokens=text_chunk_max_tokens,
-        text_chunk_overlap_tokens=text_chunk_overlap_tokens,
-    )
+    text_chunk_enabled, text_chunk_kwargs = _build_text_chunk_kwargs(chunk)
     text_params = (
         (TextChunkParams(**text_chunk_kwargs) if text_chunk_enabled else TextChunkParams())
         if "txt" in families
@@ -670,23 +602,15 @@ def resolve_ingest_plan(
         av_fuse_params,
     ) = _resolve_media_params(
         branches=branches,
-        segment_audio=segment_audio,
+        media=media,
         audio_split_type=validated_audio_split_type,
-        audio_split_interval=audio_split_interval,
-        video_extract_audio=video_extract_audio,
-        video_extract_frames=video_extract_frames,
-        video_frame_fps=video_frame_fps,
-        video_frame_dedup=video_frame_dedup,
-        video_frame_text_dedup=video_frame_text_dedup,
-        video_frame_text_dedup_max_dropped_frames=video_frame_text_dedup_max_dropped_frames,
-        video_av_fuse=video_av_fuse,
     )
 
     create_kwargs: dict[str, Any] = {"run_mode": validated_run_mode}
-    if ray_address is not None:
-        create_kwargs["ray_address"] = ray_address
-    if ray_log_to_driver is not None:
-        create_kwargs["ray_log_to_driver"] = ray_log_to_driver
+    if runtime.ray_address is not None:
+        create_kwargs["ray_address"] = runtime.ray_address
+    if runtime.ray_log_to_driver is not None:
+        create_kwargs["ray_log_to_driver"] = runtime.ray_log_to_driver
 
     return ResolvedIngestPlan(
         documents=document_list,
@@ -705,6 +629,6 @@ def resolve_ingest_plan(
         caption_params=caption_params,
         embed_params=embed_params,
         vdb_params=vdb_params,
-        lancedb_uri=lancedb_uri,
-        table_name=table_name,
+        lancedb_uri=storage.lancedb_uri,
+        table_name=storage.table_name,
     )

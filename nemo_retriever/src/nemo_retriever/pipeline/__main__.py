@@ -51,14 +51,27 @@ import json
 import logging
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional, TextIO
 
 import pandas as pd
 import typer
 
-from nemo_retriever.adapters.cli.ingest_execution import execute_ingest_plan
-from nemo_retriever.adapters.cli.ingest_plan import resolve_ingest_plan
+from nemo_retriever.adapters.cli.ingest_execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
+from nemo_retriever.adapters.cli.ingest_plan import (
+    IngestChunkOptions,
+    IngestEmbedBatchOptions,
+    IngestEmbedOptions,
+    IngestExtractBatchOptions,
+    IngestExtractOptions,
+    IngestMediaOptions,
+    IngestPlanRequest,
+    IngestRuntimeOptions,
+    IngestSourceOptions,
+    IngestStorageOptions,
+    resolve_ingest_plan,
+)
 from nemo_retriever.audio import asr_params_from_env
 from nemo_retriever.graph_ingestor import GraphIngestor
 from nemo_retriever.model import VL_EMBED_MODEL, VL_RERANK_MODEL
@@ -1705,85 +1718,109 @@ def run(
                 resolved_vdb_kwargs.get("table_name") or resolved_vdb_kwargs.get("lancedb_table") or "nv-ingest"
             )
             ingest_plan = resolve_ingest_plan(
-                [str(input_path)],
-                input_type=input_type,
-                run_mode=run_mode,
-                method=method,
-                dpi=dpi,
-                extract_text=extract_text,
-                extract_tables=extract_tables,
-                extract_charts=extract_charts,
-                extract_infographics=extract_infographics,
-                extract_page_as_image=extract_page_as_image,
-                use_page_elements=use_page_elements,
-                use_graphic_elements=use_graphic_elements,
-                use_table_structure=use_table_structure,
-                segment_audio=segment_audio,
-                audio_split_type=audio_split_type,
-                audio_split_interval=audio_split_interval,
-                video_extract_audio=video_extract_audio,
-                video_extract_frames=video_extract_frames,
-                video_frame_fps=video_frame_fps,
-                video_frame_dedup=video_frame_dedup,
-                video_frame_text_dedup=video_frame_text_dedup,
-                video_frame_text_dedup_max_dropped_frames=video_frame_text_dedup_max_dropped_frames,
-                video_av_fuse=video_av_fuse,
-                ray_address=ray_address,
-                ray_log_to_driver=ray_log_to_driver,
-                page_elements_invoke_url=page_elements_invoke_url,
-                ocr_invoke_url=ocr_invoke_url,
-                ocr_version=ocr_version,
-                ocr_lang=ocr_lang,
-                graphic_elements_invoke_url=graphic_elements_invoke_url,
-                table_structure_invoke_url=table_structure_invoke_url,
-                table_output_format=table_output_format,
-                extract_api_key=extract_remote_api_key,
-                embed_invoke_url=embed_invoke_url,
-                embed_model_name=embed_model_name,
-                embed_api_key=embed_remote_api_key,
-                local_ingest_embed_backend=local_ingest_embed_backend,
-                embed_modality=embed_modality,
-                text_elements_modality=text_elements_modality,
-                structured_elements_modality=structured_elements_modality,
-                embed_granularity=embed_granularity,
-                text_chunk=enable_text_chunk,
-                text_chunk_max_tokens=text_chunk_params.max_tokens if enable_text_chunk else None,
-                text_chunk_overlap_tokens=text_chunk_params.overlap_tokens if enable_text_chunk else None,
-                lancedb_uri=plan_lancedb_uri,
-                table_name=plan_table_name,
-                overwrite=bool(resolved_vdb_kwargs.get("overwrite", True)),
-                pdf_split_batch_size=pdf_split_batch_size,
-                pdf_extract_workers=pdf_extract_tasks or None,
-                pdf_extract_batch_size=pdf_extract_batch_size or None,
-                pdf_extract_cpus_per_task=pdf_extract_cpus_per_task or None,
-                page_elements_workers=page_elements_actors or None,
-                page_elements_batch_size=page_elements_batch_size or None,
-                page_elements_cpus_per_actor=page_elements_cpus_per_actor or None,
-                page_elements_gpus_per_actor=page_elements_gpus_per_actor,
-                ocr_workers=ocr_actors or None,
-                ocr_batch_size=ocr_batch_size or None,
-                ocr_cpus_per_actor=ocr_cpus_per_actor or None,
-                ocr_gpus_per_actor=ocr_gpus_per_actor,
-                nemotron_parse_workers=nemotron_parse_actors or None,
-                nemotron_parse_batch_size=nemotron_parse_batch_size or None,
-                nemotron_parse_gpus_per_actor=nemotron_parse_gpus_per_actor,
-                embed_workers=embed_actors or None,
-                embed_batch_size=embed_batch_size or None,
-                embed_cpus_per_actor=embed_cpus_per_actor or None,
-                embed_gpus_per_actor=embed_gpus_per_actor,
+                IngestPlanRequest(
+                    source=IngestSourceOptions(
+                        documents=[str(input_path)],
+                        input_type=input_type,
+                    ),
+                    runtime=IngestRuntimeOptions(
+                        run_mode=run_mode,
+                        ray_address=ray_address,
+                        ray_log_to_driver=ray_log_to_driver,
+                    ),
+                    extract=IngestExtractOptions(
+                        method=method,
+                        dpi=dpi,
+                        extract_text=extract_text,
+                        extract_tables=extract_tables,
+                        extract_charts=extract_charts,
+                        extract_infographics=extract_infographics,
+                        extract_page_as_image=extract_page_as_image,
+                        use_page_elements=use_page_elements,
+                        use_graphic_elements=use_graphic_elements,
+                        use_table_structure=use_table_structure,
+                        page_elements_invoke_url=page_elements_invoke_url,
+                        ocr_invoke_url=ocr_invoke_url,
+                        ocr_version=ocr_version,
+                        ocr_lang=ocr_lang,
+                        graphic_elements_invoke_url=graphic_elements_invoke_url,
+                        table_structure_invoke_url=table_structure_invoke_url,
+                        table_output_format=table_output_format,
+                        extract_api_key=extract_remote_api_key,
+                        batch=IngestExtractBatchOptions(
+                            pdf_split_batch_size=pdf_split_batch_size,
+                            pdf_extract_workers=pdf_extract_tasks or None,
+                            pdf_extract_batch_size=pdf_extract_batch_size or None,
+                            pdf_extract_cpus_per_task=pdf_extract_cpus_per_task or None,
+                            page_elements_workers=page_elements_actors or None,
+                            page_elements_batch_size=page_elements_batch_size or None,
+                            page_elements_cpus_per_actor=page_elements_cpus_per_actor or None,
+                            page_elements_gpus_per_actor=page_elements_gpus_per_actor,
+                            ocr_workers=ocr_actors or None,
+                            ocr_batch_size=ocr_batch_size or None,
+                            ocr_cpus_per_actor=ocr_cpus_per_actor or None,
+                            ocr_gpus_per_actor=ocr_gpus_per_actor,
+                            nemotron_parse_workers=nemotron_parse_actors or None,
+                            nemotron_parse_batch_size=nemotron_parse_batch_size or None,
+                            nemotron_parse_gpus_per_actor=nemotron_parse_gpus_per_actor,
+                        ),
+                    ),
+                    media=IngestMediaOptions(
+                        segment_audio=segment_audio,
+                        audio_split_type=audio_split_type,
+                        audio_split_interval=audio_split_interval,
+                        video_extract_audio=video_extract_audio,
+                        video_extract_frames=video_extract_frames,
+                        video_frame_fps=video_frame_fps,
+                        video_frame_dedup=video_frame_dedup,
+                        video_frame_text_dedup=video_frame_text_dedup,
+                        video_frame_text_dedup_max_dropped_frames=video_frame_text_dedup_max_dropped_frames,
+                        video_av_fuse=video_av_fuse,
+                    ),
+                    chunk=IngestChunkOptions(
+                        enabled=enable_text_chunk,
+                        text_chunk_max_tokens=text_chunk_params.max_tokens if enable_text_chunk else None,
+                        text_chunk_overlap_tokens=text_chunk_params.overlap_tokens if enable_text_chunk else None,
+                    ),
+                    embed=IngestEmbedOptions(
+                        embed_invoke_url=embed_invoke_url,
+                        embed_model_name=embed_model_name,
+                        embed_api_key=embed_remote_api_key,
+                        local_ingest_embed_backend=local_ingest_embed_backend,
+                        embed_modality=embed_modality,
+                        text_elements_modality=text_elements_modality,
+                        structured_elements_modality=structured_elements_modality,
+                        embed_granularity=embed_granularity,
+                        batch=IngestEmbedBatchOptions(
+                            embed_workers=embed_actors or None,
+                            embed_batch_size=embed_batch_size or None,
+                            embed_cpus_per_actor=embed_cpus_per_actor or None,
+                            embed_gpus_per_actor=embed_gpus_per_actor,
+                        ),
+                    ),
+                    storage=IngestStorageOptions(
+                        lancedb_uri=plan_lancedb_uri,
+                        table_name=plan_table_name,
+                        overwrite=bool(resolved_vdb_kwargs.get("overwrite", True)),
+                    ),
+                )
             )
-            create_overrides = None
+            stage_create_kwargs = dict(ingest_plan.create_kwargs)
             if caption_gpus_per_actor is not None:
-                create_overrides = {"node_overrides": {"CaptionActor": {"num_gpus": caption_gpus_per_actor}}}
+                stage_create_kwargs["node_overrides"] = {"CaptionActor": {"num_gpus": caption_gpus_per_actor}}
+            stages = replace(
+                ingest_pipeline_stages_from_plan(ingest_plan),
+                create_kwargs=stage_create_kwargs,
+                dedup_params=dedup_params,
+                caption_params=caption_params,
+                store_params=store_params,
+                vdb_params=pipeline_vdb_upload,
+            )
             local_execute_kwargs = {
                 "overwrite": bool(resolved_vdb_kwargs.get("overwrite", True)),
                 "verify_rows": False,
                 "raise_on_empty": False,
-                "create_kwargs": create_overrides,
-                "dedup_params": dedup_params,
-                "caption_params": caption_params,
-                "store_params": store_params,
-                "vdb_params": pipeline_vdb_upload,
+                "stages": stages,
             }
 
         # --- Execute ---------------------------------------------------

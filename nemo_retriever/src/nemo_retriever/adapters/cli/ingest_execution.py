@@ -10,7 +10,7 @@ import logging
 
 from nemo_retriever.ingest_manifest import format_branch_summary
 from nemo_retriever.ingestor import Ingestor, create_ingestor
-from nemo_retriever.params import DedupParams, StoreParams
+from nemo_retriever.params import CaptionParams, DedupParams, StoreParams, VdbUploadParams
 from nemo_retriever.adapters.cli.ingest_plan import ResolvedIngestPlan
 
 logger = logging.getLogger(__name__)
@@ -52,18 +52,33 @@ class IngestExecutionResult:
         }
 
 
-_USE_PLAN_PARAMS = object()
+@dataclass(frozen=True)
+class IngestPipelineStages:
+    """Concrete SDK stages resolved from an ingest plan before execution."""
+
+    create_kwargs: dict[str, Any]
+    split_config: dict[str, Any] | None
+    dedup_params: DedupParams | None
+    caption_params: CaptionParams | None
+    store_params: StoreParams | None
+    vdb_params: VdbUploadParams | None
+
+
+def ingest_pipeline_stages_from_plan(plan: ResolvedIngestPlan) -> IngestPipelineStages:
+    return IngestPipelineStages(
+        create_kwargs=dict(plan.create_kwargs),
+        split_config=plan.split_config,
+        dedup_params=None,
+        caption_params=plan.caption_params,
+        store_params=None,
+        vdb_params=plan.vdb_params,
+    )
 
 
 def build_ingest_pipeline(
     plan: ResolvedIngestPlan,
     *,
-    create_kwargs: dict[str, Any] | None = None,
-    split_config: Any = _USE_PLAN_PARAMS,
-    dedup_params: DedupParams | None = None,
-    caption_params: Any = _USE_PLAN_PARAMS,
-    store_params: StoreParams | None = None,
-    vdb_params: Any = _USE_PLAN_PARAMS,
+    stages: IngestPipelineStages | None = None,
 ) -> Ingestor:
     """Build the SDK ingest chain from a resolved plan without executing it.
 
@@ -72,30 +87,25 @@ def build_ingest_pipeline(
     extract/embed path.
     """
 
+    stages = stages or ingest_pipeline_stages_from_plan(plan)
     extract_kwargs = plan.extract_call_kwargs()
-    resolved_split_config = plan.split_config if split_config is _USE_PLAN_PARAMS else split_config
-    if resolved_split_config is not None:
-        extract_kwargs["split_config"] = resolved_split_config
+    if stages.split_config is not None:
+        extract_kwargs["split_config"] = stages.split_config
 
-    resolved_create_kwargs = dict(plan.create_kwargs)
-    if create_kwargs:
-        resolved_create_kwargs.update(create_kwargs)
-    ingestor = create_ingestor(**resolved_create_kwargs).files(plan.documents)
+    ingestor = create_ingestor(**stages.create_kwargs).files(plan.documents)
     ingestor = ingestor.extract(plan.extract_params, **extract_kwargs)
-    if dedup_params is not None:
-        ingestor = ingestor.dedup(dedup_params)
+    if stages.dedup_params is not None:
+        ingestor = ingestor.dedup(stages.dedup_params)
 
-    resolved_caption_params = plan.caption_params if caption_params is _USE_PLAN_PARAMS else caption_params
-    if resolved_caption_params is not None:
-        ingestor = ingestor.caption(resolved_caption_params)
+    if stages.caption_params is not None:
+        ingestor = ingestor.caption(stages.caption_params)
 
     ingestor = ingestor.embed(plan.embed_params) if plan.embed_params is not None else ingestor.embed()
-    if store_params is not None:
-        ingestor = ingestor.store(store_params)
+    if stages.store_params is not None:
+        ingestor = ingestor.store(stages.store_params)
 
-    resolved_vdb_params = plan.vdb_params if vdb_params is _USE_PLAN_PARAMS else vdb_params
-    if resolved_vdb_params is not None:
-        ingestor = ingestor.vdb_upload(resolved_vdb_params)
+    if stages.vdb_params is not None:
+        ingestor = ingestor.vdb_upload(stages.vdb_params)
     return ingestor
 
 
@@ -105,12 +115,7 @@ def execute_ingest_plan(
     overwrite: bool = True,
     verify_rows: bool = True,
     raise_on_empty: bool = True,
-    create_kwargs: dict[str, Any] | None = None,
-    split_config: Any = _USE_PLAN_PARAMS,
-    dedup_params: DedupParams | None = None,
-    caption_params: Any = _USE_PLAN_PARAMS,
-    store_params: StoreParams | None = None,
-    vdb_params: Any = _USE_PLAN_PARAMS,
+    stages: IngestPipelineStages | None = None,
 ) -> IngestExecutionResult:
     """Execute a resolved ingest plan and return structured execution data.
 
@@ -125,12 +130,7 @@ def execute_ingest_plan(
 
     result = build_ingest_pipeline(
         plan,
-        create_kwargs=create_kwargs,
-        split_config=split_config,
-        dedup_params=dedup_params,
-        caption_params=caption_params,
-        store_params=store_params,
-        vdb_params=vdb_params,
+        stages=stages,
     ).ingest()
 
     n_rows = _count_lancedb_rows(plan.lancedb_uri, plan.table_name) if verify_rows else None

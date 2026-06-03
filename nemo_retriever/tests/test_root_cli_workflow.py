@@ -563,21 +563,28 @@ def test_resolved_ingest_plan_runs_through_workflow(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(ingest_execution, "create_ingestor", lambda **_kwargs: fake_ingestor)
 
     plan = ingest_plan.resolve_ingest_plan(
-        [str(document)],
-        input_type="pdf",
-        table_output_format="markdown",
-        local_ingest_embed_backend="hf",
-        page_elements_gpus_per_actor=0.2,
-        ocr_gpus_per_actor=0.3,
-        table_structure_workers=6,
-        table_structure_batch_size=12,
-        table_structure_cpus_per_actor=0.4,
-        table_structure_gpus_per_actor=0.25,
-        pdf_split_batch_size=9,
-        nemotron_parse_workers=10,
-        nemotron_parse_batch_size=11,
-        nemotron_parse_gpus_per_actor=0.6,
-        embed_gpus_per_actor=0.5,
+        ingest_plan.IngestPlanRequest(
+            source=ingest_plan.IngestSourceOptions(documents=[str(document)], input_type="pdf"),
+            extract=ingest_plan.IngestExtractOptions(
+                table_output_format="markdown",
+                batch=ingest_plan.IngestExtractBatchOptions(
+                    page_elements_gpus_per_actor=0.2,
+                    ocr_gpus_per_actor=0.3,
+                    table_structure_workers=6,
+                    table_structure_batch_size=12,
+                    table_structure_cpus_per_actor=0.4,
+                    table_structure_gpus_per_actor=0.25,
+                    pdf_split_batch_size=9,
+                    nemotron_parse_workers=10,
+                    nemotron_parse_batch_size=11,
+                    nemotron_parse_gpus_per_actor=0.6,
+                ),
+            ),
+            embed=ingest_plan.IngestEmbedOptions(
+                local_ingest_embed_backend="hf",
+                batch=ingest_plan.IngestEmbedBatchOptions(embed_gpus_per_actor=0.5),
+            ),
+        )
     )
     result = ingest_workflow.run_ingest_workflow(plan)
 
@@ -612,10 +619,14 @@ def test_execute_ingest_plan_returns_structured_execution_data(monkeypatch, tmp_
     monkeypatch.setattr(ingest_execution, "_count_lancedb_rows", lambda *_, **__: 9)
 
     plan = ingest_plan.resolve_ingest_plan(
-        [str(document)],
-        run_mode="inprocess",
-        lancedb_uri="/tmp/nemo-test-lancedb",
-        table_name="execution_result",
+        ingest_plan.IngestPlanRequest(
+            source=ingest_plan.IngestSourceOptions(documents=[str(document)]),
+            runtime=ingest_plan.IngestRuntimeOptions(run_mode="inprocess"),
+            storage=ingest_plan.IngestStorageOptions(
+                lancedb_uri="/tmp/nemo-test-lancedb",
+                table_name="execution_result",
+            ),
+        )
     )
     execution = ingest_execution.execute_ingest_plan(plan)
 
@@ -942,7 +953,12 @@ def test_resolve_ingest_plan_validates_run_mode_before_creating_ingestor(monkeyp
     monkeypatch.setattr(ingest_execution, "create_ingestor", fail_create_ingestor)
 
     with pytest.raises(ValueError, match="run_mode must be one of"):
-        ingest_plan.resolve_ingest_plan(["ignored.pdf"], run_mode="parallel")  # type: ignore[arg-type]
+        ingest_plan.resolve_ingest_plan(
+            ingest_plan.IngestPlanRequest(
+                source=ingest_plan.IngestSourceOptions(documents=["ignored.pdf"]),
+                runtime=ingest_plan.IngestRuntimeOptions(run_mode="parallel"),  # type: ignore[arg-type]
+            )
+        )
 
 
 def test_silence_noisy_libraries_sets_env_vars(monkeypatch) -> None:
