@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence, cast
 
-from nemo_retriever.adapters.cli.embed_options import build_embed_kwargs
+from nemo_retriever.embed_options import build_embed_kwargs
 from nemo_retriever.ingest_manifest import (
     ExtractionBranchPlan,
     build_input_manifest,

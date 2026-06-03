@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-import nemo_retriever.adapters.cli.ingest_execution as ingest_execution
+import nemo_retriever.ingest.execution as ingest_execution
 import nemo_retriever.examples.graph_pipeline as batch_pipeline
 import nemo_retriever.model as model_module
 import nemo_retriever.pipeline.__main__ as pipeline_main

@@ -18,8 +18,8 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-import nemo_retriever.adapters.cli.ingest_execution as ingest_execution
-import nemo_retriever.adapters.cli.ingest_plan as ingest_plan
+import nemo_retriever.ingest.execution as ingest_execution
+import nemo_retriever.ingest.plan as ingest_plan
 import nemo_retriever.adapters.cli.ingest_workflow as ingest_workflow
 from nemo_retriever.graph_ingestor import GraphIngestor
 from nemo_retriever.params import (
@@ -718,6 +718,38 @@ def test_root_ingest_dry_run_prints_plan_without_creating_ingestor(monkeypatch, 
     assert payload["extract"]["extract_images"] is False
     assert payload["extract"]["use_page_elements"] is False
     assert payload["extract"]["extract_tables"] is False
+
+
+def test_root_ingest_dry_run_redacts_common_credential_names() -> None:
+    payload = {
+        "api_key": "nvapi-test",
+        "auth_token": "token-test",
+        "password": "pw-test",
+        "client_secret": "secret-test",
+        "bearer_token": "bearer-test",
+        "credential_path": "/tmp/credentials",
+        "nested": [{"refreshToken": "refresh-test", "plain": "value"}],
+        "max_tokens": 1024,
+        "num_tokens_per_batch": 256,
+        "tokenizer_path": "/tmp/tokenizer",
+        "safe": "visible",
+    }
+
+    redacted = ingest_workflow._strip_secret_values(payload)
+
+    assert redacted == {
+        "api_key": "<redacted>",
+        "auth_token": "<redacted>",
+        "password": "<redacted>",
+        "client_secret": "<redacted>",
+        "bearer_token": "<redacted>",
+        "credential_path": "<redacted>",
+        "nested": [{"refreshToken": "<redacted>", "plain": "value"}],
+        "max_tokens": 1024,
+        "num_tokens_per_batch": 256,
+        "tokenizer_path": "/tmp/tokenizer",
+        "safe": "visible",
+    }
 
 
 def test_root_ingest_passes_extract_overrides_without_ocr_profile(monkeypatch, tmp_path) -> None:

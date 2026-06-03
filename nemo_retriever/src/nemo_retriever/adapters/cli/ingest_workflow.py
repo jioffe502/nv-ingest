@@ -7,8 +7,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from nemo_retriever.adapters.cli.ingest_execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
-from nemo_retriever.adapters.cli.ingest_plan import ResolvedIngestPlan
+from nemo_retriever.ingest.execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
+from nemo_retriever.ingest.plan import ResolvedIngestPlan
 from nemo_retriever.ingest_manifest import format_branch_summary
 from nemo_retriever.params import DedupParams, StoreParams
 

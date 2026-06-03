@@ -4,14 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Sequence
-import logging
 
+from nemo_retriever.ingest.plan import ResolvedIngestPlan
 from nemo_retriever.ingest_manifest import format_branch_summary
 from nemo_retriever.ingestor import Ingestor, create_ingestor
 from nemo_retriever.params import CaptionParams, DedupParams, StoreParams, VdbUploadParams
-from nemo_retriever.adapters.cli.ingest_plan import ResolvedIngestPlan
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from nemo_retriever.adapters.cli.embed_options import (
+from nemo_retriever.embed_options import (
     build_embed_kwargs,
 )
 from nemo_retriever.retriever import Retriever

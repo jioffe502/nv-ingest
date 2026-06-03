@@ -10,7 +10,7 @@ from nemo_retriever.graph import Graph
 from nemo_retriever.graph.abstract_operator import AbstractOperator
 from nemo_retriever.branch_extraction import normalize_ray_branch_datasets
 from nemo_retriever.graph_ingestor import GraphIngestor
-from nemo_retriever.adapters.cli.ingest_plan import (
+from nemo_retriever.ingest.plan import (
     IngestCaptionOptions,
     IngestExtractOptions,
     IngestMediaOptions,
@@ -18,7 +18,6 @@ from nemo_retriever.adapters.cli.ingest_plan import (
     IngestSourceOptions,
     resolve_ingest_plan,
 )
-from nemo_retriever.adapters.cli.ingest_workflow import _strip_secret_values
 from nemo_retriever.ingest_manifest import (
     build_input_manifest,
     plan_extraction_branches,
@@ -250,38 +249,6 @@ def test_ingest_plan_caption_options_require_caption(tmp_path) -> None:
             [str(pdf)],
             caption=IngestCaptionOptions(caption_invoke_url="http://vlm:8000/v1/chat/completions"),
         )
-
-
-def test_dry_run_secret_redaction_covers_common_credential_names() -> None:
-    payload = {
-        "api_key": "nvapi-test",
-        "auth_token": "token-test",
-        "password": "pw-test",
-        "client_secret": "secret-test",
-        "bearer_token": "bearer-test",
-        "credential_path": "/tmp/credentials",
-        "nested": [{"refreshToken": "refresh-test", "plain": "value"}],
-        "max_tokens": 1024,
-        "num_tokens_per_batch": 256,
-        "tokenizer_path": "/tmp/tokenizer",
-        "safe": "visible",
-    }
-
-    redacted = _strip_secret_values(payload)
-
-    assert redacted == {
-        "api_key": "<redacted>",
-        "auth_token": "<redacted>",
-        "password": "<redacted>",
-        "client_secret": "<redacted>",
-        "bearer_token": "<redacted>",
-        "credential_path": "<redacted>",
-        "nested": [{"refreshToken": "<redacted>", "plain": "value"}],
-        "max_tokens": 1024,
-        "num_tokens_per_batch": 256,
-        "tokenizer_path": "/tmp/tokenizer",
-        "safe": "visible",
-    }
 
 
 def test_ingest_plan_auto_builds_audio_params(monkeypatch, tmp_path) -> None:

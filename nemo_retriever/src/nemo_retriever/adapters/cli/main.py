@@ -16,7 +16,7 @@ import tempfile
 from pydantic import ValidationError
 import typer
 
-from nemo_retriever.adapters.cli.ingest_plan import (
+from nemo_retriever.ingest.plan import (
     AudioSplitTypeValue,
     IngestCaptionOptions,
     IngestChunkOptions,

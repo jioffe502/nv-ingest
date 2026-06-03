@@ -58,8 +58,8 @@ from typing import Any, Optional, TextIO
 import pandas as pd
 import typer
 
-from nemo_retriever.adapters.cli.ingest_execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
-from nemo_retriever.adapters.cli.ingest_plan import (
+from nemo_retriever.ingest.execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
+from nemo_retriever.ingest.plan import (
     IngestChunkOptions,
     IngestEmbedBatchOptions,
     IngestEmbedOptions,
