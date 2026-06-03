@@ -16,19 +16,20 @@ import tempfile
 from pydantic import ValidationError
 import typer
 
-from nemo_retriever.adapters.cli.sdk_workflow import (
+from nemo_retriever.adapters.cli.ingest_plan import (
     AudioSplitTypeValue,
-    DEFAULT_LANCEDB_URI,
-    DEFAULT_TABLE_NAME,
     IngestProfileValue,
     IngestRunModeValue,
     LocalIngestEmbedBackendValue,
     OcrLangValue,
     OcrVersionValue,
     TableOutputFormatValue,
-    ingest_documents,
-    query_documents,
+    resolve_ingest_plan,
 )
+from nemo_retriever.adapters.cli.ingest_workflow import (
+    run_ingest_workflow,
+)
+from nemo_retriever.adapters.cli.query_workflow import query_documents
 from nemo_retriever.vdb.records import RetrievalHit
 from nemo_retriever.version import get_version_info
 
@@ -164,8 +165,8 @@ def ingest_command(
         "--profile",
         help="Ingest profile: auto or fast-text.",
     ),
-    lancedb_uri: str = typer.Option(DEFAULT_LANCEDB_URI, "--lancedb-uri", help="LanceDB database URI."),
-    table_name: str = typer.Option(DEFAULT_TABLE_NAME, "--table-name", help="LanceDB table name."),
+    lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
+    table_name: str = typer.Option("nemo-retriever", "--table-name", help="LanceDB table name."),
     run_mode: IngestRunModeValue = typer.Option(
         "batch",
         "--run-mode",
@@ -575,11 +576,10 @@ def ingest_command(
     capture = _quiet_capture() if quiet else contextlib.nullcontext()
     try:
         with capture:
-            summary = ingest_documents(
+            ingest_plan = resolve_ingest_plan(
                 documents,
                 profile=profile,
                 run_mode=run_mode,
-                dry_run=dry_run,
                 method=method,
                 dpi=dpi,
                 extract_text=extract_text,
@@ -607,9 +607,6 @@ def ingest_command(
                 caption_model_name=caption_model_name,
                 caption_context_text_max_chars=caption_context_text_max_chars,
                 caption_infographics=caption_infographics,
-                dedup=dedup,
-                dedup_iou_threshold=dedup_iou_threshold,
-                store_images_uri=store_images_uri,
                 ray_address=ray_address,
                 ray_log_to_driver=ray_log_to_driver,
                 lancedb_uri=lancedb_uri,
@@ -658,6 +655,14 @@ def ingest_command(
                 embed_cpus_per_actor=embed_cpus_per_actor,
                 embed_gpus_per_actor=embed_gpus_per_actor,
             )
+            summary = run_ingest_workflow(
+                ingest_plan,
+                dry_run=dry_run,
+                dedup=dedup,
+                dedup_iou_threshold=dedup_iou_threshold,
+                store_images_uri=store_images_uri,
+                overwrite=overwrite,
+            )
     except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -704,8 +709,8 @@ def query_command(
         "--content-types",
         help="Comma-separated content types to keep, such as text,table; untyped hits are excluded.",
     ),
-    lancedb_uri: str = typer.Option(DEFAULT_LANCEDB_URI, "--lancedb-uri", help="LanceDB database URI."),
-    table_name: str = typer.Option(DEFAULT_TABLE_NAME, "--table-name", help="LanceDB table name."),
+    lancedb_uri: str = typer.Option("lancedb", "--lancedb-uri", help="LanceDB database URI."),
+    table_name: str = typer.Option("nemo-retriever", "--table-name", help="LanceDB table name."),
     embed_invoke_url: str | None = typer.Option(None, "--embed-invoke-url", help="Embedding NIM endpoint URL."),
     embed_model_name: str | None = typer.Option(
         None,

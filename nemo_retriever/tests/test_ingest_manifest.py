@@ -10,7 +10,7 @@ from nemo_retriever.graph import Graph
 from nemo_retriever.graph.abstract_operator import AbstractOperator
 from nemo_retriever.branch_extraction import normalize_ray_branch_datasets
 from nemo_retriever.graph_ingestor import GraphIngestor
-from nemo_retriever.adapters.cli.sdk_workflow import _strip_secret_values, resolve_ingest_plan
+from nemo_retriever.adapters.cli.ingest_plan import _strip_secret_values, resolve_ingest_plan
 from nemo_retriever.ingest_manifest import (
     build_input_manifest,
     plan_extraction_branches,

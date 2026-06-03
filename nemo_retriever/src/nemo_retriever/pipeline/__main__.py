@@ -57,7 +57,8 @@ from typing import Any, Optional, TextIO
 import pandas as pd
 import typer
 
-from nemo_retriever.adapters.cli.sdk_workflow import execute_ingest_plan, resolve_ingest_plan
+from nemo_retriever.adapters.cli.ingest_execution import execute_ingest_plan
+from nemo_retriever.adapters.cli.ingest_plan import resolve_ingest_plan
 from nemo_retriever.audio import asr_params_from_env
 from nemo_retriever.graph_ingestor import GraphIngestor
 from nemo_retriever.model import VL_EMBED_MODEL, VL_RERANK_MODEL
