@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from nemo_retriever.params.embed import build_embed_option_kwargs
+from nemo_retriever.params import build_embed_option_kwargs
 from nemo_retriever.retriever import Retriever
 from nemo_retriever.utils.remote_auth import resolve_remote_api_key
 from nemo_retriever.vdb.records import RetrievalHit

@@ -35,8 +35,8 @@ from .models import VdbUploadParams
 from .models import VideoFrameParams
 from .models import VideoFrameTextDedupParams
 from .models import WebhookParams
-from .embed import build_embed_option_kwargs
 from .utils import SPLIT_CONFIG_VALID_KEYS
+from .utils import build_embed_option_kwargs
 from .utils import resolve_split_params
 
 __all__ = [

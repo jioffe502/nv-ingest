@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence, cast
 
-from nemo_retriever.params.embed import build_embed_option_kwargs
 from nemo_retriever.ingest_manifest import (
     ExtractionBranchPlan,
     build_input_manifest,
@@ -30,6 +29,7 @@ from nemo_retriever.params import (
     VdbUploadParams,
     VideoFrameParams,
     VideoFrameTextDedupParams,
+    build_embed_option_kwargs,
 )
 from nemo_retriever.utils.input_files import (
     AUTO_INPUT_EXTENSIONS,
