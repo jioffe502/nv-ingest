@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib
 import itertools
 import json
@@ -670,6 +671,26 @@ def test_execute_ingest_plan_returns_structured_execution_data(monkeypatch, tmp_
     assert execution.result == [{"status": "ok"}]
     assert execution.metadata["branch_summary"]
     assert execution.to_summary_dict()["n_rows"] == 9
+
+
+def test_execute_ingest_plan_requires_vdb_stage_for_row_verification(monkeypatch, tmp_path) -> None:
+    document = tmp_path / "no-vdb.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    def fail_create_ingestor(**_kwargs: Any) -> Any:
+        raise AssertionError("create_ingestor should not be called when row verification has no VDB stage")
+
+    monkeypatch.setattr(ingest_execution, "create_ingestor", fail_create_ingestor)
+    plan = ingest_plan.resolve_ingest_plan(
+        ingest_plan.IngestPlanRequest(
+            source=ingest_plan.IngestSourceOptions(documents=[str(document)]),
+            runtime=ingest_plan.IngestRuntimeOptions(run_mode="inprocess"),
+        )
+    )
+    stages = replace(ingest_execution.ingest_pipeline_stages_from_plan(plan), vdb_params=None)
+
+    with pytest.raises(ValueError, match="Row verification requires an effective VDB upload stage"):
+        ingest_execution.execute_ingest_plan(plan, stages=stages)
 
 
 def test_root_ingest_reports_empty_directory_error(tmp_path) -> None:

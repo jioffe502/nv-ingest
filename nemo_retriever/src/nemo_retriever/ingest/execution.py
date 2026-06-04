@@ -118,7 +118,10 @@ def execute_ingest_plan(
     """
 
     effective_stages = stages or ingest_pipeline_stages_from_plan(plan)
-    lancedb_uri, table_name, overwrite = _resolve_lancedb_stage(plan, effective_stages)
+    lancedb_stage = _resolve_lancedb_stage(plan, effective_stages)
+    if verify_rows and lancedb_stage is None:
+        raise ValueError("Row verification requires an effective VDB upload stage; pass verify_rows=False to skip it.")
+    lancedb_uri, table_name, overwrite = lancedb_stage or (plan.lancedb_uri, plan.table_name, True)
 
     initial_n_rows = None
     if verify_rows and not overwrite:
@@ -151,8 +154,13 @@ def execute_ingest_plan(
     )
 
 
-def _resolve_lancedb_stage(plan: ResolvedIngestPlan, stages: IngestPipelineStages) -> tuple[str, str, bool]:
-    vdb_kwargs = dict((stages.vdb_params or plan.vdb_params).vdb_kwargs)
+def _resolve_lancedb_stage(
+    plan: ResolvedIngestPlan,
+    stages: IngestPipelineStages,
+) -> tuple[str, str, bool] | None:
+    if stages.vdb_params is None:
+        return None
+    vdb_kwargs = dict(stages.vdb_params.vdb_kwargs)
     lancedb_uri = str(vdb_kwargs.get("uri") or vdb_kwargs.get("lancedb_uri") or plan.lancedb_uri)
     table_name = str(vdb_kwargs.get("table_name") or vdb_kwargs.get("lancedb_table") or plan.table_name)
     overwrite = bool(vdb_kwargs.get("overwrite", True))
