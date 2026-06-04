@@ -687,10 +687,10 @@ def test_execute_ingest_plan_requires_vdb_stage_for_row_verification(monkeypatch
             runtime=ingest_plan.IngestRuntimeOptions(run_mode="inprocess"),
         )
     )
-    stages = replace(ingest_execution.ingest_pipeline_stages_from_plan(plan), vdb_params=None)
+    plan = replace(plan, vdb_params=None)
 
     with pytest.raises(ValueError, match="Row verification requires an effective VDB upload stage"):
-        ingest_execution.execute_ingest_plan(plan, stages=stages)
+        ingest_execution.execute_ingest_plan(plan)
 
 
 def test_root_ingest_reports_empty_directory_error(tmp_path) -> None:

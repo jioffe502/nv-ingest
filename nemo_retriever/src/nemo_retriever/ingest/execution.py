@@ -11,7 +11,6 @@ from typing import Any, Sequence
 from nemo_retriever.ingest.plan import ResolvedIngestPlan
 from nemo_retriever.ingest_manifest import format_branch_summary
 from nemo_retriever.ingestor import Ingestor, create_ingestor
-from nemo_retriever.params import CaptionParams, DedupParams, StoreParams, VdbUploadParams
 
 logger = logging.getLogger(__name__)
 
@@ -46,60 +45,31 @@ class IngestExecutionResult:
         }
 
 
-@dataclass(frozen=True)
-class IngestPipelineStages:
-    """Concrete SDK stages resolved from an ingest plan before execution."""
-
-    create_kwargs: dict[str, Any]
-    split_config: dict[str, Any] | None
-    dedup_params: DedupParams | None
-    caption_params: CaptionParams | None
-    store_params: StoreParams | None
-    vdb_params: VdbUploadParams | None
-
-
-def ingest_pipeline_stages_from_plan(plan: ResolvedIngestPlan) -> IngestPipelineStages:
-    return IngestPipelineStages(
-        create_kwargs=dict(plan.create_kwargs),
-        split_config=plan.split_config,
-        dedup_params=plan.dedup_params,
-        caption_params=plan.caption_params,
-        store_params=plan.store_params,
-        vdb_params=plan.vdb_params,
-    )
-
-
-def build_ingest_pipeline(
-    plan: ResolvedIngestPlan,
-    *,
-    stages: IngestPipelineStages | None = None,
-) -> Ingestor:
+def build_ingest_pipeline(plan: ResolvedIngestPlan) -> Ingestor:
     """Build the SDK ingest chain from a resolved plan without executing it.
 
     This is the shared implementation used by root ``retriever ingest`` and
-    development callers that add extra stages around the same manifest-routed
-    extract/embed path.
+    development callers that need the same manifest-routed extract/embed path.
     """
 
-    stages = stages or ingest_pipeline_stages_from_plan(plan)
     extract_kwargs = plan.extract_call_kwargs()
-    if stages.split_config is not None:
-        extract_kwargs["split_config"] = stages.split_config
+    if plan.split_config is not None:
+        extract_kwargs["split_config"] = plan.split_config
 
-    ingestor = create_ingestor(**stages.create_kwargs).files(plan.documents)
+    ingestor = create_ingestor(**plan.create_kwargs).files(plan.documents)
     ingestor = ingestor.extract(plan.extract_params, **extract_kwargs)
-    if stages.dedup_params is not None:
-        ingestor = ingestor.dedup(stages.dedup_params)
+    if plan.dedup_params is not None:
+        ingestor = ingestor.dedup(plan.dedup_params)
 
-    if stages.caption_params is not None:
-        ingestor = ingestor.caption(stages.caption_params)
+    if plan.caption_params is not None:
+        ingestor = ingestor.caption(plan.caption_params)
 
     ingestor = ingestor.embed(plan.embed_params) if plan.embed_params is not None else ingestor.embed()
-    if stages.store_params is not None:
-        ingestor = ingestor.store(stages.store_params)
+    if plan.store_params is not None:
+        ingestor = ingestor.store(plan.store_params)
 
-    if stages.vdb_params is not None:
-        ingestor = ingestor.vdb_upload(stages.vdb_params)
+    if plan.vdb_params is not None:
+        ingestor = ingestor.vdb_upload(plan.vdb_params)
     return ingestor
 
 
@@ -108,7 +78,6 @@ def execute_ingest_plan(
     *,
     verify_rows: bool = True,
     raise_on_empty: bool = True,
-    stages: IngestPipelineStages | None = None,
 ) -> IngestExecutionResult:
     """Execute a resolved ingest plan and return structured execution data.
 
@@ -117,17 +86,16 @@ def execute_ingest_plan(
     shared plan/build/ingest path and layering their own reporting afterward.
     """
 
-    effective_stages = stages or ingest_pipeline_stages_from_plan(plan)
-    lancedb_stage = _resolve_lancedb_stage(plan, effective_stages)
-    if verify_rows and lancedb_stage is None:
+    lancedb_target = _resolve_lancedb_target(plan)
+    if verify_rows and lancedb_target is None:
         raise ValueError("Row verification requires an effective VDB upload stage; pass verify_rows=False to skip it.")
-    lancedb_uri, table_name, overwrite = lancedb_stage or (plan.lancedb_uri, plan.table_name, True)
+    lancedb_uri, table_name, overwrite = lancedb_target or (plan.lancedb_uri, plan.table_name, True)
 
     initial_n_rows = None
     if verify_rows and not overwrite:
         initial_n_rows = _count_lancedb_rows(lancedb_uri, table_name)
 
-    result = build_ingest_pipeline(plan, stages=effective_stages).ingest()
+    result = build_ingest_pipeline(plan).ingest()
 
     n_rows = _count_lancedb_rows(lancedb_uri, table_name) if verify_rows else None
     if verify_rows and raise_on_empty:
@@ -154,13 +122,10 @@ def execute_ingest_plan(
     )
 
 
-def _resolve_lancedb_stage(
-    plan: ResolvedIngestPlan,
-    stages: IngestPipelineStages,
-) -> tuple[str, str, bool] | None:
-    if stages.vdb_params is None:
+def _resolve_lancedb_target(plan: ResolvedIngestPlan) -> tuple[str, str, bool] | None:
+    if plan.vdb_params is None:
         return None
-    vdb_kwargs = dict(stages.vdb_params.vdb_kwargs)
+    vdb_kwargs = dict(plan.vdb_params.vdb_kwargs)
     lancedb_uri = str(vdb_kwargs.get("uri") or vdb_kwargs.get("lancedb_uri") or plan.lancedb_uri)
     table_name = str(vdb_kwargs.get("table_name") or vdb_kwargs.get("lancedb_table") or plan.table_name)
     overwrite = bool(vdb_kwargs.get("overwrite", True))

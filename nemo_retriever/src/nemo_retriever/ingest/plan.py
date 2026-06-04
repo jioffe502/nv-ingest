@@ -294,7 +294,7 @@ class ResolvedIngestPlan:
     caption_params: CaptionParams | None
     embed_params: EmbedParams | None
     store_params: StoreParams | None
-    vdb_params: VdbUploadParams
+    vdb_params: VdbUploadParams | None
     lancedb_uri: str
     table_name: str
 

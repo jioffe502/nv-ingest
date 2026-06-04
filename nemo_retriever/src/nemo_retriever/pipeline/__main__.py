@@ -58,7 +58,7 @@ from typing import Any, Optional, TextIO
 import pandas as pd
 import typer
 
-from nemo_retriever.ingest.execution import execute_ingest_plan, ingest_pipeline_stages_from_plan
+from nemo_retriever.ingest.execution import execute_ingest_plan
 from nemo_retriever.ingest.plan import (
     IngestCaptionOptions,
     IngestChunkOptions,
@@ -1611,18 +1611,17 @@ def run(
                     ),
                 )
             )
-            stage_create_kwargs = dict(ingest_plan.create_kwargs)
+            execution_create_kwargs = dict(ingest_plan.create_kwargs)
             if caption_gpus_per_actor is not None:
-                stage_create_kwargs["node_overrides"] = {"CaptionActor": {"num_gpus": caption_gpus_per_actor}}
-            stages = replace(
-                ingest_pipeline_stages_from_plan(ingest_plan),
-                create_kwargs=stage_create_kwargs,
+                execution_create_kwargs["node_overrides"] = {"CaptionActor": {"num_gpus": caption_gpus_per_actor}}
+            ingest_plan = replace(
+                ingest_plan,
+                create_kwargs=execution_create_kwargs,
                 vdb_params=pipeline_vdb_upload,
             )
             local_execute_kwargs = {
                 "verify_rows": False,
                 "raise_on_empty": False,
-                "stages": stages,
             }
 
         # --- Execute ---------------------------------------------------
