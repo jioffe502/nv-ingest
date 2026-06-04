@@ -2,7 +2,7 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared parameter coercion and building helpers used by ingest modes."""
+"""Shared coercion and option-building helpers for parameter models."""
 
 from __future__ import annotations
 
