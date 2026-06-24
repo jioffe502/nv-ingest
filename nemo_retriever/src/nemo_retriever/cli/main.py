@@ -115,6 +115,7 @@ def main() -> None:
 
 @app.command("query")
 def query_command(
+    ctx: typer.Context,
     query: str = typer.Argument(..., help="Query text."),
     top_k: int = typer.Option(10, "--top-k", min=1, help="Final number of hits to return."),
     candidate_k: int | None = typer.Option(
@@ -185,10 +186,10 @@ def query_command(
     ),
     hybrid: bool = typer.Option(
         False,
-        "--hybrid/--no-hybrid",
+        "--hybrid",
         help=(
-            "Fused vector + full-text (BM25) retrieval; falls back to vector-only if the table "
-            "has no FTS index. Opt-in (default off) — preserves the legacy vector-only default."
+            "Override automatic LanceDB retrieval-mode detection for vector tables. By default, "
+            "query inspects the table and chooses dense, hybrid, or sparse retrieval."
         ),
     ),
     output_format: str = typer.Option(
@@ -220,8 +221,12 @@ def query_command(
 
     try:
         reranker_api_key = _api_key_from_env_option(reranker_api_key_env) if reranker_invoke_url else None
+        hybrid_source = ctx.get_parameter_source("hybrid")
+        hybrid_override = (
+            hybrid if hybrid_source is not None and getattr(hybrid_source, "name", "") != "DEFAULT" else None
+        )
 
-        def _run(use_hybrid: bool) -> list:
+        def _run(use_hybrid: bool | None) -> list:
             return query_documents(
                 QueryRequest(
                     query=query,
@@ -251,7 +256,7 @@ def query_command(
             )
 
         with _quiet_capture():
-            if hybrid:
+            if hybrid_override is True:
                 try:
                     hits = _run(True)
                     strategies = ["semantic", "lexical"]
@@ -259,7 +264,7 @@ def query_command(
                     hits = _run(False)
                     strategies = ["semantic"]
             else:
-                hits = _run(False)
+                hits = _run(hybrid_override)
                 strategies = ["semantic"]
     except _ROOT_CLI_ERRORS as exc:
         typer.echo(f"Error: {exc}", err=True)

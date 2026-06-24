@@ -39,9 +39,8 @@ def _build_retriever_kwargs(request: QueryRequest) -> dict[str, Any]:
         "uri": request.storage.lancedb_uri,
         "table_name": request.storage.table_name,
     }
-    # Only inject hybrid when opted in, so the vector-only path stays byte-for-byte legacy.
-    if request.retrieval.hybrid:
-        vdb_kwargs["hybrid"] = True
+    if request.retrieval.hybrid is not None:
+        vdb_kwargs["hybrid"] = bool(request.retrieval.hybrid)
     retriever_kwargs: dict[str, Any] = {
         "top_k": request.retrieval.top_k,
         "vdb_kwargs": vdb_kwargs,
