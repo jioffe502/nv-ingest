@@ -102,3 +102,27 @@ def test_batch_inline_text_matches_text_file(tmp_path) -> None:
 
     assert file_result["text"].tolist() == inline_result["text"].tolist()
     assert file_result["page_number"].tolist() == inline_result["page_number"].tolist()
+
+
+@pytest.mark.integration
+def test_batch_inline_text_ingests_alongside_text_file(tmp_path) -> None:
+    ray = pytest.importorskip("ray")
+    pytest.importorskip("transformers")
+    document = tmp_path / "document.txt"
+    document.write_text("from file", encoding="utf-8")
+
+    try:
+        result = (
+            GraphIngestor(run_mode="batch", show_progress=False)
+            .files([str(document)])
+            .texts(["from inline"])
+            .extract_txt(TextChunkParams(max_tokens=10))
+            .ingest()
+        )
+    finally:
+        ray.shutdown()
+
+    assert set(zip(result["path"], result["text"])) == {
+        (str(document.resolve()), "from file"),
+        ("inline://00000000", "from inline"),
+    }

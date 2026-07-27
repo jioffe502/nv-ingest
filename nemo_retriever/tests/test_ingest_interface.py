@@ -155,29 +155,51 @@ def test_texts_rejects_non_sequence_input() -> None:
         create_ingestor(run_mode="inprocess").texts(iter(["one", "two"]))
 
 
-def test_texts_cannot_mix_with_files_or_buffers(tmp_path) -> None:
+@pytest.mark.parametrize("files_first", [True, False])
+def test_texts_can_mix_with_text_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files_first: bool,
+) -> None:
+    monkeypatch.setattr(
+        "nemo_retriever.common.modality.txt.split._get_tokenizer", lambda *args, **kwargs: _InlineTextTokenizer()
+    )
     document = tmp_path / "document.txt"
     document.write_text("document", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="cannot be combined"):
-        create_ingestor(run_mode="inprocess", documents=[str(document)]).texts(["inline"])
-    with pytest.raises(ValueError, match="cannot be combined"):
-        create_ingestor(run_mode="inprocess").texts(["inline"]).files([str(document)])
-    with pytest.raises(ValueError, match="cannot be combined"):
-        create_ingestor(run_mode="inprocess").texts(["inline"]).buffers(("document.txt", BytesIO(b"document")))
+    ingestor = create_ingestor(run_mode="inprocess")
+    if files_first:
+        ingestor.files([str(document)]).texts(["inline"])
+    else:
+        ingestor.texts(["inline"]).files([str(document)])
+
+    result = ingestor.extract_txt(TextChunkParams(max_tokens=10)).ingest()
+
+    assert result["text"].tolist() == ["document", "inline"]
+    assert result["path"].tolist() == [str(document.resolve()), "inline://00000000"]
 
 
-@pytest.mark.parametrize(
-    "method_name", ["extract", "extract_image_files", "extract_html", "extract_audio", "extract_video"]
-)
-def test_texts_rejects_incompatible_extraction_methods(method_name: str) -> None:
-    ingestor = create_ingestor(run_mode="inprocess").texts(["inline"])
+def test_texts_can_mix_with_text_buffers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nemo_retriever.common.modality.txt.split._get_tokenizer", lambda *args, **kwargs: _InlineTextTokenizer()
+    )
 
-    with pytest.raises(ValueError, match="use extract_txt"):
-        getattr(ingestor, method_name)()
+    result = (
+        create_ingestor(run_mode="inprocess")
+        .texts(["inline"])
+        .buffers(("document.txt", BytesIO(b"document")))
+        .extract_txt(TextChunkParams(max_tokens=10))
+        .ingest()
+    )
+
+    assert result["text"].tolist() == ["document", "inline"]
+    assert result["path"].tolist() == [
+        str(Path("document.txt").resolve()),
+        "inline://00000000",
+    ]
 
 
-def test_texts_allows_explicit_text_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_texts_allow_explicit_text_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "nemo_retriever.common.modality.txt.split._get_tokenizer", lambda *args, **kwargs: _InlineTextTokenizer()
     )
@@ -192,11 +214,24 @@ def test_texts_allows_explicit_text_extraction(monkeypatch: pytest.MonkeyPatch) 
     assert result["text"].tolist() == ["one", "two"]
 
 
-def test_texts_rejects_preconfigured_non_text_extraction() -> None:
-    ingestor = create_ingestor(run_mode="inprocess").extract_html()
+def test_texts_plan_alongside_other_modalities_regardless_of_call_order(tmp_path: Path) -> None:
+    image = tmp_path / "scan.bmp"
+    image.write_bytes(b"bmp")
 
-    with pytest.raises(ValueError, match="only supports text extraction"):
-        ingestor.texts(["inline"])
+    images_first = GraphIngestor(run_mode="inprocess").files([str(image)]).extract_image_files().texts(["inline"])
+    texts_first = GraphIngestor(run_mode="inprocess").texts(["inline"]).files([str(image)]).extract_image_files()
+
+    for ingestor in (images_first, texts_first):
+        branches = ingestor._plan_default_extraction_branches()
+        assert [(branch.family, branch.input_paths) for branch in branches] == [
+            ("image", (str(image),)),
+            ("txt", ("inline://00000000",)),
+        ]
+
+    empty_inline = GraphIngestor(run_mode="inprocess").files([str(image)]).texts([])
+    assert [(branch.family, branch.input_paths) for branch in empty_inline._plan_default_extraction_branches()] == [
+        ("image", (str(image),)),
+    ]
 
 
 def test_empty_and_blank_inline_corpus_short_circuits_graph(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,6 +245,25 @@ def test_empty_and_blank_inline_corpus_short_circuits_graph(monkeypatch: pytest.
 
     assert result.empty
     assert list(result.columns) == ["text", "content", "path", "page_number", "metadata"]
+
+
+@pytest.mark.parametrize("inline_texts", [[], ["", "  \n"]])
+def test_empty_inline_text_does_not_short_circuit_file_ingestion(
+    inline_texts: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "nemo_retriever.common.modality.txt.split._get_tokenizer",
+        lambda *args, **kwargs: _InlineTextTokenizer(),
+    )
+    document = tmp_path / "document.txt"
+    document.write_text("document", encoding="utf-8")
+
+    result = create_ingestor(run_mode="inprocess").files([str(document)]).texts(inline_texts).extract_txt().ingest()
+
+    assert result["text"].tolist() == ["document"]
+    assert result["path"].tolist() == [str(document.resolve())]
 
 
 def test_empty_batch_inline_corpus_returns_dataframe_without_starting_ray(monkeypatch: pytest.MonkeyPatch) -> None:

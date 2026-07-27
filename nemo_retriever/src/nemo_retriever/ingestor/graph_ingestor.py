@@ -492,7 +492,6 @@ class GraphIngestor(ingestor):
 
     def files(self, documents: Union[str, List[str]]) -> "GraphIngestor":
         """Set the input file paths or glob patterns."""
-        self._reject_inline_source_mix("files")
         self._documents = [documents] if isinstance(documents, str) else list(documents)
         return self
 
@@ -502,14 +501,12 @@ class GraphIngestor(ingestor):
         Each string is one logical source document. It receives a deterministic
         ``inline://`` identifier and flows through the normal text splitter,
         embedding, and sink stages without being written to a temporary file.
+        Inline text may be combined with file or buffer inputs; the manifest
+        planner routes each source through its matching extraction branch.
         """
-        if self._documents or self._buffers:
-            raise ValueError("texts() cannot be combined with files() or buffers(); use a separate ingestor.")
-        if "extract" in self._stage_order and self._extraction_mode != "text":
-            raise ValueError("texts() only supports text extraction; configure it with extract_txt().")
-
         self._inline_texts = normalize_inline_texts(texts)
-        self._extraction_mode = "text"
+        if "extract" not in self._stage_order:
+            self._extraction_mode = "text"
         self._text_params = self._text_params or TextChunkParams()
         self._record_stage("extract")
         return self
@@ -526,7 +523,6 @@ class GraphIngestor(ingestor):
 
         Only supported for ``run_mode='inprocess'``.
         """
-        self._reject_inline_source_mix("buffers")
         if isinstance(buffers, tuple) and len(buffers) == 2 and isinstance(buffers[0], str):
             self._buffers = [buffers]
         else:
@@ -567,8 +563,6 @@ class GraphIngestor(ingestor):
         configuration belongs on :class:`ASRParams` (pass ``asr_params=``
         or use :meth:`extract_audio`).
         """
-        if self._inline_texts is not None and extraction_mode != "text":
-            raise ValueError("extract() is incompatible with texts() unless extraction_mode='text'; use extract_txt().")
         unknown = set(kwargs) - set(ExtractParams.model_fields)
         if unknown:
             raise TypeError(
@@ -606,7 +600,6 @@ class GraphIngestor(ingestor):
         **kwargs: Any,
     ) -> "GraphIngestor":
         """Configure image extraction (extraction_mode='image')."""
-        self._reject_incompatible_inline_extraction("extract_image_files")
         self._extraction_mode = "image"
         self._extract_params = _resolve_api_key(_coerce(params, kwargs, default_factory=ExtractParams))
         self._apply_split_config(split_config)
@@ -622,7 +615,6 @@ class GraphIngestor(ingestor):
 
     def extract_html(self, params: Optional[HtmlChunkParams] = None, **kwargs: Any) -> "GraphIngestor":
         """Configure HTML extraction (extraction_mode='html')."""
-        self._reject_incompatible_inline_extraction("extract_html")
         self._extraction_mode = "html"
         self._html_params = _coerce(params, kwargs, default_factory=HtmlChunkParams)
         self._record_stage("extract")
@@ -637,7 +629,6 @@ class GraphIngestor(ingestor):
         **kwargs: Any,
     ) -> "GraphIngestor":
         """Configure audio extraction (extraction_mode='audio')."""
-        self._reject_incompatible_inline_extraction("extract_audio")
         self._extraction_mode = "audio"
         self._audio_chunk_params = _coerce(params, kwargs, default_factory=AudioChunkParams)
         self._asr_params = asr_params or ASRParams()
@@ -674,7 +665,6 @@ class GraphIngestor(ingestor):
         video pipeline — for audio-only chunking, use :meth:`extract_audio`
         directly with that file.
         """
-        self._reject_incompatible_inline_extraction("extract_video")
         self._extraction_mode = "auto"
         self._audio_chunk_params = _coerce(params, kwargs, default_factory=AudioChunkParams)
         self._asr_params = asr_params or ASRParams()
@@ -771,7 +761,12 @@ class GraphIngestor(ingestor):
             service-style ``(source, error)`` tuples.
         """
         return_failures = self._resolve_return_failures(params, kwargs)
-        if self._inline_texts is not None and not any(text.strip() for text in self._inline_texts):
+        if (
+            self._inline_texts is not None
+            and not self._documents
+            and not self._buffers
+            and not any(text.strip() for text in self._inline_texts)
+        ):
             result = empty_text_chunks_df()
             if self._run_mode == "batch":
                 self._rd_dataset = result
@@ -780,9 +775,12 @@ class GraphIngestor(ingestor):
             return self._finalize_ingest_result(result, return_failures=return_failures)
 
         default_branches = self._plan_default_extraction_branches()
+        execute_branches = default_branches is not None and (
+            len(default_branches) > 1 or self._has_mixed_inline_sources()
+        )
         if default_branches is None:
             single_effective = self._resolve_effective_extraction_inputs()
-        elif len(default_branches) == 1:
+        elif not execute_branches:
             single_effective = self._resolve_branch_extraction_inputs(default_branches[0])
         else:
             single_effective = None
@@ -802,7 +800,7 @@ class GraphIngestor(ingestor):
 
         post_extract_order = tuple(s for s in self._stage_order if s != "extract")
 
-        if default_branches is not None and len(default_branches) > 1:
+        if execute_branches:
             result = self._execute_extraction_branches(default_branches, post_extract_order=post_extract_order)
         else:
             if single_effective is None:
@@ -917,6 +915,7 @@ class GraphIngestor(ingestor):
             branches=branches,
             documents=self._documents,
             buffers=self._buffers,
+            inline_rows=self._inline_text_rows(),
             split_config=self._split_config,
             extract_params=self._extract_params,
             text_params=self._text_params,
@@ -953,13 +952,8 @@ class GraphIngestor(ingestor):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _reject_inline_source_mix(self, method_name: str) -> None:
-        if self._inline_texts is not None:
-            raise ValueError(f"{method_name}() cannot be combined with texts(); use a separate ingestor.")
-
-    def _reject_incompatible_inline_extraction(self, method_name: str) -> None:
-        if self._inline_texts is not None:
-            raise ValueError(f"{method_name}() is incompatible with texts(); use extract_txt() to configure chunking.")
+    def _has_mixed_inline_sources(self) -> bool:
+        return self._inline_texts is not None and bool(self._documents or self._buffers)
 
     def _inline_text_rows(self) -> list[dict[str, str]]:
         return [
@@ -982,6 +976,7 @@ class GraphIngestor(ingestor):
             except FileNotFoundError:
                 paths.append(os.fspath(document))
         paths.extend(name for name, _ in self._buffers)
+        paths.extend(inline_text_source_id(index) for index, _ in enumerate(self._inline_texts or []))
         return paths
 
     def _classified_input_paths(self) -> list[tuple[str, str | None]]:
@@ -1016,7 +1011,7 @@ class GraphIngestor(ingestor):
             raise ValueError(f"Input file type(s) do not match extraction_mode={extraction_mode!r}: {examples}")
 
     def _plan_default_extraction_branches(self) -> tuple[ExtractionBranchPlan, ...] | None:
-        if self._extraction_mode is not None:
+        if self._extraction_mode is not None and not self._has_mixed_inline_sources():
             return None
         manifest = build_input_manifest(self._configured_input_paths())
         branches = plan_extraction_branches(manifest)

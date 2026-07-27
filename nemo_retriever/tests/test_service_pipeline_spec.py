@@ -108,16 +108,39 @@ def test_service_inline_text_replaces_and_validates_inputs() -> None:
         ServiceIngestor(base_url="http://retriever.example").texts(["valid", None])
 
 
-def test_service_inline_text_rejects_source_mixing_and_non_text_extraction(tmp_path) -> None:
+@pytest.mark.parametrize("files_first", [True, False])
+def test_service_inline_text_composes_with_files_and_uses_auto_routing(tmp_path, files_first: bool) -> None:
     document = tmp_path / "document.txt"
     document.write_text("document", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="cannot be combined"):
-        ServiceIngestor(base_url="http://retriever.example", documents=[str(document)]).texts(["inline"])
-    with pytest.raises(ValueError, match="cannot be combined"):
-        ServiceIngestor(base_url="http://retriever.example").texts(["inline"]).files(str(document))
-    with pytest.raises(ValueError, match="incompatible with texts"):
-        ServiceIngestor(base_url="http://retriever.example").texts(["inline"]).extract_image_files()
+    ingestor = ServiceIngestor(base_url="http://retriever.example")
+    if files_first:
+        ingestor.files(str(document)).texts(["inline"])
+    else:
+        ingestor.texts(["inline"]).files(str(document))
+    ingestor.extract_txt(TextChunkParams(max_tokens=12))
+
+    inputs = ingestor._collect_inputs()
+    assert inputs[0] == document
+    assert inputs[1] == InMemoryUpload(
+        filename="inline://00000000",
+        content=b"inline",
+        content_type="text/plain; charset=utf-8",
+        classification_filename="inline-00000000.txt",
+    )
+    assert ingestor._pipeline_payload()["extraction_mode"] == "auto"
+    assert ingestor._pipeline_payload()["split_config"] == {"text": {"max_tokens": 12}}
+
+
+@pytest.mark.parametrize("inline_texts", [[], ["", "  \n"]])
+def test_service_empty_inline_text_does_not_hide_files(tmp_path, inline_texts: list[str]) -> None:
+    document = tmp_path / "document.txt"
+    document.write_text("document", encoding="utf-8")
+
+    ingestor = ServiceIngestor(base_url="http://retriever.example").files(str(document)).texts(inline_texts)
+
+    assert ingestor._collect_inputs()[0] == document
+    assert ingestor._pipeline_payload()["extraction_mode"] == "auto"
 
 
 @pytest.mark.parametrize("values", [[], ["", "  \n"]])

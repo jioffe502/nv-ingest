@@ -97,12 +97,12 @@ class TxtSplitCPUActor(AbstractOperator, CPUOperator):
             raw = row.get("bytes")
             text = row.get("text")
             path = row.get("path")
-            if (raw is None and text is None) or path is None:
+            if (not isinstance(raw, (bytes, bytearray)) and not isinstance(text, str)) or path is None:
                 continue
             path_str = str(path) if path is not None else ""
             try:
-                if raw is not None:
-                    chunk_df = txt_bytes_to_chunks_df(raw, path_str, params=params)
+                if isinstance(raw, (bytes, bytearray)):
+                    chunk_df = txt_bytes_to_chunks_df(bytes(raw), path_str, params=params)
                 elif isinstance(text, str):
                     chunk_df = text_to_chunks_df(text, path_str, params=params)
                 else:

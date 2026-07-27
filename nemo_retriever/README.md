@@ -146,8 +146,10 @@ chunks = (
 
 Each string is treated as a raw document and split with `TextChunkParams`
 defaults. Add `.extract_txt(custom_params)` after `.texts(...)` to override
-the chunk size or overlap. Inline text cannot be mixed with files or buffers in
-one ingestor. Inline corpora remain resident in client or driver memory, so
+the chunk size or overlap. Inline text can be combined with `.files(...)` and,
+in modes that support them, `.buffers(...)`; each source is routed through its
+matching extractor before the results enter the shared embedding and sink
+stages. Inline corpora remain resident in client or driver memory, so
 prefer file ingestion when the corpus may exceed the available memory.
 
 ### Optional extras

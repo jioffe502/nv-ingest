@@ -539,6 +539,8 @@ class ServiceIngestor(ingestor):
         so the worker can short-circuit identically.
         """
         spec = dict(self._pipeline_spec)
+        if self._has_mixed_inline_sources():
+            spec["extraction_mode"] = "auto"
         spec["result_schema"] = result_schema
         spec["return_embeddings"] = bool(return_embeddings or spec.get("return_embeddings", False))
         spec["return_images"] = bool(return_images or spec.get("return_images", False))
@@ -575,7 +577,6 @@ class ServiceIngestor(ingestor):
 
     def files(self, documents: Union[str, List[str]]) -> "ServiceIngestor":
         """Add document paths/URIs for processing."""
-        self._reject_inline_source_mix("files")
         if isinstance(documents, str):
             self._documents.append(documents)
         else:
@@ -583,14 +584,10 @@ class ServiceIngestor(ingestor):
         return self
 
     def texts(self, texts: Union[str, Sequence[str]]) -> Self:
-        """Set raw inline text documents for upload to the service."""
-        if self._documents or self._buffers:
-            raise ValueError("texts() cannot be combined with files() or buffers(); use a separate ingestor.")
-        if "extract" in self._pipeline_spec["stage_order"] and self._pipeline_spec["extraction_mode"] != "text":
-            raise ValueError("texts() only supports text extraction; configure it with extract_txt().")
-
+        """Set raw inline text documents, optionally alongside file or buffer uploads."""
         self._inline_texts = normalize_inline_texts(texts)
-        self._pipeline_spec["extraction_mode"] = "text"
+        if "extract" not in self._pipeline_spec["stage_order"]:
+            self._pipeline_spec["extraction_mode"] = "text"
         self._record_stage("extract")
         return self
 
@@ -603,7 +600,6 @@ class ServiceIngestor(ingestor):
         Each buffer must be ``(filename, BytesIO)`` so the server can record
         a meaningful source filename.
         """
-        self._reject_inline_source_mix("buffers")
         if isinstance(buffers, tuple):
             buffers = [buffers]
         for name, buf in buffers:
@@ -685,8 +681,6 @@ class ServiceIngestor(ingestor):
         service's server-owned defaults (and the allow-list is not tripped
         by client-side model defaults).
         """
-        if self._inline_texts is not None and extraction_mode != "text":
-            raise ValueError("extract() is incompatible with texts() unless extraction_mode='text'.")
         if params is not None or kwargs:
             from nemo_retriever.common.policy import _DEFAULT_ALLOWED_EXTRACT_KEYS
 
@@ -729,8 +723,6 @@ class ServiceIngestor(ingestor):
         self, params: Any = None, *, split_config: Optional[dict[str, Any]] = None, **kwargs: Any
     ) -> "ServiceIngestor":
         """Record image-file extraction (``extraction_mode='image'``)."""
-        if self._inline_texts is not None:
-            raise ValueError("extract_image_files() is incompatible with texts(); use extract_txt().")
         if params is not None or kwargs:
             from nemo_retriever.common.policy import _DEFAULT_ALLOWED_EXTRACT_KEYS
 
@@ -1167,7 +1159,12 @@ class ServiceIngestor(ingestor):
             self._resolve_execute_flags(params, kwargs)
         )
         del params, kwargs
-        if self._inline_texts is not None and not any(text.strip() for text in self._inline_texts):
+        if (
+            self._inline_texts is not None
+            and not self._documents
+            and not self._buffers
+            and not any(text.strip() for text in self._inline_texts)
+        ):
             self._document_ids.clear()
             self._last_run_elapsed_s = 0.0
             self._last_job_id = None
@@ -1580,13 +1577,17 @@ class ServiceIngestor(ingestor):
     # Internals
     # ------------------------------------------------------------------
 
-    def _reject_inline_source_mix(self, method_name: str) -> None:
-        if self._inline_texts is not None:
-            raise ValueError(f"{method_name}() cannot be combined with texts(); use a separate ingestor.")
+    def _has_mixed_inline_sources(self) -> bool:
+        return self._inline_texts is not None and bool(self._documents or self._buffers)
 
     def _collect_inputs(self) -> list[UploadInput]:
         """Gather filesystem and in-memory inputs for the service client."""
-        if self._inline_texts is not None and not any(text.strip() for text in self._inline_texts):
+        if (
+            self._inline_texts is not None
+            and not self._documents
+            and not self._buffers
+            and not any(text.strip() for text in self._inline_texts)
+        ):
             return []
 
         files: list[UploadInput] = [Path(p) for p in self._documents]
