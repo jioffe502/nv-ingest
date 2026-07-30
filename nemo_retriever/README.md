@@ -70,7 +70,7 @@ Install matching **ingestion client** and **ingestion runtime** wheels at the sa
 
 This creates a dedicated Python environment and installs the `nemo-retriever` PyPI package, the canonical distribution for the NeMo Retriever Library.
 
-If your PDF pipeline uses `extract_method="nemotron_parse"`, install the Nemotron Parse client dependencies with the `nemotron-parse` extra:
+If your PDF pipeline uses `method="nemotron_parse"`, install the Nemotron Parse client dependencies with the `nemotron-parse` extra:
 
 ```bash
 uv pip install "nemo-retriever[nemotron-parse]"
@@ -765,9 +765,12 @@ After installing the headers, restart the pipeline.
 
 ## Retriever Harness
 
-The developer harness runs code-owned benchmarks through `retriever harness`.
-Use `retriever harness list --runsets` to see available benchmark names and
-runsets, then run one benchmark with `retriever harness run <benchmark>`.
+The developer harness runs registered ingest and retrieval benchmarks through
+`retriever harness`. Start with the
+[harness guide](harness/README.md), then choose
+[library execution](harness/docs/library.md) or
+[service execution](harness/docs/service.md). Recurring workstation runs use the
+[nightly launcher](../ops/retriever-nightly/README.md).
 
 ### Ingest image storage
 
