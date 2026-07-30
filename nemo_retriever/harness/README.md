@@ -37,6 +37,14 @@ uv run --project nemo_retriever retriever harness show jp20_beir --json
 
 Use `retriever harness <command> --help` for the complete option list.
 
+Service-mode benchmarks wait for remote document completion without downloading
+retained result payloads. Their `rows_processed` value is the sum of
+`result_rows` from successful document-completion events; the independent
+VectorDB coverage checks remain the authoritative end-to-end validation. As a
+result, service `ingest_secs` measures remote ingestion completion rather than
+ingestion plus client-side result materialization. Service timing baselines
+recorded before this behavior changed are not directly comparable.
+
 ## Commands
 
 | Command | Purpose |
