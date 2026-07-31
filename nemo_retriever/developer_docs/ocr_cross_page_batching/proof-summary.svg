@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="380" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc">
+  <title id="title">Controlled local OCR batching results</title>
+  <desc id="desc">The patch reduces model calls per 128 crops from 128 to 16 and increases actor throughput from 34.4 to 55.8 crops per second and model throughput from 40.7 to 73.4 crops per second.</desc>
+  <rect width="1000" height="380" fill="#ffffff"/>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2937; }
+    .title { font-size: 22px; font-weight: 650; }
+    .panel { font-size: 16px; font-weight: 600; }
+    .label { font-size: 13px; }
+    .value { font-size: 15px; font-weight: 650; }
+    .note { font-size: 13px; fill: #4b5563; }
+    .grid { stroke: #d1d5db; stroke-width: 1; }
+    .axis { stroke: #6b7280; stroke-width: 1.2; }
+    .upstream { fill: #6b7280; }
+    .patch { fill: #76b900; }
+  </style>
+  <text x="40" y="34" class="title">Ray Data → OCRActor → local Nemotron OCR v2</text>
+
+  <text x="40" y="70" class="panel">Model invocations per 128 crops</text>
+  <line x1="70" y1="300" x2="445" y2="300" class="axis"/>
+  <line x1="70" y1="120" x2="445" y2="120" class="grid"/>
+  <line x1="70" y1="210" x2="445" y2="210" class="grid"/>
+  <text x="48" y="305" class="label">0</text>
+  <text x="40" y="215" class="label">64</text>
+  <text x="32" y="125" class="label">128</text>
+  <rect x="135" y="120" width="90" height="180" rx="3" class="upstream"/>
+  <rect x="290" y="277.5" width="90" height="22.5" rx="3" class="patch"/>
+  <text x="180" y="110" text-anchor="middle" class="value">128</text>
+  <text x="335" y="267" text-anchor="middle" class="value">16</text>
+  <text x="180" y="322" text-anchor="middle" class="label">Upstream</text>
+  <text x="335" y="322" text-anchor="middle" class="label">Patch</text>
+  <text x="257" y="352" text-anchor="middle" class="note">87.5% fewer calls; list size remains bounded at 8</text>
+
+  <text x="525" y="70" class="panel">Median throughput (crops/s)</text>
+  <line x1="555" y1="300" x2="955" y2="300" class="axis"/>
+  <line x1="555" y1="210" x2="955" y2="210" class="grid"/>
+  <line x1="555" y1="120" x2="955" y2="120" class="grid"/>
+  <text x="535" y="305" class="label">0</text>
+  <text x="525" y="215" class="label">40</text>
+  <text x="525" y="125" class="label">80</text>
+  <rect x="595" y="222.6" width="58" height="77.4" rx="3" class="upstream"/>
+  <rect x="659" y="174.5" width="58" height="125.5" rx="3" class="patch"/>
+  <rect x="785" y="208.5" width="58" height="91.5" rx="3" class="upstream"/>
+  <rect x="849" y="134.9" width="58" height="165.1" rx="3" class="patch"/>
+  <text x="624" y="214" text-anchor="middle" class="value">34.4</text>
+  <text x="688" y="166" text-anchor="middle" class="value">55.8</text>
+  <text x="814" y="200" text-anchor="middle" class="value">40.7</text>
+  <text x="878" y="126" text-anchor="middle" class="value">73.4</text>
+  <text x="656" y="322" text-anchor="middle" class="label">Actor · 1.62x</text>
+  <text x="846" y="322" text-anchor="middle" class="label">Model · 1.81x</text>
+  <rect x="700" y="345" width="12" height="12" class="upstream"/>
+  <text x="718" y="356" class="note">Upstream</text>
+  <rect x="800" y="345" width="12" height="12" class="patch"/>
+  <text x="818" y="356" class="note">Patch</text>
+</svg>

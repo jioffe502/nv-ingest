@@ -710,12 +710,25 @@ def ocr_page_elements(
     all_table: List[List[Dict[str, Any]]] = []
     all_chart: List[List[Dict[str, Any]]] = []
     all_infographic: List[List[Dict[str, Any]]] = []
-    all_text: List[str] = []
+    all_text_blocks: List[List[Dict[str, Any]]] = []
+    all_text: List[Optional[str]] = []
     all_ocr_meta: List[Dict[str, Any]] = []
+
+    # This bounds the outer crop list passed to the persistent model wrapper.
+    # Nemotron's internal detector_max_batch_size is a separate control.
+    local_invoke_batch_size = 0
+    local_jobs: Dict[str, List[Tuple[int, Any, str, List[float], np.ndarray]]] = {
+        "word": [],
+        "paragraph": [],
+    }
+    if not use_remote:
+        if inference_batch_size is None or inference_batch_size < 1:
+            raise ValueError(f"inference_batch_size must be set and greater than 0. Value: {inference_batch_size}")
+        local_invoke_batch_size = int(inference_batch_size)
 
     t0_total = time.perf_counter()
 
-    for row in batch_df.itertuples(index=False):
+    for row_index, row in enumerate(batch_df.itertuples(index=False)):
         table_items: List[Dict[str, Any]] = []
         chart_items: List[Dict[str, Any]] = []
         infographic_items: List[Dict[str, Any]] = []
@@ -756,7 +769,7 @@ def ocr_page_elements(
                 all_table.append(table_items)
                 all_chart.append(chart_items)
                 all_infographic.append(infographic_items)
-                all_text.append(None)
+                all_text_blocks.append(row_ocr_text_blocks)
                 all_ocr_meta.append({"timing": None, "error": upstream_err, "num_detections": 0, "counts_by_label": {}})
                 continue
 
@@ -831,72 +844,12 @@ def ocr_page_elements(
             else:
                 crops = _crop_all_from_page(page_image_b64, dets, row_wanted)
 
-                if inference_batch_size is None or inference_batch_size < 1:
-                    raise ValueError(
-                        f"inference_batch_size must be set and greater than 0. Value: {inference_batch_size}"
-                    )
-
-                local_batch_size = max(1, int(inference_batch_size))
-
                 # Tables require word-level merging; charts/infographics use paragraph-level.
-                # Group by merge level so each batched invoke uses one consistent setting.
-                local_jobs: Dict[str, List[Tuple[str, List[float], np.ndarray]]] = {"word": [], "paragraph": []}
+                # Group compatible crops across all page rows so each batched invoke
+                # uses one consistent setting while preserving source-row identity.
                 for label_name, bbox, crop_array in crops:
                     ml = "word" if label_name == "table" else "paragraph"
-                    local_jobs[ml].append((label_name, bbox, crop_array))
-
-                def _append_local_result(
-                    label_name: str, bbox: List[float], preds: Any, crop_hw: Tuple[int, int] = (0, 0)
-                ) -> None:
-                    blocks = _parse_ocr_result(preds)
-                    if label_name == "table":
-                        text = ""
-                        if use_table_structure:
-                            ts_match = _find_ts_detections_for_bbox(row, bbox)
-                            if ts_match is not None:
-                                ts_dets, ts_hw = ts_match
-                                text = join_table_structure_and_ocr_output(ts_dets, preds, ts_hw or crop_hw)
-                        if not text:
-                            text = _blocks_to_pseudo_markdown(blocks, crop_hw=crop_hw)
-                        if not text:
-                            text = _blocks_to_text(blocks)
-                    else:
-                        text = _blocks_to_text(blocks)
-                    entry = {"bbox_xyxy_norm": bbox, "text": text}
-                    if label_name == "table":
-                        table_items.append(entry)
-                    elif label_name == "chart":
-                        chart_items.append(entry)
-                    elif label_name == "infographic":
-                        infographic_items.append(entry)
-                    elif label_name in _TEXT_LABELS:
-                        row_ocr_text_blocks.extend(blocks)
-
-                for ml, jobs in local_jobs.items():
-                    if not jobs:
-                        continue
-                    for start in range(0, len(jobs), local_batch_size):
-                        batch_jobs = jobs[start : start + local_batch_size]
-                        batch_crops = [crop_array for _, _, crop_array in batch_jobs]
-
-                        # Try batched invoke first; if backend does not return one response
-                        # per input, fall back to per-item to preserve correctness.
-                        try:
-                            batch_preds = model.invoke(batch_crops, merge_level=ml)
-                        except Exception:
-                            batch_preds = None
-
-                        if isinstance(batch_preds, list) and len(batch_preds) == len(batch_jobs):
-                            for (label_name, bbox, crop_array), preds in zip(batch_jobs, batch_preds):
-                                _append_local_result(
-                                    label_name, bbox, preds, crop_hw=(crop_array.shape[0], crop_array.shape[1])
-                                )
-                        else:
-                            for label_name, bbox, crop_array in batch_jobs:
-                                preds = model.invoke(crop_array, merge_level=ml)
-                                _append_local_result(
-                                    label_name, bbox, preds, crop_hw=(crop_array.shape[0], crop_array.shape[1])
-                                )
+                    local_jobs[ml].append((row_index, row, label_name, bbox, crop_array))
 
         except BaseException as e:
             print(f"Warning: OCR failed: {type(e).__name__}: {e}")
@@ -907,13 +860,105 @@ def ocr_page_elements(
                 "traceback": "".join(traceback.format_exception(type(e), e, e.__traceback__)),
             }
 
-        # Assemble OCR'd text from text/title detections for this row.
-        # Use None as sentinel for "keep existing native text".
+        all_table.append(table_items)
+        all_chart.append(chart_items)
+        all_infographic.append(infographic_items)
+        all_text_blocks.append(row_ocr_text_blocks)
+        all_ocr_meta.append({"timing": None, "error": row_error, "num_detections": 0, "counts_by_label": {}})
+
+    def _record_local_error(row_index: int, exc: BaseException) -> None:
+        print(f"Warning: OCR failed: {type(exc).__name__}: {exc}")
+        all_ocr_meta[row_index]["error"] = {
+            "stage": "ocr_page_elements",
+            "type": exc.__class__.__name__,
+            "message": str(exc),
+            "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        }
+
+    def _append_local_result(
+        row_index: int,
+        row: Any,
+        label_name: str,
+        bbox: List[float],
+        preds: Any,
+        crop_hw: Tuple[int, int],
+    ) -> None:
+        blocks = _parse_ocr_result(preds)
+        if label_name == "table":
+            text = ""
+            if use_table_structure:
+                ts_match = _find_ts_detections_for_bbox(row, bbox)
+                if ts_match is not None:
+                    ts_dets, ts_hw = ts_match
+                    text = join_table_structure_and_ocr_output(ts_dets, preds, ts_hw or crop_hw)
+            if not text:
+                text = _blocks_to_pseudo_markdown(blocks, crop_hw=crop_hw)
+            if not text:
+                text = _blocks_to_text(blocks)
+        else:
+            text = _blocks_to_text(blocks)
+
+        entry = {"bbox_xyxy_norm": bbox, "text": text}
+        if label_name == "table":
+            all_table[row_index].append(entry)
+        elif label_name == "chart":
+            all_chart[row_index].append(entry)
+        elif label_name == "infographic":
+            all_infographic[row_index].append(entry)
+        elif label_name in _TEXT_LABELS:
+            all_text_blocks[row_index].extend(blocks)
+
+    if not use_remote:
+        for merge_level, jobs in local_jobs.items():
+            for start in range(0, len(jobs), local_invoke_batch_size):
+                batch_jobs = jobs[start : start + local_invoke_batch_size]
+                batch_crops = [crop_array for _, _, _, _, crop_array in batch_jobs]
+
+                # Try batched invoke first; if the backend does not return one
+                # response per input, fall back to per-item calls.
+                try:
+                    batch_preds = model.invoke(batch_crops, merge_level=merge_level)
+                except Exception:
+                    batch_preds = None
+
+                if isinstance(batch_preds, list) and len(batch_preds) == len(batch_jobs):
+                    for (row_index, row, label_name, bbox, crop_array), preds in zip(batch_jobs, batch_preds):
+                        try:
+                            _append_local_result(
+                                row_index,
+                                row,
+                                label_name,
+                                bbox,
+                                preds,
+                                crop_hw=(crop_array.shape[0], crop_array.shape[1]),
+                            )
+                        except BaseException as exc:
+                            _record_local_error(row_index, exc)
+                else:
+                    for row_index, row, label_name, bbox, crop_array in batch_jobs:
+                        try:
+                            preds = model.invoke(crop_array, merge_level=merge_level)
+                            _append_local_result(
+                                row_index,
+                                row,
+                                label_name,
+                                bbox,
+                                preds,
+                                crop_hw=(crop_array.shape[0], crop_array.shape[1]),
+                            )
+                        except BaseException as exc:
+                            _record_local_error(row_index, exc)
+
+    for row_index, row_ocr_text_blocks in enumerate(all_text_blocks):
+        # Use None as the sentinel for preserving existing native text.
         if extract_text and row_ocr_text_blocks:
             all_text.append(_blocks_to_text(row_ocr_text_blocks))
         else:
             all_text.append(None)
 
+        table_items = all_table[row_index]
+        chart_items = all_chart[row_index]
+        infographic_items = all_infographic[row_index]
         row_det_count = len(table_items) + len(chart_items) + len(infographic_items) + len(row_ocr_text_blocks)
         row_counts: Dict[str, int] = {}
         if table_items:
@@ -925,12 +970,8 @@ def ocr_page_elements(
         if row_ocr_text_blocks:
             row_counts["text"] = len(row_ocr_text_blocks)
 
-        all_table.append(table_items)
-        all_chart.append(chart_items)
-        all_infographic.append(infographic_items)
-        all_ocr_meta.append(
-            {"timing": None, "error": row_error, "num_detections": row_det_count, "counts_by_label": row_counts}
-        )
+        all_ocr_meta[row_index]["num_detections"] = row_det_count
+        all_ocr_meta[row_index]["counts_by_label"] = row_counts
 
     elapsed = time.perf_counter() - t0_total
 
