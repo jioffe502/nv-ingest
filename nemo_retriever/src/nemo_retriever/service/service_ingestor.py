@@ -94,7 +94,6 @@ from nemo_retriever.common.params import (
     StoreParams,
     VdbUploadParams,
     WebhookParams,
-    resolve_split_params,
 )
 from nemo_retriever.service.client import InMemoryUpload, RetrieverServiceClient, UploadInput
 
@@ -758,29 +757,21 @@ class ServiceIngestor(ingestor):
         self._record_stage("filter")
         return self
 
-    def split(self, params: dict[str, Any] | None = None, **kwargs: Any) -> "ServiceIngestor":
-        """Configure chunking by source modality.
+    def split(self, params: Any = None, **kwargs: Any) -> "ServiceIngestor":
+        """Record post-extract split / chunking configuration.
 
-        Accepts the same modality keys and parameter values as
-        :meth:`GraphIngestor.split`.
+        Accepts the same dict shape as :meth:`GraphIngestor.extract`'s
+        ``split_config`` keyword (``{"<source_type>": {"max_tokens": …}}``).
         """
-        if params is None:
-            config: dict[str, Any] = {}
-        elif isinstance(params, dict):
-            config = dict(params)
+        merged: dict[str, Any]
+        if isinstance(params, dict):
+            merged = dict(params)
+        elif params is None:
+            merged = {}
         else:
-            raise TypeError(f"split params must be a dict or None, got {type(params).__name__}")
-        config.update(kwargs)
-
-        resolved = resolve_split_params(config)
-        serialized: dict[str, Any] = {}
-        for key in config:
-            value = resolved[key]
-            if value is False:
-                serialized[key] = False
-            elif value is not None:
-                serialized[key] = value.model_dump(mode="json", exclude_none=True, exclude_unset=True)
-        self._pipeline_spec["split_config"] = serialized
+            merged = _params_to_dict(params)
+        merged.update(kwargs)
+        self._pipeline_spec["split_config"] = merged
         return self
 
     def pdf_split_config(self, pages_per_chunk: int = 32) -> "ServiceIngestor":

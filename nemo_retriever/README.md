@@ -145,8 +145,9 @@ chunks = (
 ```
 
 Each string is treated as a raw document and split with `TextChunkParams`
-defaults. Add `.split(text=custom_params)` to override the chunk size or
-overlap for every text source in the ingest. Inline text can be combined with
+defaults. To override chunking for every text source in the ingest, add
+`.extract(split_config={"text": {"max_tokens": 512, "overlap_tokens": 64}})`.
+Inline text can be combined with
 `.files(...)` and, in modes that support them, `.buffers(...)`; each source is
 routed through its matching extractor before the results enter the shared
 embedding and sink stages. Inline corpora remain resident in client or driver

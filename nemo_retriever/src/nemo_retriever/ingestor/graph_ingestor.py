@@ -668,23 +668,6 @@ class GraphIngestor(ingestor):
         self._record_stage("extract")
         return self
 
-    def split(self, params: dict[str, Any] | None = None, **kwargs: Any) -> Self:
-        """Configure chunking by source modality.
-
-        Values may be ``TextChunkParams``, ``HtmlChunkParams``, plain
-        dictionaries, or ``False``. Keyword names are source families such as
-        ``text``, ``html``, ``pdf``, ``audio``, ``image``, and ``video``.
-        """
-        if params is None:
-            config: dict[str, Any] = {}
-        elif isinstance(params, dict):
-            config = dict(params)
-        else:
-            raise TypeError(f"split params must be a dict or None, got {type(params).__name__}")
-        config.update(kwargs)
-        self._split_config = resolve_split_params(config)
-        return self
-
     # ------------------------------------------------------------------
     # Post-extraction transform stages
     # ------------------------------------------------------------------

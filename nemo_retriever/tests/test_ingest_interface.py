@@ -173,7 +173,7 @@ def test_texts_can_mix_with_text_files(
     else:
         ingestor.texts(["inline"]).files([str(document)])
 
-    result = ingestor.split(text=TextChunkParams(max_tokens=10)).ingest()
+    result = ingestor.extract(split_config={"text": {"max_tokens": 10}}).ingest()
 
     assert result["text"].tolist() == ["document", "inline"]
     assert result["path"].tolist() == [str(document.resolve()), "inline://00000000"]
@@ -188,7 +188,7 @@ def test_texts_can_mix_with_text_buffers(monkeypatch: pytest.MonkeyPatch) -> Non
         create_ingestor(run_mode="inprocess")
         .texts(["inline"])
         .buffers(("document.txt", BytesIO(b"document")))
-        .split(text=TextChunkParams(max_tokens=10))
+        .extract(split_config={"text": {"max_tokens": 10}})
         .ingest()
     )
 
@@ -295,7 +295,7 @@ def test_graph_ingestor_action_methods_materialize_default_params() -> None:
     ingestor.extract_image_files()
     assert isinstance(ingestor._extract_params, ExtractParams)
 
-    ingestor.split(text=TextChunkParams(max_tokens=512))
+    ingestor.extract(split_config={"text": {"max_tokens": 512}})
     assert isinstance(ingestor._split_config["text"], TextChunkParams)
 
     ingestor.extract_html()
@@ -484,7 +484,7 @@ def test_extract_audio_does_not_enable_post_extraction_chunking_by_default() -> 
     assert audio_ingestor._split_config["audio"] is None
 
 
-def test_split_configures_automatically_routed_text(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_extract_split_configures_automatically_routed_text(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "nemo_retriever.common.modality.txt.split._get_tokenizer", lambda *args, **kwargs: _InlineTextTokenizer()
     )
@@ -492,7 +492,7 @@ def test_split_configures_automatically_routed_text(monkeypatch: pytest.MonkeyPa
     result = (
         GraphIngestor(run_mode="inprocess", show_progress=False)
         .texts(["one two three"])
-        .split(text=TextChunkParams(max_tokens=2))
+        .extract(split_config={"text": {"max_tokens": 2}})
         .ingest()
     )
 

@@ -165,11 +165,6 @@ class ingestor:
         _ = _merge_params(params, kwargs)
         self._not_implemented("extract_image_files")
 
-    def split(self, params: dict[str, Any] | None = None, **kwargs: Any) -> Self:
-        """Configure chunking by source modality."""
-        _ = _merge_params(params, kwargs)
-        self._not_implemented("split")
-
     def filter(self) -> "ingestor":
         """Record a filter task configuration."""
         self._not_implemented("filter")

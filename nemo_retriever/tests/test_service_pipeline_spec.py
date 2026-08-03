@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from nemo_retriever.common.params import DedupParams, EmbedParams, ExtractParams, TextChunkParams
+from nemo_retriever.common.params import DedupParams, EmbedParams, ExtractParams
 from nemo_retriever.service.config import PipelineOverridesConfig
 from nemo_retriever.common.schemas.pipeline_spec import PipelineSpec
 from nemo_retriever.common.policy import PolicyError, validate_pipeline_spec
@@ -79,7 +79,7 @@ def test_service_inline_text_builds_in_memory_uploads(monkeypatch: pytest.Monkey
     ingestor = ServiceIngestor(base_url="http://retriever.example")
     monkeypatch.setattr("tempfile.mkdtemp", lambda *args, **kwargs: pytest.fail("inline text must remain in memory"))
 
-    ingestor.texts(["first", "first"]).split(text=TextChunkParams(max_tokens=12))
+    ingestor.texts(["first", "first"]).extract(split_config={"text": {"max_tokens": 12}})
 
     assert ingestor._collect_inputs() == [
         InMemoryUpload(
@@ -119,7 +119,7 @@ def test_service_inline_text_composes_with_files_and_uses_auto_routing(tmp_path,
         ingestor.files(str(document)).texts(["inline"])
     else:
         ingestor.texts(["inline"]).files(str(document))
-    ingestor.split(text=TextChunkParams(max_tokens=12))
+    ingestor.extract(split_config={"text": {"max_tokens": 12}})
 
     inputs = ingestor._collect_inputs()
     assert inputs[0] == document
@@ -282,16 +282,10 @@ def test_pdf_split_config_round_trips_via_spec() -> None:
 
 def test_split_method_records_split_config() -> None:
     ing = ServiceIngestor(base_url="http://example:7670")
-    ing.split(
-        pdf={"max_tokens": 512, "overlap_tokens": 32},
-        text=TextChunkParams(max_tokens=256),
-    )
+    ing.split({"pdf": {"max_tokens": 512, "overlap_tokens": 32}})
     payload = ing._pipeline_payload()
     assert payload is not None
-    assert payload["split_config"] == {
-        "pdf": {"max_tokens": 512, "overlap_tokens": 32},
-        "text": {"max_tokens": 256},
-    }
+    assert payload["split_config"] == {"pdf": {"max_tokens": 512, "overlap_tokens": 32}}
 
 
 def test_all_tasks_seeds_canonical_stage_order() -> None:

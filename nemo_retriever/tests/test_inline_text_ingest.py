@@ -70,7 +70,7 @@ def test_inline_text_runs_split_embed_and_vdb_graph(monkeypatch: pytest.MonkeyPa
     result = (
         GraphIngestor(run_mode="inprocess", show_progress=False)
         .texts(["one two three", "one two three"])
-        .split(text=TextChunkParams(max_tokens=2))
+        .extract(split_config={"text": {"max_tokens": 2}})
         .embed()
         .vdb_upload()
         .ingest()
@@ -99,9 +99,17 @@ def test_batch_inline_text_matches_text_file(tmp_path) -> None:
 
     try:
         file_result = (
-            GraphIngestor(run_mode="batch", show_progress=False).files([str(document)]).split(text=params).ingest()
+            GraphIngestor(run_mode="batch", show_progress=False)
+            .files([str(document)])
+            .extract(split_config={"text": params})
+            .ingest()
         )
-        inline_result = GraphIngestor(run_mode="batch", show_progress=False).texts([text]).split(text=params).ingest()
+        inline_result = (
+            GraphIngestor(run_mode="batch", show_progress=False)
+            .texts([text])
+            .extract(split_config={"text": params})
+            .ingest()
+        )
     finally:
         ray.shutdown()
 
@@ -121,7 +129,7 @@ def test_batch_inline_text_ingests_alongside_text_file(tmp_path) -> None:
             GraphIngestor(run_mode="batch", show_progress=False)
             .files([str(document)])
             .texts(["from inline"])
-            .split(text=TextChunkParams(max_tokens=10))
+            .extract(split_config={"text": {"max_tokens": 10}})
             .ingest()
         )
     finally:
