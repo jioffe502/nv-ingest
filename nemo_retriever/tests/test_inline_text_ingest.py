@@ -58,8 +58,12 @@ def test_inline_text_runs_split_embed_and_vdb_graph(monkeypatch: pytest.MonkeyPa
 
     def fake_build_graph(**kwargs: Any) -> Graph:
         captured.update(kwargs)
-        text_params = kwargs["split_config"]["text"] or kwargs["text_params"]
-        return Graph() >> TxtSplitActor(params=text_params) >> _FakeEmbedOperator() >> _FakeVdbOperator()
+        return (
+            Graph()
+            >> TxtSplitActor(params=kwargs["split_config"]["text"])
+            >> _FakeEmbedOperator()
+            >> _FakeVdbOperator()
+        )
 
     monkeypatch.setattr("nemo_retriever.ingestor.graph_ingestor.build_graph", fake_build_graph)
 

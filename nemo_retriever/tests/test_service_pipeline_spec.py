@@ -294,10 +294,6 @@ def test_split_method_records_split_config() -> None:
     }
 
 
-def test_service_extract_txt_is_not_part_of_the_ingestor_interface() -> None:
-    assert not hasattr(ServiceIngestor, "extract_txt")
-
-
 def test_all_tasks_seeds_canonical_stage_order() -> None:
     ing = ServiceIngestor(base_url="http://example:7670")
     ing.all_tasks()

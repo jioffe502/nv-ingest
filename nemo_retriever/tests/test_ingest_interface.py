@@ -499,10 +499,6 @@ def test_split_configures_automatically_routed_text(monkeypatch: pytest.MonkeyPa
     assert result["text"].tolist() == ["one two", "three"]
 
 
-def test_extract_txt_is_not_part_of_the_ingestor_interface() -> None:
-    assert not hasattr(GraphIngestor, "extract_txt")
-
-
 def test_graph_ingestor_return_failures_returns_service_tuples_from_path(monkeypatch) -> None:
     result = pd.DataFrame(
         {

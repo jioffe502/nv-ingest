@@ -758,7 +758,7 @@ class ServiceIngestor(ingestor):
         self._record_stage("filter")
         return self
 
-    def split(self, params: Any = None, **kwargs: Any) -> "ServiceIngestor":
+    def split(self, params: dict[str, Any] | None = None, **kwargs: Any) -> "ServiceIngestor":
         """Configure chunking by source modality.
 
         Accepts the same modality keys and parameter values as

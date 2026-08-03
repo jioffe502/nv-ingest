@@ -1381,12 +1381,6 @@ class GraphIngestor(ingestor):
             self._stage_order.append(name)
 
     def _apply_split_config(self, split_config: dict[str, Any] | None) -> None:
-        """Resolve split_config when the caller opts in.
-
-        Typed shortcuts (extract_audio, extract_video, extract_image_files)
-        leave the constructor's all-None default in place when split_config is
-        omitted. Only the unified .extract() resolves None into the natural
-        default-on set.
-        """
+        """Resolve an explicitly supplied split configuration."""
         if split_config is not None:
             self._split_config = resolve_split_params(split_config)
