@@ -141,13 +141,92 @@ The one-row variation appeared in one patch replicate only, so it was not a
 stable patch effect. Every run had the same two non-fatal overlength embedding
 failures, zero OCR warnings, and zero OOMs.
 
+### Full ViDoRe v3 confirmation
+
+The patched local path also completed all eight ViDoRe v3 runfiles: 189 PDFs,
+19,252 pages, 19,252 output rows, and 14,514 scored queries. Total ingest time
+was 2,077.167 seconds (9.268 pages/s) on one H100, with Ray page-row batches of
+24 and OCR crop lists capped at 8. All eight runs passed with zero OCR errors or
+OOMs. The complete harness command, including query evaluation, took 3,134
+seconds wall time.
+
+The nightly values below are the rounded reference supplied for the same
+datasets; upstream was intentionally not rerun. These deltas are therefore a
+quality confirmation, not a causal A/B result. Speedup attribution comes from
+the controlled actor and BO767 comparisons above.
+
+| Dataset | Pages | Ingest | Pages/s | Recall@5 | Delta vs nightly | nDCG@10 | Delta vs nightly |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `computer_science` | 1,360 | 171.200 s | 7.944 | 0.5995 | -0.0015 | 0.7091 | -0.0009 |
+| `energy` | 2,225 | 257.985 s | 8.625 | 0.5785 | +0.0005 | 0.5839 | -0.0001 |
+| `finance_en` | 2,942 | 343.808 s | 8.557 | 0.4957 | -0.0023 | 0.5475 | -0.0005 |
+| `finance_fr` | 2,384 | 279.635 s | 8.525 | 0.3263 | -0.0007 | 0.3518 | +0.0008 |
+| `hr` | 1,110 | 151.708 s | 7.317 | 0.4529 | -0.0001 | 0.5312 | +0.0002 |
+| `industrial` | 5,244 | 536.309 s | 9.778 | 0.3482 | +0.0002 | 0.3816 | -0.0004 |
+| `pharmaceuticals` | 2,313 | 212.344 s | 10.893 | 0.5447 | -0.0043 | 0.6043 | -0.0027 |
+| `physics` | 1,674 | 124.178 s | 13.481 | 0.3703 | +0.0003 | 0.4539 | +0.0019 |
+
+| Macro average | Recall@5 | Delta vs nightly | nDCG@10 | Delta vs nightly |
+|---|---:|---:|---:|---:|
+| English | 0.4843 | -0.0007 | 0.5445 | -0.0005 |
+| All datasets | 0.4645 | -0.0005 | 0.5204 | -0.0006 |
+
+The largest individual shift was `pharmaceuticals` (-0.0043 Recall@5 and
+-0.0027 nDCG@10). The reference is rounded to three decimals and is a separate
+nightly run, so no tighter equivalence claim is made.
+
+### Self-hosted NIM and service compatibility
+
+The current `service-mode.compose.yaml` pins the relevant core services to:
+
+| Service | Image | Local digest |
+|---|---|---|
+| Page elements and table structure | `nemotron-object-detection:2.0.0` | `sha256:de21875223e4cc26b79e44a4f30ff06dcc8fe97c731c6b9f500a48eb54fa99bf` |
+| OCR | `nemotron-ocr-v2:2.0.0` | `sha256:3ac2ea60a83d7aab6275e08ea27a959de46fdab0689594f54f8374f590f416b8` |
+| Embedding | `llama-nemotron-embed-vl-1b-v2:1.12.0` | `sha256:58c40b920840be6e2f4ad5d77c32c65d61e048070fe45d51fb4bdb6f84a71e21` |
+
+All four containers were self-hosted on separate H100s. The Compose default
+`NIM_PIPELINE_MAX_BATCH_SIZE=1` was retained; this validation did not tune NIM
+internals or use an unbounded request.
+
+A direct OCR endpoint probe sent one ordered list containing two fixed
+paragraph crops. It received two results in the same order and preserved both
+crop anchors. This proves the deployed OCR NIM's bounded list-input contract;
+it does not prove that the unchanged application remote path forms cross-page
+lists.
+
+The same two-PDF `computer_science` workload then passed in direct batch mode
+and through the full standalone service API:
+
+| Path | Rows | Ingest | Pages/s | Queries | Query p50/p95 | Recall@5 | nDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Self-hosted NIMs, batch CLI | 1,360 | 105.420 s | 12.901 | 1,290 | 177.385 / 206.733 ms | 0.5907 | 0.6998 |
+| Full service mode, same NIMs | 1,360 | 111.321 s | 12.217 | 1,290 | 59.490 / 66.031 ms | 0.6001 | 0.7100 |
+
+Both paths completed without container, OCR, or OOM errors. Their metrics are
+not treated as replicates: batch and service use different orchestration and
+vector-store paths. The service result is deployment compatibility evidence,
+not evidence that this local-only patch speeds up the remote OCR path.
+
+Three current Compose portability/configuration issues required `/tmp`-only
+workarounds; none is changed by this PR:
+
+- this Docker daemon has no named `nvidia` runtime, so the override used
+  `runtime: runc` while retaining Compose GPU device reservations;
+- the non-root NIM containers could not write the root-owned named model-store
+  volumes, so writable `/tmp` bind mounts were used;
+- the generated service config includes `local_models.extract.use_graphic_elements`,
+  which the current `ServiceConfig` rejects, so only that invalid key was
+  removed from a temporary config before the service run.
+
 ## Scope and validation
 
-This record supports the local Nemotron OCR v2 change only. Remote OCR NIM
-batching remains follow-up work. JP20 was not run, byte-identical real OCR
-output is not claimed, and the end-to-end runs did not continuously sample GPU
-peak memory. The bounded batch of 8 was OOM-free on the tested H100; smaller GPU
-classes require separate sizing evidence.
+This record supports the local Nemotron OCR v2 change only. The remote NIM and
+service runs establish compatibility but do not change or attribute speedup to
+the remote OCR path. JP20 was not run, byte-identical real OCR output is not
+claimed, and the end-to-end runs did not continuously sample GPU peak memory.
+The bounded batch of 8 was OOM-free on the tested H100; smaller GPU classes
+require separate sizing evidence.
 
 The BO767 command was repeated against exported upstream and patch source
 trees, changing only `PYTHONPATH` and the output/run identifiers:
@@ -166,9 +245,24 @@ retriever harness run bo767_beir --mode batch --output-dir <run> \
 Validation on the rebased PR worktree:
 
 - expected upstream red: 1 failed in 0.08s;
-- focused patch suite: 4 passed in 0.61s;
+- focused patch suite: 4 passed in 0.60s;
 - related actor, graph, OCR, table, and video tests: 327 passed, 7 skipped;
 - all pre-commit hooks and required PR validation checks passed.
+
+The expanded local ViDoRe run used:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
+VLLM_DEEP_GEMM_WARMUP=skip retriever harness run-files \
+  nemo_retriever/harness/runfiles/vidore_v3_{computer_science,energy,finance_en,finance_fr,hr,industrial,pharmaceuticals,physics}_beir.json \
+  --dataset-paths <dataset_paths.yaml> --mode batch \
+  --output-dir <output> --session-name issue-2323-vidore-local-batch --json
+```
+
+For the NIM checks, the same `computer_science` runfile was invoked first with
+`--mode batch` and the four `localhost:8001` through `:8004` endpoint
+overrides, then with `--mode service --service-endpoint http://localhost:7670`.
+The full service image was built from the rebased PR commit.
 
 ViDoRe used source commit `611af594818342b655b5e9ae89c66aea2cbc3963`.
 BO767 compared upstream `52886112cafab4c4bca1cda0d4f588785adfe4d3`
@@ -176,3 +270,10 @@ with patch `eaed9262780c45c1dce9e9a929357f2bcd886234`. Both used lock SHA-256
 `d9651104d0a10277642fa7e4794976948177f24c273da203e6bb694107d20bf6`.
 Installed versions were `nemotron-ocr==2.0.1.dev20260720042916`,
 `ray==2.55.1`, and `torch==2.11.0+cu130`.
+
+The expanded ViDoRe suite was measured at pre-rebase commit
+`3c4ddef05ac8497855f346e68ef9c573e980fb0b`. Rebase added one upstream
+service-only commit; the patched `shared.py` SHA-256 remained
+`68cd70abbe1ef1beb1cac3fdd197053dfba946c63dd69f8c07623ff2b585ce72`.
+The NIM and service checks used rebased commit
+`5a8ebd9e5468be4a72ae9888a7d0cba173e44e96`.
