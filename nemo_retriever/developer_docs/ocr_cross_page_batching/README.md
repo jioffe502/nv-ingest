@@ -185,9 +185,14 @@ The current `service-mode.compose.yaml` pins the relevant core services to:
 | OCR | `nemotron-ocr-v2:2.0.0` | `sha256:3ac2ea60a83d7aab6275e08ea27a959de46fdab0689594f54f8374f590f416b8` |
 | Embedding | `llama-nemotron-embed-vl-1b-v2:1.12.0` | `sha256:58c40b920840be6e2f4ad5d77c32c65d61e048070fe45d51fb4bdb6f84a71e21` |
 
-All four containers were self-hosted on separate H100s. The Compose default
-`NIM_PIPELINE_MAX_BATCH_SIZE=1` was retained; this validation did not tune NIM
-internals or use an unbounded request.
+The first compatibility smoke placed the four containers on separate H100s.
+A subsequent full-suite comparison placed page detection, table structure,
+OCR, and embedding together on GPU 0. Docker device requests for every
+container named only device `0`; sampled memory and utilization on GPUs 1-7
+remained zero. GPU 0 peaked at 16,331 MiB and 100% utilization. The Compose
+default `NIM_PIPELINE_MAX_BATCH_SIZE=1` was retained for page detection, table
+structure, and OCR; this validation did not tune NIM internals or use an
+unbounded request.
 
 A direct OCR endpoint probe sent one ordered list containing two fixed
 paragraph crops. It received two results in the same order and preserved both
@@ -195,8 +200,51 @@ crop anchors. This proves the deployed OCR NIM's bounded list-input contract;
 it does not prove that the unchanged application remote path forms cross-page
 lists.
 
-The same two-PDF `computer_science` workload then passed in direct batch mode
-and through the full standalone service API:
+#### Full one-GPU batch comparison
+
+The one-GPU NIM deployment completed the same eight ViDoRe runfiles as the
+one-GPU local-HF path: 19,252 pages and 14,514 queries, with no failed run,
+container restart, OCR error, or OOM. Both used the batch CLI and LanceDB. The
+NIM harness ran with an empty `CUDA_VISIBLE_DEVICES`, ensuring that all model
+work went through the four endpoints on GPU 0.
+
+| Dataset | NIM ingest | NIM pages/s | Local-HF ingest | NIM time effect | Recall@5 delta vs local | nDCG@10 delta vs local |
+|---|---:|---:|---:|---:|---:|---:|
+| `computer_science` | 149.002 s | 9.127 | 171.200 s | -12.97% | -0.0095 | -0.0100 |
+| `energy` | 237.900 s | 9.353 | 257.985 s | -7.79% | -0.0147 | -0.0169 |
+| `finance_en` | 353.536 s | 8.322 | 343.808 s | +2.83% | -0.0163 | -0.0217 |
+| `finance_fr` | 269.278 s | 8.853 | 279.635 s | -3.70% | -0.0185 | -0.0205 |
+| `hr` | 145.796 s | 7.613 | 151.708 s | -3.90% | -0.0097 | -0.0124 |
+| `industrial` | 510.831 s | 10.266 | 536.309 s | -4.75% | +0.0009 | +0.0016 |
+| `pharmaceuticals` | 200.500 s | 11.536 | 212.344 s | -5.58% | +0.0018 | +0.0036 |
+| `physics` | 127.785 s | 13.100 | 124.178 s | +2.90% | -0.0170 | -0.0111 |
+
+The total NIM ingest was 1,994.628 seconds (9.652 pages/s), versus 2,077.167
+seconds (9.268 pages/s) for local HF: **3.97% less ingest time and 4.14% higher
+throughput**. Six datasets favored NIM and two favored local HF. This is a
+single full-suite backend comparison, not a controlled attribution to the
+local-only batching patch.
+
+Relevance did not establish parity:
+
+| Macro average | NIM Recall@5 | Local HF | Nightly | NIM nDCG@10 | Local HF | Nightly |
+|---|---:|---:|---:|---:|---:|---:|
+| English | 0.4751 | 0.4843 | 0.485 | 0.5350 | 0.5445 | 0.545 |
+| All datasets | 0.4541 | 0.4645 | 0.465 | 0.5095 | 0.5204 | 0.521 |
+
+The NIM gap versus local HF was -0.0092/-0.0095 on English Recall@5/nDCG@10
+and -0.0104/-0.0109 across all datasets. A preceding NIM
+`computer_science` pilot scored 0.5975/0.7070, while the suite repeat scored
+0.5901/0.6990, so real run-to-run variation exists. The broadly lower suite
+macro still requires backend isolation before treating the paths as equivalent.
+NIM query p50 was 198.4-201.5 ms across datasets, versus 41.0-47.5 ms for
+local HF; query time is outside ingest pages/s.
+
+#### Four-GPU and service references
+
+The initial bounded smoke used only the two-PDF `computer_science` workload to
+verify deployment compatibility before spending time on the full suite. It
+passed in direct batch mode and through the full standalone service API:
 
 | Path | Rows | Ingest | Pages/s | Queries | Query p50/p95 | Recall@5 | nDCG@10 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -206,10 +254,16 @@ and through the full standalone service API:
 Both paths completed without container, OCR, or OOM errors. Their metrics are
 not treated as replicates: batch and service use different orchestration and
 vector-store paths. The service result is deployment compatibility evidence,
-not evidence that this local-only patch speeds up the remote OCR path.
+not evidence that this local-only patch speeds up the remote OCR path. The
+separately supplied latest service baseline is 10.11 pages/s for
+`computer_science`; it is retained as an operational reference rather than
+mixed into the one-GPU full-suite comparison. A new full eight-dataset service
+run was not performed because the nightly suite already supplies that service
+relevance reference.
 
 Three current Compose portability/configuration issues required `/tmp`-only
-workarounds; none is changed by this PR:
+workarounds; none is changed by this PR and all are tracked in
+[#2424](https://github.com/NVIDIA/NeMo-Retriever/issues/2424):
 
 - this Docker daemon has no named `nvidia` runtime, so the override used
   `runtime: runc` while retaining Compose GPU device reservations;
@@ -223,9 +277,10 @@ workarounds; none is changed by this PR:
 
 This record supports the local Nemotron OCR v2 change only. The remote NIM and
 service runs establish compatibility but do not change or attribute speedup to
-the remote OCR path. JP20 was not run, byte-identical real OCR output is not
-claimed, and the end-to-end runs did not continuously sample GPU peak memory.
-The bounded batch of 8 was OOM-free on the tested H100; smaller GPU classes
+the remote OCR path. JP20 was not run and byte-identical real OCR output is not
+claimed. The one-GPU NIM suite continuously sampled all eight GPUs; the older
+local-HF and BO767 end-to-end runs did not. The bounded local-HF batch of 8 and
+the four colocated NIMs were OOM-free on the tested H100; smaller GPU classes
 require separate sizing evidence.
 
 The BO767 command was repeated against exported upstream and patch source
@@ -262,7 +317,19 @@ VLLM_DEEP_GEMM_WARMUP=skip retriever harness run-files \
 For the NIM checks, the same `computer_science` runfile was invoked first with
 `--mode batch` and the four `localhost:8001` through `:8004` endpoint
 overrides, then with `--mode service --service-endpoint http://localhost:7670`.
-The full service image was built from the rebased PR commit.
+The full service image was built from the rebased PR commit. The one-GPU full
+suite used the same eight runfiles shown above and these endpoint overrides:
+
+```bash
+CUDA_VISIBLE_DEVICES= retriever harness run-files <eight-runfiles> \
+  --dataset-paths <dataset_paths.yaml> --mode batch \
+  --output-dir <output> --session-name issue-2323-one-gpu-nim-full-vidore \
+  --set ingest.extract.page_elements_invoke_url=http://localhost:8001/v1/page-elements \
+  --set ingest.extract.table_structure_invoke_url=http://localhost:8002/v1/table-structure \
+  --set ingest.extract.ocr_invoke_url=http://localhost:8003/v1/ocr \
+  --set ingest.embed.embed_invoke_url=http://localhost:8004/v1/embeddings \
+  --set query.embed_invoke_url=http://localhost:8004/v1/embeddings --json
+```
 
 ViDoRe used source commit `611af594818342b655b5e9ae89c66aea2cbc3963`.
 BO767 compared upstream `52886112cafab4c4bca1cda0d4f588785adfe4d3`
@@ -276,4 +343,7 @@ The expanded ViDoRe suite was measured at pre-rebase commit
 service-only commit; the patched `shared.py` SHA-256 remained
 `68cd70abbe1ef1beb1cac3fdd197053dfba946c63dd69f8c07623ff2b585ce72`.
 The NIM and service checks used rebased commit
-`5a8ebd9e5468be4a72ae9888a7d0cba173e44e96`.
+`5a8ebd9e5468be4a72ae9888a7d0cba173e44e96`. The full one-GPU NIM suite used
+commit `451ba127ea6fba72720c7f66753e2b73273eff6f`, whose merge base was current
+`upstream/main` at `3d9e26f1a2d2fd73af499bb7a9ef7fe855739841`; the harness command took
+5,456.73 seconds wall time including serial query evaluation.
