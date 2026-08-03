@@ -240,26 +240,53 @@ macro still requires backend isolation before treating the paths as equivalent.
 NIM query p50 was 198.4-201.5 ms across datasets, versus 41.0-47.5 ms for
 local HF; query time is outside ingest pages/s.
 
-#### Four-GPU and service references
+#### Full four-GPU service comparison
 
-The initial bounded smoke used only the two-PDF `computer_science` workload to
-verify deployment compatibility before spending time on the full suite. It
-passed in direct batch mode and through the full standalone service API:
+The standalone service completed the full eight-dataset suite with page
+detection, table structure, OCR, and embedding assigned to GPUs 0-3. GPUs 4-7
+remained unused. The model services stayed persistent across the suite; only
+retriever and vector-store state was reset between datasets.
 
-| Path | Rows | Ingest | Pages/s | Queries | Query p50/p95 | Recall@5 | nDCG@10 |
+| Dataset | Service ingest | Pages/s | Query p50 | Recall@5 | Delta vs nightly | nDCG@10 | Delta vs nightly |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Self-hosted NIMs, batch CLI | 1,360 | 105.420 s | 12.901 | 1,290 | 177.385 / 206.733 ms | 0.5907 | 0.6998 |
-| Full service mode, same NIMs | 1,360 | 111.321 s | 12.217 | 1,290 | 59.490 / 66.031 ms | 0.6001 | 0.7100 |
+| `computer_science` | 114.229 s | 11.906 | 58.719 ms | 0.6001 | -0.0009 | 0.7100 | +0.0000 |
+| `energy` | 125.725 s | 17.697 | 65.943 ms | 0.5660 | -0.0120 | 0.5684 | -0.0156 |
+| `finance_en` | 217.587 s | 13.521 | 61.112 ms | 0.4794 | -0.0186 | 0.5259 | -0.0221 |
+| `finance_fr` | 185.335 s | 12.863 | 61.014 ms | 0.3082 | -0.0188 | 0.3313 | -0.0197 |
+| `hr` | 68.946 s | 16.100 | 60.261 ms | 0.4480 | -0.0050 | 0.5234 | -0.0076 |
+| `industrial` | 279.011 s | 18.795 | 65.456 ms | 0.3490 | +0.0010 | 0.3831 | +0.0011 |
+| `pharmaceuticals` | 101.669 s | 22.750 | 69.020 ms | 0.5475 | -0.0015 | 0.6074 | +0.0004 |
+| `physics` | 52.073 s | 32.147 | 65.281 ms | 0.3667 | -0.0033 | 0.4518 | -0.0002 |
 
-Both paths completed without container, OCR, or OOM errors. Their metrics are
-not treated as replicates: batch and service use different orchestration and
-vector-store paths. The service result is deployment compatibility evidence,
-not evidence that this local-only patch speeds up the remote OCR path. The
-separately supplied latest service baseline is 10.11 pages/s for
-`computer_science`; it is retained as an operational reference rather than
-mixed into the one-GPU full-suite comparison. A new full eight-dataset service
-run was not performed because the nightly suite already supplies that service
-relevance reference.
+Total service ingest was 1,144.575 seconds (16.820 pages/s): **44.90% less
+ingest time and 81.48% higher throughput than one-GPU local HF**, and 42.62%
+less time and 74.27% higher throughput than the one-GPU NIM deployment.
+Service query p50 stayed between 58.7 and 69.0 ms, versus 41.0-47.5 ms for
+local HF and 198.4-201.5 ms for direct one-GPU NIM batch mode.
+
+| Macro average | Service Recall@5 | Local HF | NIM | Nightly | Service nDCG@10 | Local HF | NIM | Nightly |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| English | 0.4795 | 0.4843 | 0.4751 | 0.485 | 0.5386 | 0.5445 | 0.5350 | 0.545 |
+| All datasets | 0.4581 | 0.4645 | 0.4541 | 0.465 | 0.5127 | 0.5204 | 0.5095 | 0.521 |
+
+Service relevance was better than direct NIM batch by about 0.003-0.004 macro,
+but remained 0.005-0.008 below local HF and nightly. Backend relevance parity
+is therefore not established.
+
+The first sequential service attempt exposed an important isolation problem:
+`overwrite=true` did not clear the persistent service collection between
+runfiles. By `pharmaceuticals`, query hits included 58 PDF sources outside its
+52-PDF corpus, and p50 had risen from 59 to 95 ms. A deterministic artifact
+check failed that run. The valid suite above recreated only retriever and
+vector-store volumes between datasets, retained all four NIM processes, and
+asserted zero foreign sources after every run. All eight checks passed. The
+accumulating-run relevance and latency values are excluded.
+
+The separately supplied latest `computer_science` service baseline was 10.11
+pages/s. The isolated run measured 11.906 pages/s with the same 0.6001/0.7100
+quality profile as the earlier service smoke. These deployment results validate
+the current NIM/service stack; they do not attribute remote performance to this
+local-only patch.
 
 Three current Compose portability/configuration issues required `/tmp`-only
 workarounds; none is changed by this PR and all are tracked in
@@ -278,10 +305,11 @@ workarounds; none is changed by this PR and all are tracked in
 This record supports the local Nemotron OCR v2 change only. The remote NIM and
 service runs establish compatibility but do not change or attribute speedup to
 the remote OCR path. JP20 was not run and byte-identical real OCR output is not
-claimed. The one-GPU NIM suite continuously sampled all eight GPUs; the older
-local-HF and BO767 end-to-end runs did not. The bounded local-HF batch of 8 and
-the four colocated NIMs were OOM-free on the tested H100; smaller GPU classes
-require separate sizing evidence.
+claimed. The one-GPU NIM and four-GPU service suites continuously sampled all
+eight GPUs; the older local-HF and BO767 end-to-end runs did not. The bounded
+local-HF batch of 8, four colocated NIMs, and four-GPU service deployment were
+OOM-free on the tested H100s; smaller GPU classes require separate sizing
+evidence.
 
 The BO767 command was repeated against exported upstream and patch source
 trees, changing only `PYTHONPATH` and the output/run identifiers:
@@ -331,6 +359,20 @@ CUDA_VISIBLE_DEVICES= retriever harness run-files <eight-runfiles> \
   --set query.embed_invoke_url=http://localhost:8004/v1/embeddings --json
 ```
 
+The valid service suite ran each runfile separately with the same four NIM
+processes. Before each run, it recreated only the experiment's retriever and
+vector-store volumes, waited for service health, and then invoked:
+
+```bash
+CUDA_VISIBLE_DEVICES= retriever harness run-files <one-runfile> \
+  --dataset-paths <dataset_paths.yaml> --mode service \
+  --service-endpoint http://localhost:7670 --output-dir <output> \
+  --session-name <unique-session> --json
+```
+
+Each result was followed by an assertion that every returned `source` belonged
+to the current runfile's PDF corpus.
+
 ViDoRe used source commit `611af594818342b655b5e9ae89c66aea2cbc3963`.
 BO767 compared upstream `52886112cafab4c4bca1cda0d4f588785adfe4d3`
 with patch `eaed9262780c45c1dce9e9a929357f2bcd886234`. Both used lock SHA-256
@@ -346,4 +388,10 @@ The NIM and service checks used rebased commit
 `5a8ebd9e5468be4a72ae9888a7d0cba173e44e96`. The full one-GPU NIM suite used
 commit `451ba127ea6fba72720c7f66753e2b73273eff6f`, whose merge base was current
 `upstream/main` at `3d9e26f1a2d2fd73af499bb7a9ef7fe855739841`; the harness command took
-5,456.73 seconds wall time including serial query evaluation.
+5,456.73 seconds wall time including serial query evaluation. The isolated
+full-service suite used PR commit
+`3363bf663bbca03fd8300c07d7271a8000533694`; its runtime source was unchanged
+from service-image commit `5a8ebd9e5468be4a72ae9888a7d0cba173e44e96`.
+The eight isolated service invocations took 2,578.13 seconds wall time including
+storage resets and query evaluation. Peak GPU memory was 1,927, 1,923, 3,865,
+and 11,364 MiB on GPUs 0-3 respectively; GPUs 4-7 remained at zero.
