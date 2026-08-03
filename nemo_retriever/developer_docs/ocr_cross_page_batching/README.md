@@ -69,27 +69,15 @@ H100 80GB.
 | Median actor throughput | 34.418 crops/s | 55.787 crops/s | 1.621x |
 | Median model throughput | 40.654 crops/s | 73.389 crops/s | 1.805x |
 
-### End-to-end ingest runtime
+### Whole-ingest speedup
 
-The registered `vidore_v3_computer_science_beir` harness ran the full 1,360-page
-ingest with charts, tables, infographics, page images, multimodal embedding,
-and LanceDB indexing enabled. Run order was upstream 1, patch 1, patch 2,
-upstream 2 to expose order and cache effects.
+**On BO767, the patch reduced mean whole-ingest runtime by 7.75% and increased
+throughput by 8.41%.** The harness timer starts immediately before
+`run_ingest_workflow(...)` and stops after it returns. It therefore includes the
+complete batch ingest through extraction, OCR, embedding, and LanceDB indexing;
+query evaluation is outside this timer.
 
-| Run | Ingest runtime | Throughput |
-|---|---:|---:|
-| Upstream 1 (coldest) | 181.616 s | 7.488 pages/s |
-| Patch 1 | 168.388 s | 8.077 pages/s |
-| Patch 2 | 169.506 s | 8.023 pages/s |
-| Upstream 2 | 168.330 s | 8.079 pages/s |
-
-The first pair appears 7.3% faster for the patch, but the counterbalanced warm
-pair is effectively tied: the patch is 1.176 seconds (0.70%) slower. Therefore
-this short two-document run proves the actor-stage speedup but not a
-whole-ingest speedup. Other pipeline work dilutes the OCR gain below run-to-run
-variation.
-
-BO767 supplied a longer OCR-heavy test: 767 PDFs, 54,730 pages, 79,233-79,234
+BO767 supplied a sustained OCR-heavy test: 767 PDFs, 54,730 pages, 79,233-79,234
 extracted rows, and 991 scored queries. It used Ray page-row batches of 24,
 OCR crop lists capped at 8, one H100, and counterbalanced order (`upstream,
 patch, patch, upstream`).
@@ -103,9 +91,23 @@ patch, patch, upstream`).
 
 The configuration means were 1,608.019 seconds upstream and 1,483.343 seconds
 patched: **124.676 seconds (7.75%) less ingest time** and **8.41% higher
-throughput**. Both matched pairs were faster (`-8.47%` and `-7.03%`). This
-corpus-scale run demonstrates that the actor speedup can improve complete
-ingest runtime when OCR is a sustained part of the workload.
+throughput**. Both matched pairs were faster (`-8.47%` and `-7.03%`). This is
+the whole-ingest speedup result for the corrected batching behavior.
+
+The shorter `vidore_v3_computer_science_beir` run is retained as a useful
+limit: it ran the same complete ingest boundary over 1,360 pages, but was too
+short to separate the patch from warm-run variation.
+
+| Run | Ingest runtime | Throughput |
+|---|---:|---:|
+| Upstream 1 (coldest) | 181.616 s | 7.488 pages/s |
+| Patch 1 | 168.388 s | 8.077 pages/s |
+| Patch 2 | 169.506 s | 8.023 pages/s |
+| Upstream 2 | 168.330 s | 8.079 pages/s |
+
+Its first pair favored the patch by 7.3%, while the counterbalanced warm pair
+was effectively tied. That does not contradict the BO767 result; it shows that
+a two-document run is underpowered for a whole-ingest performance claim.
 
 ### Retrieval non-regression
 
