@@ -44,8 +44,7 @@ client.
 Fluent methods that *do* take effect by writing to the spec:
 
 * ``.extract(...)`` — per-request extraction knobs (DPI, OCR enable, …)
-* ``.texts(...)`` / ``.extract_txt(...)`` — inline text payloads and
-  optional text chunking configuration
+* ``.texts(...)`` — inline text payloads
 * ``.embed(...)`` — embedding model/dim overrides bounded by the
   operator's allow-list
 * ``.dedup(...)``, ``.split(...)``, ``.filter()`` — shape knobs
@@ -93,9 +92,9 @@ from nemo_retriever.common.params import (
     IngestExecuteParams,
     PdfSplitParams,
     StoreParams,
-    TextChunkParams,
     VdbUploadParams,
     WebhookParams,
+    resolve_split_params,
 )
 from nemo_retriever.service.client import InMemoryUpload, RetrieverServiceClient, UploadInput
 
@@ -624,9 +623,6 @@ class ServiceIngestor(ingestor):
     def texts(self, texts: Union[str, Sequence[str]]) -> Self:
         """Set raw inline text documents, optionally alongside file or buffer uploads."""
         self._inline_texts = normalize_inline_texts(texts)
-        if "extract" not in self._pipeline_spec["stage_order"]:
-            self._pipeline_spec["extraction_mode"] = "text"
-        self._record_stage("extract")
         return self
 
     def buffers(
@@ -736,27 +732,6 @@ class ServiceIngestor(ingestor):
         self._record_stage("extract")
         return self
 
-    def extract_txt(self, params: TextChunkParams | None = None, **kwargs: Any) -> Self:
-        """Configure plain-text extraction and optional chunking overrides."""
-        self._pipeline_spec["extraction_mode"] = "text"
-        split_config = dict(self._pipeline_spec.get("split_config") or {})
-        if params is not None or kwargs:
-            from nemo_retriever.common.policy import _DEFAULT_ALLOWED_SPLIT_KEYS
-
-            merged = _merge_params(params, kwargs)
-            split_config["text"] = _filter_policy_allowed(
-                _params_to_dict(merged),
-                _DEFAULT_ALLOWED_SPLIT_KEYS,
-            )
-        else:
-            split_config.pop("text", None)
-        if split_config:
-            self._pipeline_spec["split_config"] = split_config
-        else:
-            self._pipeline_spec.pop("split_config", None)
-        self._record_stage("extract")
-        return self
-
     def extract_image_files(
         self, params: Any = None, *, split_config: Optional[dict[str, Any]] = None, **kwargs: Any
     ) -> "ServiceIngestor":
@@ -784,20 +759,28 @@ class ServiceIngestor(ingestor):
         return self
 
     def split(self, params: Any = None, **kwargs: Any) -> "ServiceIngestor":
-        """Record post-extract split / chunking configuration.
+        """Configure chunking by source modality.
 
-        Accepts the same dict shape as :meth:`GraphIngestor.extract`'s
-        ``split_config`` keyword (``{"<source_type>": {"max_tokens": …}}``).
+        Accepts the same modality keys and parameter values as
+        :meth:`GraphIngestor.split`.
         """
-        merged: dict[str, Any]
-        if isinstance(params, dict):
-            merged = dict(params)
-        elif params is None:
-            merged = {}
+        if params is None:
+            config: dict[str, Any] = {}
+        elif isinstance(params, dict):
+            config = dict(params)
         else:
-            merged = _params_to_dict(params)
-        merged.update(kwargs)
-        self._pipeline_spec["split_config"] = merged
+            raise TypeError(f"split params must be a dict or None, got {type(params).__name__}")
+        config.update(kwargs)
+
+        resolved = resolve_split_params(config)
+        serialized: dict[str, Any] = {}
+        for key in config:
+            value = resolved[key]
+            if value is False:
+                serialized[key] = False
+            elif value is not None:
+                serialized[key] = value.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+        self._pipeline_spec["split_config"] = serialized
         return self
 
     def pdf_split_config(self, pages_per_chunk: int = 32) -> "ServiceIngestor":

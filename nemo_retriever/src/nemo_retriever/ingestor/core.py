@@ -26,7 +26,6 @@ from nemo_retriever.common.params import IngestExecuteParams
 from nemo_retriever.common.params import IngestorCreateParams
 from nemo_retriever.common.params import IngestorRunMode
 from nemo_retriever.common.params import StoreParams
-from nemo_retriever.common.params import TextChunkParams
 from nemo_retriever.common.params import VdbUploadParams
 from nemo_retriever.common.params import WebhookParams
 
@@ -161,15 +160,15 @@ class ingestor:
         _ = _merge_params(params, kwargs)
         self._not_implemented("extract")
 
-    def extract_txt(self, params: TextChunkParams | None = None, **kwargs: Any) -> Self:
-        """Configure plain-text extraction and chunking."""
-        _ = _merge_params(params, kwargs)
-        self._not_implemented("extract_txt")
-
     def extract_image_files(self, params: ExtractParams | None = None, **kwargs: Any) -> "ingestor":
         """Record an extract-image-files task configuration."""
         _ = _merge_params(params, kwargs)
         self._not_implemented("extract_image_files")
+
+    def split(self, params: dict[str, Any] | None = None, **kwargs: Any) -> Self:
+        """Configure chunking by source modality."""
+        _ = _merge_params(params, kwargs)
+        self._not_implemented("split")
 
     def filter(self) -> "ingestor":
         """Record a filter task configuration."""

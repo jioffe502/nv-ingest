@@ -572,8 +572,6 @@ def _build_graph_ingestor_from_spec(
 
     if extraction_mode == "image":
         ingestor = ingestor.extract_image_files(extract_params, split_config=split_config)
-    elif extraction_mode == "text" and split_config is None:
-        ingestor = ingestor.extract_txt()
     elif extraction_mode == "html" and split_config is None:
         ingestor = ingestor.extract_html()
     else:

@@ -110,7 +110,7 @@ def split_df(
     Re-chunk a DataFrame's ``text`` column by token count.
 
     This is a **post-extraction** transform: it takes rows that already have a
-    ``text`` column (produced by ``extract`` / ``extract_txt`` / etc.) and
+    ``text`` column produced by extraction and
     splits long texts into multiple rows using :func:`split_text_by_tokens`.
     All other columns (``path``, ``page_number``, ``metadata``, …) are
     preserved on every output row.  Each chunk row's ``metadata`` dict is

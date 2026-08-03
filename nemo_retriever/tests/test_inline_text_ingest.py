@@ -58,14 +58,15 @@ def test_inline_text_runs_split_embed_and_vdb_graph(monkeypatch: pytest.MonkeyPa
 
     def fake_build_graph(**kwargs: Any) -> Graph:
         captured.update(kwargs)
-        return Graph() >> TxtSplitActor(params=kwargs["text_params"]) >> _FakeEmbedOperator() >> _FakeVdbOperator()
+        text_params = kwargs["split_config"]["text"] or kwargs["text_params"]
+        return Graph() >> TxtSplitActor(params=text_params) >> _FakeEmbedOperator() >> _FakeVdbOperator()
 
     monkeypatch.setattr("nemo_retriever.ingestor.graph_ingestor.build_graph", fake_build_graph)
 
     result = (
         GraphIngestor(run_mode="inprocess", show_progress=False)
         .texts(["one two three", "one two three"])
-        .extract_txt(TextChunkParams(max_tokens=2))
+        .split(text=TextChunkParams(max_tokens=2))
         .embed()
         .vdb_upload()
         .ingest()
@@ -94,9 +95,9 @@ def test_batch_inline_text_matches_text_file(tmp_path) -> None:
 
     try:
         file_result = (
-            GraphIngestor(run_mode="batch", show_progress=False).files([str(document)]).extract_txt(params).ingest()
+            GraphIngestor(run_mode="batch", show_progress=False).files([str(document)]).split(text=params).ingest()
         )
-        inline_result = GraphIngestor(run_mode="batch", show_progress=False).texts([text]).extract_txt(params).ingest()
+        inline_result = GraphIngestor(run_mode="batch", show_progress=False).texts([text]).split(text=params).ingest()
     finally:
         ray.shutdown()
 
@@ -116,7 +117,7 @@ def test_batch_inline_text_ingests_alongside_text_file(tmp_path) -> None:
             GraphIngestor(run_mode="batch", show_progress=False)
             .files([str(document)])
             .texts(["from inline"])
-            .extract_txt(TextChunkParams(max_tokens=10))
+            .split(text=TextChunkParams(max_tokens=10))
             .ingest()
         )
     finally:

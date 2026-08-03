@@ -466,7 +466,7 @@ class GraphIngestor(ingestor):
         self._inline_texts: list[str] | None = None
 
         # Pipeline configuration accumulated by fluent methods
-        self._extraction_mode: str | None = "pdf"
+        self._extraction_mode: str | None = None
         self._extract_params: Any = None
         self._text_params: Any = None
         self._html_params: Any = None
@@ -505,10 +505,6 @@ class GraphIngestor(ingestor):
         planner routes each source through its matching extraction branch.
         """
         self._inline_texts = normalize_inline_texts(texts)
-        if "extract" not in self._stage_order:
-            self._extraction_mode = "text"
-        self._text_params = self._text_params or TextChunkParams()
-        self._record_stage("extract")
         return self
 
     def buffers(
@@ -606,13 +602,6 @@ class GraphIngestor(ingestor):
         self._record_stage("extract")
         return self
 
-    def extract_txt(self, params: Optional[TextChunkParams] = None, **kwargs: Any) -> "GraphIngestor":
-        """Configure plain-text extraction (extraction_mode='text')."""
-        self._extraction_mode = "text"
-        self._text_params = _coerce(params, kwargs, default_factory=TextChunkParams)
-        self._record_stage("extract")
-        return self
-
     def extract_html(self, params: Optional[HtmlChunkParams] = None, **kwargs: Any) -> "GraphIngestor":
         """Configure HTML extraction (extraction_mode='html')."""
         self._extraction_mode = "html"
@@ -677,6 +666,23 @@ class GraphIngestor(ingestor):
             self._extract_params = ExtractParams()
         self._apply_split_config(split_config)
         self._record_stage("extract")
+        return self
+
+    def split(self, params: dict[str, Any] | None = None, **kwargs: Any) -> Self:
+        """Configure chunking by source modality.
+
+        Values may be ``TextChunkParams``, ``HtmlChunkParams``, plain
+        dictionaries, or ``False``. Keyword names are source families such as
+        ``text``, ``html``, ``pdf``, ``audio``, ``image``, and ``video``.
+        """
+        if params is None:
+            config: dict[str, Any] = {}
+        elif isinstance(params, dict):
+            config = dict(params)
+        else:
+            raise TypeError(f"split params must be a dict or None, got {type(params).__name__}")
+        config.update(kwargs)
+        self._split_config = resolve_split_params(config)
         return self
 
     # ------------------------------------------------------------------

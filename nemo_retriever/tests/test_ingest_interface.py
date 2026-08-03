@@ -173,7 +173,7 @@ def test_texts_can_mix_with_text_files(
     else:
         ingestor.texts(["inline"]).files([str(document)])
 
-    result = ingestor.extract_txt(TextChunkParams(max_tokens=10)).ingest()
+    result = ingestor.split(text=TextChunkParams(max_tokens=10)).ingest()
 
     assert result["text"].tolist() == ["document", "inline"]
     assert result["path"].tolist() == [str(document.resolve()), "inline://00000000"]
@@ -188,7 +188,7 @@ def test_texts_can_mix_with_text_buffers(monkeypatch: pytest.MonkeyPatch) -> Non
         create_ingestor(run_mode="inprocess")
         .texts(["inline"])
         .buffers(("document.txt", BytesIO(b"document")))
-        .extract_txt(TextChunkParams(max_tokens=10))
+        .split(text=TextChunkParams(max_tokens=10))
         .ingest()
     )
 
@@ -260,7 +260,7 @@ def test_empty_inline_text_does_not_short_circuit_file_ingestion(
     document = tmp_path / "document.txt"
     document.write_text("document", encoding="utf-8")
 
-    result = create_ingestor(run_mode="inprocess").files([str(document)]).texts(inline_texts).extract_txt().ingest()
+    result = create_ingestor(run_mode="inprocess").files([str(document)]).texts(inline_texts).ingest()
 
     assert result["text"].tolist() == ["document"]
     assert result["path"].tolist() == [str(document.resolve())]
@@ -295,8 +295,8 @@ def test_graph_ingestor_action_methods_materialize_default_params() -> None:
     ingestor.extract_image_files()
     assert isinstance(ingestor._extract_params, ExtractParams)
 
-    ingestor.extract_txt()
-    assert isinstance(ingestor._text_params, TextChunkParams)
+    ingestor.split(text=TextChunkParams(max_tokens=512))
+    assert isinstance(ingestor._split_config["text"], TextChunkParams)
 
     ingestor.extract_html()
     assert isinstance(ingestor._html_params, HtmlChunkParams)
@@ -455,11 +455,11 @@ def test_extract_default_treats_markdown_as_plain_text(tmp_path) -> None:
     assert result["path"].tolist() == [str(document.resolve())]
 
 
-def test_extract_txt_accepts_json_as_plain_text(tmp_path) -> None:
+def test_automatic_routing_accepts_json_as_plain_text(tmp_path) -> None:
     document = tmp_path / "payload.json"
     document.write_text('{"message": "hello"}\n', encoding="utf-8")
 
-    result = GraphIngestor(run_mode="inprocess", show_progress=False).files([str(document)]).extract_txt().ingest()
+    result = GraphIngestor(run_mode="inprocess", show_progress=False).files([str(document)]).ingest()
 
     assert result["text"].tolist() == ['{"message": "hello"}\n']
     assert result["path"].tolist() == [str(document.resolve())]
@@ -479,22 +479,28 @@ def test_extract_default_accepts_shell_script_buffer_as_plain_text() -> None:
     assert result["path"].tolist() == [str(Path("setup.sh").resolve())]
 
 
-def test_typed_shortcuts_preserve_legacy_no_default_chunking() -> None:
-    """Typed shortcuts (extract_audio, extract_txt, ...) must NOT enable default
-    split_config chunking. Default-ON is reserved for the unified .extract()
-    path. extract_txt(custom_params) must propagate custom_params via the
-    text_params fallback.
-    """
-    # extract_audio without split_config: no audio chunking.
+def test_extract_audio_does_not_enable_post_extraction_chunking_by_default() -> None:
     audio_ingestor = GraphIngestor(run_mode="inprocess").extract_audio()
     assert audio_ingestor._split_config["audio"] is None
 
-    # extract_txt(custom): _split_config["text"] stays None so the operator
-    # falls back to self.text_params (= custom) in _effective_chunk_params.
-    custom = TextChunkParams(max_tokens=512)
-    txt_ingestor = GraphIngestor(run_mode="inprocess").extract_txt(custom)
-    assert txt_ingestor._split_config["text"] is None
-    assert txt_ingestor._text_params is custom
+
+def test_split_configures_automatically_routed_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nemo_retriever.common.modality.txt.split._get_tokenizer", lambda *args, **kwargs: _InlineTextTokenizer()
+    )
+
+    result = (
+        GraphIngestor(run_mode="inprocess", show_progress=False)
+        .texts(["one two three"])
+        .split(text=TextChunkParams(max_tokens=2))
+        .ingest()
+    )
+
+    assert result["text"].tolist() == ["one two", "three"]
+
+
+def test_extract_txt_is_not_part_of_the_ingestor_interface() -> None:
+    assert not hasattr(GraphIngestor, "extract_txt")
 
 
 def test_graph_ingestor_return_failures_returns_service_tuples_from_path(monkeypatch) -> None:

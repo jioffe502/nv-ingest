@@ -79,7 +79,7 @@ def test_service_inline_text_builds_in_memory_uploads(monkeypatch: pytest.Monkey
     ingestor = ServiceIngestor(base_url="http://retriever.example")
     monkeypatch.setattr("tempfile.mkdtemp", lambda *args, **kwargs: pytest.fail("inline text must remain in memory"))
 
-    ingestor.texts(["first", "first"]).extract_txt(TextChunkParams(max_tokens=12))
+    ingestor.texts(["first", "first"]).split(text=TextChunkParams(max_tokens=12))
 
     assert ingestor._collect_inputs() == [
         InMemoryUpload(
@@ -95,7 +95,7 @@ def test_service_inline_text_builds_in_memory_uploads(monkeypatch: pytest.Monkey
             classification_filename="inline-00000001.txt",
         ),
     ]
-    assert ingestor._pipeline_payload()["extraction_mode"] == "text"
+    assert ingestor._pipeline_payload()["extraction_mode"] == "auto"
     assert ingestor._pipeline_payload()["split_config"] == {"text": {"max_tokens": 12}}
 
 
@@ -119,7 +119,7 @@ def test_service_inline_text_composes_with_files_and_uses_auto_routing(tmp_path,
         ingestor.files(str(document)).texts(["inline"])
     else:
         ingestor.texts(["inline"]).files(str(document))
-    ingestor.extract_txt(TextChunkParams(max_tokens=12))
+    ingestor.split(text=TextChunkParams(max_tokens=12))
 
     inputs = ingestor._collect_inputs()
     assert inputs[0] == document
@@ -141,7 +141,7 @@ def test_service_empty_inline_text_does_not_hide_files(tmp_path, inline_texts: l
     ingestor = ServiceIngestor(base_url="http://retriever.example").files(str(document)).texts(inline_texts)
 
     assert ingestor._collect_inputs()[0] == document
-    assert ingestor._pipeline_payload()["extraction_mode"] == "auto"
+    assert ingestor._pipeline_payload() is None
 
 
 @pytest.mark.parametrize("values", [[], ["", "  \n"]])
@@ -282,10 +282,20 @@ def test_pdf_split_config_round_trips_via_spec() -> None:
 
 def test_split_method_records_split_config() -> None:
     ing = ServiceIngestor(base_url="http://example:7670")
-    ing.split({"pdf": {"max_tokens": 512, "overlap_tokens": 32}})
+    ing.split(
+        pdf={"max_tokens": 512, "overlap_tokens": 32},
+        text=TextChunkParams(max_tokens=256),
+    )
     payload = ing._pipeline_payload()
     assert payload is not None
-    assert payload["split_config"] == {"pdf": {"max_tokens": 512, "overlap_tokens": 32}}
+    assert payload["split_config"] == {
+        "pdf": {"max_tokens": 512, "overlap_tokens": 32},
+        "text": {"max_tokens": 256},
+    }
+
+
+def test_service_extract_txt_is_not_part_of_the_ingestor_interface() -> None:
+    assert not hasattr(ServiceIngestor, "extract_txt")
 
 
 def test_all_tasks_seeds_canonical_stage_order() -> None:
@@ -628,6 +638,7 @@ def test_build_graph_ingestor_attaches_asr_params_for_explicit_audio_mode() -> N
         ("README.md", "text"),
         ("payload.json", "text"),
         ("setup.sh", "text"),
+        ("inline://00000000", "text"),
         ("page.html", "html"),
         ("report.pdf", "pdf"),
         ("diagram.png", "image"),
@@ -643,6 +654,7 @@ def test_infer_extraction_mode_from_filename(filename: str, expected: str | None
     ("extraction_mode", "filename", "resolved"),
     [
         ("auto", "notes.txt", "text"),
+        ("auto", "inline://00000000", "text"),
         ("auto", "page.html", "html"),
         ("auto", "report.pdf", "pdf"),
         ("pdf", "notes.txt", "pdf"),
@@ -653,7 +665,7 @@ def test_resolve_service_extraction_mode(extraction_mode: str, filename: str, re
     assert _resolve_service_extraction_mode(extraction_mode, filename) == resolved
 
 
-def test_build_graph_ingestor_uses_typed_txt_html_shortcuts() -> None:
+def test_build_graph_ingestor_routes_txt_and_html_inputs() -> None:
     base_extract: dict[str, object] = {}
     spec = {"extraction_mode": "auto", "stage_order": ["extract"]}
 
@@ -666,7 +678,16 @@ def test_build_graph_ingestor_uses_typed_txt_html_shortcuts() -> None:
     )
     assert txt_mode == "text"
     assert txt_ingestor._extraction_mode == "text"
-    assert txt_ingestor._text_params is not None
+
+    inline_ingestor, inline_mode, _ = _build_graph_ingestor_from_spec(
+        "inline://00000000",
+        b"The quick brown fox",
+        base_extract,
+        None,
+        None,
+    )
+    assert inline_mode == "text"
+    assert inline_ingestor._extraction_mode == "text"
 
     html_ingestor, html_mode, _ = _build_graph_ingestor_from_spec(
         "page.html",
@@ -721,22 +742,13 @@ def test_run_pipeline_in_process_preserves_service_inline_identity(monkeypatch: 
         {},
         None,
         None,
-        {
-            "extraction_mode": "text",
-            "stage_order": ["extract"],
-            "result_schema": "compact",
-        },
+        None,
     )
 
     assert row_count == 1
-    assert rows == [
-        {
-            "text": "café service",
-            "source_id": "inline://00000003",
-            "element_type": "text",
-            "page_number": 1,
-        }
-    ]
+    assert rows[0]["text"] == "café service"
+    assert rows[0]["path"] == "inline://00000003"
+    assert rows[0]["metadata"]["source_path"] == "inline://00000003"
 
 
 def test_build_graph_ingestor_omits_asr_params_when_worker_unconfigured() -> None:
