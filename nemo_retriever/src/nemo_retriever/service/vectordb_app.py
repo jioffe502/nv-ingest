@@ -219,15 +219,14 @@ class VectorDBState:
         return inspect_lancedb_table_object(table)
 
     @staticmethod
+    def _is_fts_index(index: Any) -> bool:
+        name = index.name.lower()
+        return "text" in name or "fts" in name or str(getattr(index, "index_type", "")).lower() == "fts"
+
+    @staticmethod
     def _create_and_wait_for_fts(table: Any) -> None:
         table.create_fts_index("text", replace=True)
-        fts_names = [
-            index.name
-            for index in table.list_indices()
-            if "text" in index.name.lower()
-            or "fts" in index.name.lower()
-            or str(getattr(index, "index_type", "")).lower() == "fts"
-        ]
+        fts_names = [index.name for index in table.list_indices() if VectorDBState._is_fts_index(index)]
         if fts_names:
             table.wait_for_index(fts_names, timeout=timedelta(seconds=600))
 
@@ -235,11 +234,7 @@ class VectorDBState:
     def _fts_unindexed_rows(table: Any) -> int | None:
         values: list[int] = []
         for index in table.list_indices():
-            if not (
-                "text" in index.name.lower()
-                or "fts" in index.name.lower()
-                or str(getattr(index, "index_type", "")).lower() == "fts"
-            ):
+            if not VectorDBState._is_fts_index(index):
                 continue
             try:
                 stats = table.index_stats(index.name)
@@ -281,27 +276,35 @@ class VectorDBState:
         logger.info("Optimized LanceDB table '%s' after incremental writes", self.table_name)
 
     def index_health(self) -> dict[str, Any]:
-        caps = self._table_capabilities()
-        if caps is None:
-            return {
-                "configured_index_mode": self.index_mode,
-                "effective_index_mode": None,
-                "fts_present": False,
-                "fts_unindexed_rows": None,
-                "writes_since_optimize": self._writes_since_optimize,
-                "rows_since_optimize": self._rows_since_optimize,
-                "last_optimization": dict(self._last_optimization),
-            }
-        table = self._db.open_table(self.table_name)
-        return {
+        health = {
             "configured_index_mode": self.index_mode,
-            "effective_index_mode": caps.retrieval_mode,
-            "fts_present": caps.has_fts,
-            "fts_unindexed_rows": self._fts_unindexed_rows(table) if caps.has_fts else None,
+            "effective_index_mode": None,
+            "fts_present": False,
+            "fts_unindexed_rows": None,
             "writes_since_optimize": self._writes_since_optimize,
             "rows_since_optimize": self._rows_since_optimize,
             "last_optimization": dict(self._last_optimization),
         }
+        try:
+            caps = self._table_capabilities()
+            if caps is None:
+                return health
+            unindexed_rows = self._fts_unindexed_rows(self._db.open_table(self.table_name)) if caps.has_fts else None
+        except Exception:
+            health["effective_index_mode"] = "unknown"
+            logger.warning(
+                "Failed to inspect index health for table '%s' at %s; reporting unavailable index state",
+                self.table_name,
+                self.lancedb_uri,
+                exc_info=True,
+            )
+            return health
+        health.update(
+            effective_index_mode=caps.retrieval_mode,
+            fts_present=caps.has_fts,
+            fts_unindexed_rows=unindexed_rows,
+        )
+        return health
 
     def resolve_effective_retrieval_mode(self, caps: LanceTableCapabilities | None = None) -> LanceRetrievalMode:
         """Resolve retrieval mode from table capabilities (auto).
@@ -537,21 +540,6 @@ def create_vectordb_app(
     @app.get("/v1/health", tags=["system"])
     async def health() -> dict[str, Any]:
         rows = _state.total_rows() if _state else 0
-        effective_mode: str | None = None
-        if _state is not None and _state.table_exists:
-            try:
-                effective_mode = _state.resolve_effective_retrieval_mode()
-            except Exception:
-                # Health must never 500 (it backs k8s liveness/readiness probes),
-                # so report "unknown" for any failure — misconfiguration
-                # (ValueError) or transient I/O / LanceDB errors on open_table.
-                effective_mode = "unknown"
-                logger.warning(
-                    "Failed to resolve effective retrieval mode for table '%s' at %s; reporting unknown to health",
-                    table_name,
-                    lancedb_uri,
-                    exc_info=True,
-                )
         index_health = (
             _state.index_health()
             if _state
@@ -571,7 +559,7 @@ def create_vectordb_app(
             "total_rows": rows,
             "table_exists": _state.table_exists if _state else False,
             "embed_mode": _state.embed_mode if _state else "none",
-            "effective_retrieval_mode": effective_mode,
+            "effective_retrieval_mode": index_health["effective_index_mode"],
             **index_health,
         }
 

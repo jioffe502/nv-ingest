@@ -383,9 +383,8 @@ def _percentile(values: Sequence[float], fraction: float) -> float | None:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def _paired_ci(values: Sequence[float], *, seed: int) -> list[float] | None:
+def _paired_ci(values: Sequence[float]) -> list[float] | None:
     """Return a deterministic paired normal-approximation confidence interval."""
-    del seed  # Kept in the interface so each reported comparison has a stable identity.
     if not values:
         return None
     mean = statistics.fmean(values)
@@ -416,19 +415,19 @@ def _comparable_rank(case: Mapping[str, Any], mode: str) -> int:
     return replay_depth + 1
 
 
-def _paired_delta_summary(cases: Sequence[Mapping[str, Any]], *, baseline: str, seed_prefix: str) -> dict[str, Any]:
+def _paired_delta_summary(cases: Sequence[Mapping[str, Any]], *, baseline: str) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     for metric in ("recall_5", "recall_10", "ndcg_10"):
         deltas = [float(case["modes"]["hybrid"][metric]) - float(case["modes"][baseline][metric]) for case in cases]
         metrics[metric] = {
             "mean": statistics.fmean(deltas),
-            "ci95": _paired_ci(deltas, seed=sum(ord(char) for char in f"{seed_prefix}:{baseline}:{metric}")),
+            "ci95": _paired_ci(deltas),
         }
     rank_deltas = [float(_comparable_rank(case, baseline) - _comparable_rank(case, "hybrid")) for case in cases]
     metrics["best_relevant_rank"] = {
         "mean_improvement": statistics.fmean(rank_deltas) if rank_deltas else None,
         "paired_sample_count": len(rank_deltas),
-        "ci95": _paired_ci(rank_deltas, seed=sum(ord(char) for char in f"{seed_prefix}:{baseline}:rank")),
+        "ci95": _paired_ci(rank_deltas),
     }
     return metrics
 
@@ -468,7 +467,6 @@ def _slice_summaries(cases: Sequence[Mapping[str, Any]], modes: Sequence[str]) -
                 payload["paired_deltas"][f"hybrid_vs_{baseline}"] = _paired_delta_summary(
                     members,
                     baseline=baseline,
-                    seed_prefix=f"{slice_field}:{value}",
                 )
         summaries.append(payload)
     return summaries
@@ -479,24 +477,6 @@ def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-
-
-def _read_query_results(path: Path, *, mode: str) -> list[dict[str, Any]]:
-    if not path.exists():
-        raise ValueError(f"Required source query results are missing: {path}")
-    results: list[dict[str, Any]] = []
-    try:
-        with path.open(encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                payload = json.loads(line)
-                if not isinstance(payload, dict):
-                    raise ValueError(f"Expected an object at {path}:{line_number}")
-                results.append({**payload, "mode": mode})
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Could not read source query results {path}: {exc}") from exc
-    return results
 
 
 def _write_trec(path: Path, query_results: Sequence[Mapping[str, Any]], *, doc_id_field: str) -> None:
@@ -809,7 +789,7 @@ def build_comparison_artifacts(
         "positive_qrel_count": len(extraction_cases),
         "modes": {mode: _mode_summary(cases, mode) for mode in modes},
         "paired_deltas": {
-            f"hybrid_vs_{baseline}": _paired_delta_summary(cases, baseline=baseline, seed_prefix="overall")
+            f"hybrid_vs_{baseline}": _paired_delta_summary(cases, baseline=baseline)
             for baseline in ("dense", "sparse")
             if "hybrid" in modes and baseline in modes
         },

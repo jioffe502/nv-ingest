@@ -101,22 +101,21 @@ def test_vectordb_config_validates_index_mode() -> None:
         VectorDbConfig(index_mode="sparse")
 
 
-def test_health_stays_ok_when_mode_resolution_errors(tmp_path) -> None:
+def test_health_stays_ok_when_index_inspection_errors(tmp_path) -> None:
     app = create_vectordb_app(
         lancedb_uri=str(tmp_path),
         embed_endpoint="http://embed.example/v1/embeddings",
     )
     with TestClient(app) as client:
-        with patch.object(VectorDBState, "table_exists", new_callable=PropertyMock, return_value=True), patch.object(
-            VectorDBState,
-            "resolve_effective_retrieval_mode",
-            side_effect=OSError("transient I/O error"),
-        ):
+        with patch.object(VectorDBState, "_table_capabilities", side_effect=OSError("transient I/O error")):
             resp = client.get("/v1/health")
 
-    # Health backs k8s probes; a mode-resolution failure must not 500.
+    # Health backs k8s probes; an index-inspection failure must not 500.
     assert resp.status_code == 200
-    assert resp.json()["effective_retrieval_mode"] == "unknown"
+    body = resp.json()
+    assert body["effective_retrieval_mode"] == "unknown"
+    assert body["effective_index_mode"] == "unknown"
+    assert body["fts_present"] is False
 
 
 def test_strategies_for_retrieval_mode() -> None:

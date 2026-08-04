@@ -187,11 +187,6 @@ def test_compare_retrieval_replays_hybrid_even_when_source_run_was_hybrid(tmp_pa
     monkeypatch.setattr(retrieval_comparison, "_run_mode_queries", replay)
     monkeypatch.setattr(
         retrieval_comparison,
-        "_read_query_results",
-        lambda *_args, **_kwargs: pytest.fail("source hybrid results must not be reused"),
-    )
-    monkeypatch.setattr(
-        retrieval_comparison,
         "build_comparison_artifacts",
         lambda **kwargs: {"mode_results": kwargs["mode_results"]},
     )
