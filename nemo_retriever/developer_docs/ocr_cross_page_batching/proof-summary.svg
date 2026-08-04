@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1010" viewBox="0 0 1000 1010" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1320" viewBox="0 0 1000 1320" role="img" aria-labelledby="title desc">
   <title id="title">Issue 2323 local OCR batching evidence</title>
-  <desc id="desc">The patch reduces model calls per 128 crops from 128 to 16, increases actor throughput from 34.4 to 55.8 crops per second, and reduces mean BO767 ingest time from 1608.0 to 1483.3 seconds. Full ViDoRe validation compares the patched one-GPU local path, one-GPU self-hosted NIMs, and four-GPU service mode without attributing backend differences to the local-only patch.</desc>
-  <rect width="1000" height="1010" fill="#ffffff"/>
+  <desc id="desc">The patch reduces model calls per 128 crops from 128 to 16, improves one-GPU actor and BO767 throughput, completes the full ViDoRe suite at two, four, and eight GPUs with four GPUs fastest under default scheduling, and completes four-GPU service BO767 at 87.8 pages per second.</desc>
+  <rect width="1000" height="1320" fill="#ffffff"/>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2937; }
     .title { font-size: 22px; font-weight: 650; }
@@ -9,14 +9,17 @@
     .label { font-size: 13px; }
     .value { font-size: 15px; font-weight: 650; }
     .note { font-size: 13px; fill: #4b5563; }
+    .small { font-size: 12px; fill: #4b5563; }
     .grid { stroke: #d1d5db; stroke-width: 1; }
     .axis { stroke: #6b7280; stroke-width: 1.2; }
     .upstream { fill: #6b7280; }
     .patch { fill: #76b900; }
+    .patchLight { fill: #b5d97a; }
     .nim { fill: #2563eb; }
     .service { fill: #7c3aed; }
-    .nightly { fill: #ffffff; stroke: #6b7280; stroke-width: 2; }
+    .baseline { fill: #ffffff; stroke: #6b7280; stroke-width: 2; }
   </style>
+
   <text x="40" y="34" class="title">Issue #2323 · bounded cross-page local OCR batching</text>
 
   <text x="40" y="70" class="panel">Cross-page model invocations per 128 crops</text>
@@ -32,7 +35,7 @@
   <text x="335" y="267" text-anchor="middle" class="value">16</text>
   <text x="180" y="322" text-anchor="middle" class="label">Upstream</text>
   <text x="335" y="322" text-anchor="middle" class="label">Patch</text>
-  <text x="257" y="352" text-anchor="middle" class="note">87.5% fewer calls; list size remains bounded at 8</text>
+  <text x="257" y="348" text-anchor="middle" class="note">87.5% fewer calls · bounded lists of 8</text>
 
   <text x="525" y="70" class="panel">Median throughput (crops/s)</text>
   <line x1="555" y1="300" x2="955" y2="300" class="axis"/>
@@ -51,84 +54,101 @@
   <text x="878" y="126" text-anchor="middle" class="value">73.4</text>
   <text x="656" y="322" text-anchor="middle" class="label">Actor · 1.62x</text>
   <text x="846" y="322" text-anchor="middle" class="label">Model · 1.81x</text>
-  <rect x="700" y="345" width="12" height="12" class="upstream"/>
-  <text x="718" y="356" class="note">Upstream</text>
-  <rect x="800" y="345" width="12" height="12" class="patch"/>
-  <text x="818" y="356" class="note">Patch</text>
+  <rect x="700" y="338" width="12" height="12" class="upstream"/>
+  <text x="718" y="349" class="note">Upstream</text>
+  <rect x="800" y="338" width="12" height="12" class="patch"/>
+  <text x="818" y="349" class="note">Patch</text>
 
-  <line x1="40" y1="385" x2="960" y2="385" class="grid"/>
-  <text x="40" y="420" class="title">BO767 full ingest · mean of two counterbalanced runs</text>
+  <line x1="40" y1="375" x2="960" y2="375" class="grid"/>
+  <text x="40" y="410" class="title">BO767 one-GPU batch A/B · complete ingest</text>
 
-  <text x="40" y="445" class="panel">Ingest runtime (seconds · lower is better)</text>
-  <line x1="70" y1="600" x2="445" y2="600" class="axis"/>
+  <text x="40" y="440" class="panel">Ingest runtime (seconds · lower is better)</text>
+  <line x1="70" y1="610" x2="445" y2="610" class="axis"/>
   <line x1="70" y1="470" x2="445" y2="470" class="grid"/>
-  <text x="48" y="605" class="label">0</text>
+  <text x="48" y="615" class="label">0</text>
   <text x="32" y="475" class="label">1800</text>
-  <rect x="135" y="483.9" width="90" height="116.1" rx="3" class="upstream"/>
-  <rect x="290" y="492.9" width="90" height="107.1" rx="3" class="patch"/>
-  <text x="180" y="476" text-anchor="middle" class="value">1608.0</text>
-  <text x="335" y="485" text-anchor="middle" class="value">1483.3</text>
-  <text x="180" y="622" text-anchor="middle" class="label">Upstream</text>
-  <text x="335" y="622" text-anchor="middle" class="label">Patch · -7.75%</text>
+  <rect x="135" y="484.9" width="90" height="125.1" rx="3" class="upstream"/>
+  <rect x="290" y="494.6" width="90" height="115.4" rx="3" class="patch"/>
+  <text x="180" y="477" text-anchor="middle" class="value">1608.0</text>
+  <text x="335" y="487" text-anchor="middle" class="value">1483.3</text>
+  <text x="180" y="632" text-anchor="middle" class="label">Upstream mean</text>
+  <text x="335" y="632" text-anchor="middle" class="label">Patch · -7.75%</text>
 
-  <text x="525" y="445" class="panel">Throughput (pages/s · higher is better)</text>
-  <line x1="555" y1="600" x2="955" y2="600" class="axis"/>
+  <text x="525" y="440" class="panel">Throughput (pages/s · higher is better)</text>
+  <line x1="555" y1="610" x2="955" y2="610" class="axis"/>
   <line x1="555" y1="470" x2="955" y2="470" class="grid"/>
-  <text x="535" y="605" class="label">0</text>
+  <text x="535" y="615" class="label">0</text>
   <text x="525" y="475" class="label">40</text>
-  <rect x="650" y="489.4" width="90" height="110.6" rx="3" class="upstream"/>
-  <rect x="805" y="480.1" width="90" height="119.9" rx="3" class="patch"/>
-  <text x="695" y="481" text-anchor="middle" class="value">34.04</text>
-  <text x="850" y="472" text-anchor="middle" class="value">36.90</text>
-  <text x="695" y="622" text-anchor="middle" class="label">Upstream</text>
-  <text x="850" y="622" text-anchor="middle" class="label">Patch · +8.41%</text>
-  <text x="500" y="652" text-anchor="middle" class="note">54,730 pages · 991 queries · aggregate retrieval metrics neutral within baseline variance</text>
+  <rect x="650" y="490.9" width="90" height="119.1" rx="3" class="upstream"/>
+  <rect x="805" y="480.9" width="90" height="129.1" rx="3" class="patch"/>
+  <text x="695" y="483" text-anchor="middle" class="value">34.04</text>
+  <text x="850" y="473" text-anchor="middle" class="value">36.90</text>
+  <text x="695" y="632" text-anchor="middle" class="label">Upstream mean</text>
+  <text x="850" y="632" text-anchor="middle" class="label">Patch · +8.41%</text>
+  <text x="500" y="660" text-anchor="middle" class="note">54,730 pages · counterbalanced A/B · retrieval neutral within repeat variance</text>
 
   <line x1="40" y1="685" x2="960" y2="685" class="grid"/>
-  <text x="40" y="720" class="title">Full ViDoRe v3 deployment validation</text>
-  <text x="40" y="743" class="note">Backend compatibility evidence · four-GPU service results are not attributed to this local-only patch</text>
+  <text x="40" y="720" class="title">Full ViDoRe v3 · default local batch scaling</text>
+  <text x="40" y="744" class="note">No worker overrides · 19,252 pages · all 8/8 datasets passed at every point</text>
 
-  <text x="40" y="780" class="panel">Ingest throughput (pages/s · higher is better)</text>
-  <line x1="70" y1="940" x2="490" y2="940" class="axis"/>
-  <line x1="70" y1="865" x2="490" y2="865" class="grid"/>
-  <line x1="70" y1="790" x2="490" y2="790" class="grid"/>
+  <text x="40" y="780" class="panel">Aggregate throughput (pages/s)</text>
+  <line x1="70" y1="940" x2="600" y2="940" class="axis"/>
+  <line x1="70" y1="790" x2="600" y2="790" class="grid"/>
   <text x="48" y="945" class="label">0</text>
-  <text x="40" y="870" class="label">10</text>
-  <text x="40" y="795" class="label">20</text>
-  <rect x="105" y="870.5" width="90" height="69.5" rx="3" class="patch"/>
-  <rect x="245" y="867.6" width="90" height="72.4" rx="3" class="nim"/>
-  <rect x="385" y="813.8" width="90" height="126.2" rx="3" class="service"/>
-  <text x="150" y="862" text-anchor="middle" class="value">9.268</text>
-  <text x="290" y="859" text-anchor="middle" class="value">9.652</text>
-  <text x="430" y="805" text-anchor="middle" class="value">16.820</text>
-  <text x="150" y="962" text-anchor="middle" class="label">Local HF</text>
-  <text x="150" y="980" text-anchor="middle" class="note">1 GPU</text>
-  <text x="290" y="962" text-anchor="middle" class="label">Self-hosted NIMs</text>
-  <text x="290" y="980" text-anchor="middle" class="note">1 GPU</text>
-  <text x="430" y="962" text-anchor="middle" class="label">Full service</text>
-  <text x="430" y="980" text-anchor="middle" class="note">4 GPUs</text>
+  <text x="40" y="795" class="label">22</text>
+  <rect x="105" y="825.1" width="82" height="114.9" rx="3" class="patchLight"/>
+  <rect x="225" y="802.0" width="82" height="138.0" rx="3" class="patch"/>
+  <rect x="345" y="807.5" width="82" height="132.5" rx="3" class="patchLight"/>
+  <rect x="465" y="804.1" width="82" height="135.9" rx="3" class="baseline"/>
+  <text x="146" y="817" text-anchor="middle" class="value">16.852</text>
+  <text x="266" y="794" text-anchor="middle" class="value">20.240</text>
+  <text x="386" y="799" text-anchor="middle" class="value">19.433</text>
+  <text x="506" y="796" text-anchor="middle" class="value">19.930</text>
+  <text x="146" y="962" text-anchor="middle" class="label">Patch · 2 GPU</text>
+  <text x="266" y="962" text-anchor="middle" class="label">Patch · 4 GPU</text>
+  <text x="386" y="962" text-anchor="middle" class="label">Patch · 8 GPU</text>
+  <text x="506" y="962" text-anchor="middle" class="label">Upstream · 8 GPU</text>
+  <text x="386" y="980" text-anchor="middle" class="small">mean of 2</text>
 
-  <text x="535" y="780" class="panel">Macro retrieval quality (all datasets)</text>
-  <text x="557" y="810" class="note">Path</text>
-  <text x="810" y="810" text-anchor="end" class="note">Recall@5</text>
-  <text x="940" y="810" text-anchor="end" class="note">nDCG@10</text>
-  <line x1="535" y1="821" x2="950" y2="821" class="grid"/>
-  <rect x="540" y="837" width="12" height="12" class="patch"/>
-  <text x="560" y="848" class="label">Local HF</text>
-  <text x="810" y="848" text-anchor="end" class="value">0.4645</text>
-  <text x="940" y="848" text-anchor="end" class="value">0.5204</text>
-  <rect x="540" y="870" width="12" height="12" class="nim"/>
-  <text x="560" y="881" class="label">Self-hosted NIMs</text>
-  <text x="810" y="881" text-anchor="end" class="value">0.4541</text>
-  <text x="940" y="881" text-anchor="end" class="value">0.5095</text>
-  <rect x="540" y="903" width="12" height="12" class="service"/>
-  <text x="560" y="914" class="label">Full service</text>
-  <text x="810" y="914" text-anchor="end" class="value">0.4581</text>
-  <text x="940" y="914" text-anchor="end" class="value">0.5127</text>
-  <rect x="540" y="936" width="12" height="12" class="nightly"/>
-  <text x="560" y="947" class="label">Nightly reference</text>
-  <text x="810" y="947" text-anchor="end" class="value">0.4650</text>
-  <text x="940" y="947" text-anchor="end" class="value">0.5210</text>
-  <text x="535" y="978" class="note">Service vs local HF: -0.0064 Recall@5 · -0.0078 nDCG@10</text>
-  <text x="500" y="1000" text-anchor="middle" class="note">19,252 pages · 14,514 queries · zero OCR errors/OOMs · isolated service runs had zero foreign sources</text>
+  <text x="650" y="780" class="panel">What the scale run established</text>
+  <rect x="650" y="800" width="310" height="155" rx="6" fill="#f3f4f6"/>
+  <text x="670" y="828" class="value">4 GPUs were the suite knee</text>
+  <text x="670" y="854" class="note">+4.16% vs patch 8-GPU mean</text>
+  <text x="670" y="878" class="note">2 GPU took 20.11% longer</text>
+  <text x="670" y="906" class="value">8-GPU patch was repeatable</text>
+  <text x="670" y="932" class="note">2.50% below exact upstream control</text>
+  <text x="670" y="975" class="small">OCR actors per dataset: 6 / 12 / 24</text>
+  <text x="670" y="995" class="small">Physical OCR GPUs used: 2 / 2 / 3</text>
+
+  <line x1="40" y1="1020" x2="960" y2="1020" class="grid"/>
+  <text x="40" y="1055" class="title">Deployment compatibility</text>
+  <text x="40" y="1079" class="note">Remote NIM/service results are not attributed to this local-only patch</text>
+
+  <text x="40" y="1108" class="panel">Full ViDoRe throughput (pages/s)</text>
+  <line x1="70" y1="1260" x2="490" y2="1260" class="axis"/>
+  <line x1="70" y1="1125" x2="490" y2="1125" class="grid"/>
+  <text x="48" y="1265" class="label">0</text>
+  <text x="40" y="1125" class="label">20</text>
+  <rect x="105" y="1197.4" width="90" height="62.6" rx="3" class="patch"/>
+  <rect x="245" y="1194.8" width="90" height="65.2" rx="3" class="nim"/>
+  <rect x="385" y="1146.5" width="90" height="113.5" rx="3" class="service"/>
+  <text x="150" y="1189" text-anchor="middle" class="value">9.268</text>
+  <text x="290" y="1187" text-anchor="middle" class="value">9.652</text>
+  <text x="430" y="1138" text-anchor="middle" class="value">16.820</text>
+  <text x="150" y="1282" text-anchor="middle" class="label">Local HF · 1 GPU</text>
+  <text x="290" y="1282" text-anchor="middle" class="label">NIMs · 1 GPU</text>
+  <text x="430" y="1282" text-anchor="middle" class="label">Service · 4 GPU</text>
+
+  <text x="555" y="1108" class="panel">BO767 service throughput (pages/s)</text>
+  <line x1="585" y1="1260" x2="955" y2="1260" class="axis"/>
+  <line x1="585" y1="1125" x2="955" y2="1125" class="grid"/>
+  <text x="563" y="1265" class="label">0</text>
+  <text x="555" y="1125" class="label">95</text>
+  <rect x="660" y="1139.7" width="95" height="120.3" rx="3" class="baseline"/>
+  <rect x="810" y="1135.3" width="95" height="124.7" rx="3" class="service"/>
+  <text x="707" y="1131" text-anchor="middle" class="value">84.64</text>
+  <text x="857" y="1127" text-anchor="middle" class="value">87.772</text>
+  <text x="707" y="1282" text-anchor="middle" class="label">Supplied baseline</text>
+  <text x="857" y="1282" text-anchor="middle" class="label">Measured · +3.70%</text>
+  <text x="500" y="1310" text-anchor="middle" class="small">All reported ingest timers exclude query evaluation · no OOMs · NIM stacks stopped after testing</text>
 </svg>

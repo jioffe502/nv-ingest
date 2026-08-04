@@ -58,9 +58,10 @@ only on an exception or wrong result count.
 
 ![Issue 2323 OCR batching and deployment validation](proof-summary.svg)
 
-The actor/model and BO767 comparisons are attributable A/B evidence for this
-patch. The ViDoRe deployment panel is compatibility context only: its backend
-paths and GPU counts differ.
+The actor/model and one-GPU BO767 comparisons are attributable A/B evidence for
+this patch. The default multi-GPU local comparison is a scale/correctness check
+with an exact eight-GPU upstream control. The NIM and service panels are
+compatibility context only: their backend paths and GPU counts differ.
 
 The controlled GPU A/B traversed Ray Data, the real `OCRActor`, one persistent
 local wrapper, and the locked Nemotron OCR v2 model. It used 128 fixed real
@@ -112,6 +113,56 @@ short to separate the patch from warm-run variation.
 Its first pair favored the patch by 7.3%, while the counterbalanced warm pair
 was effectively tied. That does not contradict the BO767 result; it shows that
 a two-document run is underpowered for a whole-ingest performance claim.
+
+### Default multi-GPU batch scaling
+
+A separate current-commit run exposed two, four, or eight H100s to batch mode
+and left every worker count on `auto`. The same eight ViDoRe runfiles, dataset
+order, cache, lock, package versions, and OCR crop-list cap of 8 were used at
+each point. The eight-GPU comparison was counterbalanced as patch, exact
+`upstream/main`, patch.
+
+| Source | Visible GPUs | Ingest runtime | Throughput | Recall@5 | nDCG@10 | Peak memory on one GPU |
+|---|---:|---:|---:|---:|---:|---:|
+| Patch | 2 | 1,142.447 s | 16.852 pages/s | 0.4615 | 0.5174 | 34,938 MiB |
+| Patch | 4 | 951.175 s | **20.240 pages/s** | 0.4650 | 0.5205 | 36,544 MiB |
+| Patch A | 8 | 989.582 s | 19.455 pages/s | 0.4633 | 0.5188 | 43,034 MiB |
+| Exact upstream | 8 | 965.978 s | 19.930 pages/s | 0.4635 | 0.5189 | 39,532 MiB |
+| Patch B | 8 | 991.837 s | 19.410 pages/s | 0.4620 | 0.5170 | 43,208 MiB |
+
+All five runs passed all eight datasets without an OCR error or OOM. The two
+patch eight-GPU runs differed by only 0.23% in ingest time. Their mean was
+990.710 seconds (19.433 pages/s), so the exact upstream control was 2.50%
+faster and the four-GPU patch run was 4.16% faster than the patch eight-GPU
+mean. The supplied nightly reference, 959.58 seconds and 20.06 pages/s, was
+close to the exact upstream control (-0.65% throughput).
+
+This proves the corrected path executes successfully when eight GPUs are
+exposed, but it does **not** demonstrate positive eight-GPU scaling for this
+suite. Six datasets were fastest on four GPUs, `industrial` was fastest on
+eight, and `physics` was fastest on two:
+
+| Dataset | 2 GPU | 4 GPU | 8 GPU patch mean | Fastest |
+|---|---:|---:|---:|---:|
+| `computer_science` | 102.007 s | **91.290 s** | 104.433 s | 4 GPU |
+| `energy` | 138.966 s | **115.108 s** | 122.040 s | 4 GPU |
+| `finance_en` | 199.473 s | **160.173 s** | 163.430 s | 4 GPU |
+| `finance_fr` | 150.908 s | **118.884 s** | 127.161 s | 4 GPU |
+| `hr` | 95.646 s | **92.709 s** | 103.058 s | 4 GPU |
+| `industrial` | 241.673 s | 175.424 s | **152.791 s** | 8 GPU |
+| `pharmaceuticals` | 123.499 s | **103.250 s** | 110.217 s | 4 GPU |
+| `physics` | **90.275 s** | 94.337 s | 107.579 s | 2 GPU |
+
+The default resource policy creates three initial OCR actors per visible GPU
+and reserves 0.1 GPU per actor. NVML process sampling observed 6, 12, and 24
+OCR actors per dataset at the two-, four-, and eight-GPU points, but those OCR
+processes occupied only 2, 2, and 3 physical GPUs respectively. All eight GPUs
+did receive work across the complete eight-GPU pipeline; OCR placement itself
+was not even. Together with the dataset crossover, this makes actor
+startup/placement and crop-list occupancy the leading scale explanation, not
+GPU capacity. A falsifiable next investigation is to record outer list-size
+histograms and actor startup time at 2/4/8 GPUs before changing Ray defaults.
+Worker policy is deliberately outside this correctness patch.
 
 ### Retrieval non-regression
 
@@ -292,6 +343,26 @@ quality profile as the earlier service smoke. These deployment results validate
 the current NIM/service stack; they do not attribute remote performance to this
 local-only patch.
 
+#### BO767 four-GPU service result
+
+The same isolated service topology also completed BO767 with the four core
+NIMs pinned one per GPU. Retriever and vector-store volumes were recreated
+immediately before the run; all 767 files and 991 queries completed with zero
+failed ingest jobs, container restarts, OCR errors, or OOMs.
+
+| Measurement | Result | Supplied baseline | Effect |
+|---|---:|---:|---:|
+| Ingest runtime | 623.545 s | 646.621 s implied | 3.57% lower |
+| Throughput | **87.772 pages/s** | 84.64 pages/s | **3.70% higher** |
+| Recall@5 | 0.856710 | - | - |
+| Recall@10 | 0.907164 | - | - |
+| nDCG@10 | 0.761228 | - | - |
+
+The client used an empty `CUDA_VISIBLE_DEVICES`, so all model inference went
+through the NIM endpoints. Peak sampled memory on GPUs 0-3 was 1,929, 1,923,
+3,865, and 9,698 MiB respectively; GPUs 4-7 remained unused. This is a service
+deployment result and is not caused by the local-only batching change.
+
 Three current Compose portability/configuration issues required `/tmp`-only
 workarounds; none is changed by this PR and all are tracked in
 [#2424](https://github.com/NVIDIA/NeMo-Retriever/issues/2424):
@@ -309,11 +380,10 @@ workarounds; none is changed by this PR and all are tracked in
 This record supports the local Nemotron OCR v2 change only. The remote NIM and
 service runs establish compatibility but do not change or attribute speedup to
 the remote OCR path. JP20 was not run and byte-identical real OCR output is not
-claimed. The one-GPU NIM and four-GPU service suites continuously sampled all
-eight GPUs; the older local-HF and BO767 end-to-end runs did not. The bounded
-local-HF batch of 8, four colocated NIMs, and four-GPU service deployment were
-OOM-free on the tested H100s; smaller GPU classes require separate sizing
-evidence.
+claimed. The multi-GPU local-HF, one-GPU NIM, and four-GPU service runs sampled
+all eight devices continuously. The bounded local-HF batch of 8, four colocated
+NIMs, and four-GPU service deployment were OOM-free on the tested H100s;
+smaller GPU classes require separate sizing evidence.
 
 The BO767 command was repeated against exported upstream and patch source
 trees, changing only `PYTHONPATH` and the output/run identifiers:
@@ -344,6 +414,18 @@ VLLM_DEEP_GEMM_WARMUP=skip retriever harness run-files \
   nemo_retriever/harness/runfiles/vidore_v3_{computer_science,energy,finance_en,finance_fr,hr,industrial,pharmaceuticals,physics}_beir.json \
   --dataset-paths <dataset_paths.yaml> --mode batch \
   --output-dir <output> --session-name issue-2323-vidore-local-batch --json
+```
+
+The default multi-GPU runs changed only the visible-device set; no worker
+count was supplied:
+
+```bash
+CUDA_VISIBLE_DEVICES=<0,1 | 0,1,2,3 | 0,1,2,3,4,5,6,7> \
+HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 VLLM_DEEP_GEMM_WARMUP=skip \
+uv run --frozen --project nemo_retriever retriever harness run-files \
+  nemo_retriever/harness/runfiles/vidore_v3_{computer_science,energy,finance_en,finance_fr,hr,industrial,pharmaceuticals,physics}_beir.json \
+  --dataset-paths <dataset_paths.yaml> --mode batch \
+  --output-dir <output> --session-name <unique-session> --json
 ```
 
 For the NIM checks, the same `computer_science` runfile was invoked first with
@@ -377,6 +459,17 @@ CUDA_VISIBLE_DEVICES= retriever harness run-files <one-runfile> \
 Each result was followed by an assertion that every returned `source` belonged
 to the current runfile's PDF corpus.
 
+BO767 service mode used the same healthy four-NIM stack and fresh service
+storage:
+
+```bash
+CUDA_VISIBLE_DEVICES= retriever harness run-files \
+  nemo_retriever/harness/runfiles/bo767_beir.json \
+  --dataset-paths <dataset_paths.yaml> --mode service \
+  --service-endpoint http://localhost:7670 --output-dir <output> \
+  --session-name issue-2323-bo767-service-g4 --json
+```
+
 ViDoRe used source commit `611af594818342b655b5e9ae89c66aea2cbc3963`.
 BO767 compared upstream `52886112cafab4c4bca1cda0d4f588785adfe4d3`
 with patch `eaed9262780c45c1dce9e9a929357f2bcd886234`. Both used lock SHA-256
@@ -399,3 +492,12 @@ from service-image commit `5a8ebd9e5468be4a72ae9888a7d0cba173e44e96`.
 The eight isolated service invocations took 2,578.13 seconds wall time including
 storage resets and query evaluation. Peak GPU memory was 1,927, 1,923, 3,865,
 and 11,364 MiB on GPUs 0-3 respectively; GPUs 4-7 remained at zero.
+
+The default multi-GPU runs used patch commit
+`e49b0ce77ac4f805a55a13900ea6a65ff30d2f16` and exact upstream commit
+`3d9e26f1a2d2fd73af499bb7a9ef7fe855739841`. BO767 service used the same
+patch worktree and the unchanged service runtime from image commit
+`5a8ebd9e5468be4a72ae9888a7d0cba173e44e96`. All used lock SHA-256
+`d9651104d0a10277642fa7e4794976948177f24c273da203e6bb694107d20bf6`
+and `nemotron-ocr==2.0.1.dev20260720042916`. Both Compose projects were stopped
+after measurement; no NIM container was left running.
