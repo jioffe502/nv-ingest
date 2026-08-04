@@ -91,7 +91,10 @@ def diff_artifact_dirs(left: Path, right: Path) -> dict[str, Any]:
         "comparison_warning": (
             None
             if same_index_mode
-            else "Dense, sparse, and hybrid results are distinct baseline series; interpret this cross-mode diff explicitly."
+            else (
+                "Dense, sparse, and hybrid results are distinct baseline series; "
+                "interpret this cross-mode diff explicitly."
+            )
         ),
         "summary_metrics": deltas,
     }

@@ -910,8 +910,7 @@ class LanceDB(VDB):
 
         if hybrid_fusion is not None and not isinstance(hybrid_fusion, HybridFusionPolicy):
             raise TypeError(
-                "hybrid_fusion must be a HybridFusionPolicy or None; "
-                f"got {type(hybrid_fusion).__name__}"
+                "hybrid_fusion must be a HybridFusionPolicy or None; " f"got {type(hybrid_fusion).__name__}"
             )
 
         where_clause = kwargs.pop("where", None)

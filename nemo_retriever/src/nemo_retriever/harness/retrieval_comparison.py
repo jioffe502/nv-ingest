@@ -514,7 +514,8 @@ def _write_report(path: Path, summary: Mapping[str, Any], cases: Sequence[Mappin
         "",
         "All modes replay the same extracted LanceDB rows. Extraction statuses are deterministic heuristics; "
         "`needs_review` is not a confirmed extraction failure.",
-        "Best-relevant-rank deltas assign misses one rank beyond the replay depth so rescues and regressions remain paired.",
+        "Best-relevant-rank deltas assign misses one rank beyond the replay depth so rescues and regressions "
+        "remain paired.",
         "",
         "## Overall",
         "",
@@ -534,7 +535,8 @@ def _write_report(path: Path, summary: Mapping[str, Any], cases: Sequence[Mappin
         lines.append(
             f"- {comparison}: paired ΔR@10 {recall['mean']:.4f} (95% CI {recall['ci95']}), "
             f"ΔnDCG@10 {ndcg['mean']:.4f} (95% CI {ndcg['ci95']}), "
-            f"best-rank improvement {rank['mean_improvement']} (95% CI {rank['ci95']}, n={rank['paired_sample_count']})"
+            f"best-rank improvement {rank['mean_improvement']} "
+            f"(95% CI {rank['ci95']}, n={rank['paired_sample_count']})"
         )
     lines.extend(["", "## Slices with at least 30 queries", ""])
     for slice_result in summary.get("slices", []):
@@ -543,7 +545,8 @@ def _write_report(path: Path, summary: Mapping[str, Any], cases: Sequence[Mappin
         for mode, metrics in slice_result["modes"].items():
             lines.append(
                 f"- {mode}: R@5 {metrics['recall_5']:.4f}, R@10 {metrics['recall_10']:.4f}, "
-                f"nDCG@10 {metrics['ndcg_10']:.4f}, p50/p95 {metrics['latency_p50_ms']:.2f}/{metrics['latency_p95_ms']:.2f} ms"
+                f"nDCG@10 {metrics['ndcg_10']:.4f}, "
+                f"p50/p95 {metrics['latency_p50_ms']:.2f}/{metrics['latency_p95_ms']:.2f} ms"
             )
         for comparison, metrics in slice_result.get("paired_deltas", {}).items():
             recall = metrics["recall_10"]
@@ -552,7 +555,8 @@ def _write_report(path: Path, summary: Mapping[str, Any], cases: Sequence[Mappin
             lines.append(
                 f"- {comparison}: paired ΔR@10 {recall['mean']:.4f} (95% CI {recall['ci95']}), "
                 f"ΔnDCG@10 {ndcg['mean']:.4f} (95% CI {ndcg['ci95']}), "
-                f"best-rank improvement {rank['mean_improvement']} (95% CI {rank['ci95']}, n={rank['paired_sample_count']})"
+                f"best-rank improvement {rank['mean_improvement']} "
+                f"(95% CI {rank['ci95']}, n={rank['paired_sample_count']})"
             )
         lines.append("")
     lines.extend(["## Representative cases", ""])
@@ -562,7 +566,8 @@ def _write_report(path: Path, summary: Mapping[str, Any], cases: Sequence[Mappin
     lines.extend(
         [
             "",
-            "See `query_cases.jsonl` for ranked hits and indexed-text excerpts, and `evidence_crops/` for available annotated page evidence.",
+            "See `query_cases.jsonl` for ranked hits and indexed-text excerpts, and `evidence_crops/` "
+            "for available annotated page evidence.",
             "",
         ]
     )
