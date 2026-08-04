@@ -16,15 +16,20 @@ from nemo_retriever.harness.benchmark_registry import (
     list_benchmarks,
     list_runsets,
 )
-from nemo_retriever.harness.contracts import EXIT_INVALID, EXIT_MISSING_INPUT, FailurePayload
+from nemo_retriever.harness.contracts import (
+    EXIT_INVALID,
+    EXIT_MISSING_INPUT,
+    FailurePayload,
+)
+from nemo_retriever.harness.diff import diff_artifact_dirs
+from nemo_retriever.harness.release_reference import load_release_references
+from nemo_retriever.harness.resolution import make_run_id
+from nemo_retriever.harness.retrieval_comparison import compare_retrieval
 from nemo_retriever.harness.revamp_runner import (
     HarnessRunError,
     run_benchmark,
     show_benchmark_payload,
 )
-from nemo_retriever.harness.diff import diff_artifact_dirs
-from nemo_retriever.harness.resolution import make_run_id
-from nemo_retriever.harness.release_reference import load_release_references
 from nemo_retriever.harness.runfile import load_runfile
 from nemo_retriever.harness.runsets import run_runfiles, run_runset
 from nemo_retriever.harness.slack import (
@@ -46,6 +51,37 @@ app = typer.Typer(
 
 def _echo_json(payload: object) -> None:
     typer.echo(json.dumps(payload, indent=2, sort_keys=False))
+
+
+@app.command("compare-retrieval")
+def compare_retrieval_command(
+    run_dir: Annotated[Path, typer.Argument(help="Completed local/batch ViDoRe harness run directory.")],
+    modes: Annotated[
+        str,
+        typer.Option("--modes", help="Comma-separated retrieval modes replayed against the same index."),
+    ] = "dense,sparse,hybrid",
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", help="Comparison directory; defaults to RUN_DIR/retrieval_comparison."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit summary JSON to stdout.")] = False,
+) -> None:
+    """Compare retrieval modes without re-ingesting the completed run."""
+    try:
+        summary = compare_retrieval(
+            run_dir,
+            modes=[mode.strip() for mode in modes.split(",") if mode.strip()],
+            output_dir=output_dir,
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=EXIT_INVALID) from exc
+    if json_output:
+        _echo_json(summary)
+    else:
+        target = (output_dir or run_dir / "retrieval_comparison").expanduser().resolve()
+        typer.echo(f"Comparison artifacts: {target}")
+        typer.echo(f"Report: {target / 'report.md'}")
 
 
 @app.command("check-vidore-access")

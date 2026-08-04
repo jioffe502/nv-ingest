@@ -11,19 +11,20 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Sequence, cast
 
 import pandas as pd
 
-from nemo_retriever.models import VL_EMBED_MODEL, VL_RERANK_MODEL, resolve_embed_model
-from nemo_retriever.graph.retriever_utils import (
-    filter_retrieval_kwargs,
-    rerank_long_dataframe_to_hits,
-)
+from nemo_retriever.common.vdb.hybrid_fusion import DEFAULT_HYBRID_FUSION_POLICY
 from nemo_retriever.common.vdb.lancedb_capabilities import (
     LanceRetrievalMode,
     LanceTableCapabilities,
     inspect_lancedb_table,
 )
 from nemo_retriever.common.vdb.records import RetrievalHit, normalize_retrieval_results
-from nemo_retriever.query.shaping import shape_query_hits
+from nemo_retriever.graph.retriever_utils import (
+    filter_retrieval_kwargs,
+    rerank_long_dataframe_to_hits,
+)
+from nemo_retriever.models import VL_EMBED_MODEL, VL_RERANK_MODEL, resolve_embed_model
 from nemo_retriever.operators.vdb import RetrieveVdbOperator
+from nemo_retriever.query.shaping import shape_query_hits
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +104,11 @@ class Retriever:
             raise ValueError("run_mode must be 'local' or 'service'")
 
     def _merge_embed_params(self, extra: Optional[dict[str, Any]] = None) -> Any:
-        from nemo_retriever.models import _LOCAL_INGEST_EMBED_BACKENDS, normalize_backend
         from nemo_retriever.common.params import EmbedParams
+        from nemo_retriever.models import (
+            _LOCAL_INGEST_EMBED_BACKENDS,
+            normalize_backend,
+        )
 
         base: dict[str, Any] = {
             "model_name": VL_EMBED_MODEL,
@@ -142,9 +146,9 @@ class Retriever:
         return int(self._merge_rerank_actor_kwargs().get("refine_factor", 4))
 
     def _build_default_graph(self, *, embed_extra: Optional[dict[str, Any]] = None) -> Any:
-        from nemo_retriever.operators.rerank import NemotronRerankActor
         from nemo_retriever.operators.embed.cpu_operator import _BatchEmbedCPUActor
         from nemo_retriever.operators.embed.operators import _BatchEmbedActor
+        from nemo_retriever.operators.rerank import NemotronRerankActor
 
         embed_params = self._merge_embed_params(embed_extra)
         if self.run_mode == "service":
@@ -458,6 +462,7 @@ class Retriever:
                 ]
             if mode == "hybrid":
                 vdb_call_kwargs["hybrid"] = True
+                vdb_call_kwargs.setdefault("hybrid_fusion", DEFAULT_HYBRID_FUSION_POLICY)
             elif mode == "dense" and has_mode_override:
                 vdb_call_kwargs["hybrid"] = False
             if caps.vector_column and caps.vector_column != "vector":

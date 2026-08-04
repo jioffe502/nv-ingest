@@ -4,25 +4,28 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass
 import os
 import re
 import time
 import traceback
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 from nemo_retriever.cli.ingest_workflow import run_ingest_workflow
 from nemo_retriever.cli.shared import silence_noisy_libraries
 from nemo_retriever.harness.artifact_writer import (
+    ArtifactWriter,
     append_text,
     artifact_paths,
-    ArtifactWriter,
     capture_output_to_log,
     redact,
 )
-from nemo_retriever.harness.beir_runner import run_beir_queries, run_service_beir_queries
+from nemo_retriever.harness.beir_runner import (
+    run_beir_queries,
+    run_service_beir_queries,
+)
 from nemo_retriever.harness.contracts import (
     EXIT_ARTIFACT_WRITE_FAILURE,
     EXIT_INGEST_FAILURE,
@@ -30,15 +33,15 @@ from nemo_retriever.harness.contracts import (
     EXIT_INVALID,
     EXIT_MISSING_INPUT,
     EXIT_SUCCESS,
+    PHASE_VALUES,
     FailurePayload,
     HarnessRunError,
-    PHASE_VALUES,
     RunOutcome,
 )
 from nemo_retriever.harness.environment import collect_environment
 from nemo_retriever.harness.json_io import artifact_write_error, write_json
-from nemo_retriever.harness.metrics import build_summary_metrics
 from nemo_retriever.harness.metric_gates import enforce_metric_gates, parse_metric_gates
+from nemo_retriever.harness.metrics import build_summary_metrics
 from nemo_retriever.harness.resolution import (
     build_ingest_request,
     build_query_request,
@@ -52,7 +55,10 @@ from nemo_retriever.harness.resolution import (
     validate_dataset_inputs,
 )
 from nemo_retriever.ingest.plan import resolve_ingest_plan
-from nemo_retriever.ingest.service import execute_service_ingest_request, resolve_service_ingest_request
+from nemo_retriever.ingest.service import (
+    execute_service_ingest_request,
+    resolve_service_ingest_request,
+)
 from nemo_retriever.query.workflow import resolve_query_plan
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -428,6 +434,10 @@ def run_prepared_benchmark(
 
         ingest_summary: dict[str, Any] | None = None
         ingest_secs: float | None = None
+        requested_index_mode = str(((resolved.get("ingest") or {}).get("storage") or {}).get("index_mode", "auto"))
+        resolved_index_mode = requested_index_mode
+        if not service_mode:
+            resolved_index_mode = str(getattr(ingest_plan, "index_mode", requested_index_mode))
         query_latencies_ms: list[float] = []
         beir_metrics: dict[str, float] = {}
         query_count = 0
@@ -501,6 +511,8 @@ def run_prepared_benchmark(
             failure=None,
             metric_gates=list(requirements),
             skipped_metric_gates=list(skipped_metric_gates),
+            requested_index_mode=requested_index_mode,
+            resolved_index_mode=resolved_index_mode,
         )
         write_json(writer.path("results.json"), result)
         writer.status(

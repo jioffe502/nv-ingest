@@ -255,7 +255,7 @@ These options apply to `retriever ingest`, `retriever ingest local`, and
 | `--lancedb-uri` | `lancedb` | LanceDB database URI. |
 | `--table-name` | `nemo-retriever` | LanceDB table name. Must match query-time storage flags. |
 | `--overwrite/--append` | overwrite | Overwrite the table by default; use `--append` to add rows. |
-| `--index-mode` | `dense` | Dense vector index by default; `hybrid` also builds BM25/FTS and `sparse` builds an FTS-only table. |
+| `--index-mode` | `auto` | `auto` creates a hybrid vector + BM25/FTS table. On append it preserves the existing physical mode. Explicit `hybrid` upgrades a dense table; destructive or sparse/dense mismatches are rejected. |
 | `--method` | planner default | PDF extraction method such as `pdfium` or `nemotron_parse`. |
 | `--extract-text`, `--extract-tables`, `--extract-charts` | planner default | Enable or disable extraction families. |
 | `--ocr-version` | planner default | OCR engine version for local extraction. |

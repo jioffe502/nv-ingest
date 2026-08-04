@@ -6,17 +6,19 @@ import json
 import logging
 import os
 import time
-
 from collections.abc import Iterable, Sequence
 from datetime import timedelta
 from typing import Any, Final, FrozenSet
 
-import lancedb
 import pyarrow as pa
 import pyarrow.compute as pc
 
+import lancedb
 from nemo_retriever.common.vdb.adt_vdb import VDB
-
+from nemo_retriever.common.vdb.hybrid_fusion import (
+    HybridFusionPolicy,
+    WeightedRRFReranker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -862,8 +864,13 @@ class LanceDB(VDB):
         query_texts:
             Raw query strings aligned with ``vectors``. Required for
             ``hybrid=True`` and ignored for dense-only retrieval.
+        hybrid_fusion:
+            Optional :class:`HybridFusionPolicy`. When present, each hybrid leg
+            retrieves at least ``candidate_depth`` rows, applies weighted RRF,
+            and returns only the requested ``top_k`` rows.
         """
         hybrid = kwargs.pop("hybrid", self.hybrid)
+        hybrid_fusion = kwargs.pop("hybrid_fusion", None)
         query_texts = kwargs.pop("query_texts", None)
         table_path = kwargs.pop("table_path", self.uri)
         table_name = kwargs.pop("table_name", self.table_name)
@@ -898,6 +905,14 @@ class LanceDB(VDB):
                     )
             search_kwargs["query_type"] = "hybrid"
             search_kwargs.setdefault("fts_columns", "text")
+        elif hybrid_fusion is not None:
+            raise ValueError("hybrid_fusion requires hybrid=True")
+
+        if hybrid_fusion is not None and not isinstance(hybrid_fusion, HybridFusionPolicy):
+            raise TypeError(
+                "hybrid_fusion must be a HybridFusionPolicy or None; "
+                f"got {type(hybrid_fusion).__name__}"
+            )
 
         where_clause = kwargs.pop("where", None)
         _filter_fallback = kwargs.pop("_filter", None)
@@ -932,10 +947,15 @@ class LanceDB(VDB):
                 query = table.search([vector], vector_column_name=vector_column_name, **search_kwargs)
             if where_clause is not None:
                 query = query.where(where_clause)
-            query = query.limit(top_k).refine_factor(refine_factor).nprobes(n_probe)
+            query_limit = max(top_k, hybrid_fusion.candidate_depth) if hybrid_fusion is not None else top_k
+            query = query.limit(query_limit).refine_factor(refine_factor).nprobes(n_probe)
+            if hybrid_fusion is not None:
+                query = query.rerank(WeightedRRFReranker(hybrid_fusion))
             if result_fields is not None:
                 query = query.select(result_fields)
             results = query.to_list()
+            if hybrid_fusion is not None:
+                results = results[:top_k]
             search_results.append(results)
 
         return search_results

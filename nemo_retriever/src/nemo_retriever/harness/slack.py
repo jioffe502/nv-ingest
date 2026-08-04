@@ -145,6 +145,9 @@ def _run_metadata(results_payload: dict[str, Any], environment_payload: dict[str
     if isinstance(raw_run_metadata, dict):
         metadata.update(raw_run_metadata)
     metadata.update(environment_payload)
+    for key in ("requested_index_mode", "resolved_index_mode"):
+        if results_payload.get(key) is not None:
+            metadata[key] = results_payload[key]
     if "python" in metadata and "python_version" not in metadata:
         metadata["python_version"] = metadata["python"]
     return metadata
@@ -493,6 +496,10 @@ def _release_reference_blocks(
         for run in report.results:
             if not run.success or run.dataset != reference.dataset:
                 continue
+            run_index_mode = run.run_metadata.get("resolved_index_mode")
+            if run_index_mode is not None or reference.resolved_index_mode is not None:
+                if run_index_mode != reference.resolved_index_mode:
+                    continue
             rows = [_three_column_row("METRIC", "CURRENT", reference.release.upper(), bold=True)]
             for key in ("gpu_sku", "gpu_count", "workload_gpu_count"):
                 current_value = run.run_metadata.get(key)

@@ -161,6 +161,7 @@ def test_root_ingest_runs_default_execution_chain(monkeypatch, tmp_path) -> None
         "uri": "lancedb",
         "table_name": "nemo-retriever",
         "overwrite": True,
+        "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
     }
     assert "Ingested 1 file(s) → 7 row(s) in LanceDB lancedb/nemo-retriever." in result.output
@@ -202,6 +203,7 @@ def test_root_ingest_without_mode_accepts_local_options_before_documents(monkeyp
         "uri": "/tmp/default-lancedb",
         "table_name": "nemo-retriever",
         "overwrite": False,
+        "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
     }
 
@@ -398,6 +400,7 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
         "uri": "/tmp/lancedb",
         "table_name": "docs",
         "overwrite": True,
+        "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
     }
     assert "Ingested 2 file(s) → 12 row(s) in LanceDB /tmp/lancedb/docs." in result.output
@@ -417,6 +420,7 @@ def test_root_ingest_append_forwards_overwrite_false(monkeypatch, tmp_path) -> N
         "uri": "lancedb",
         "table_name": "nemo-retriever",
         "overwrite": False,
+        "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
     }
 

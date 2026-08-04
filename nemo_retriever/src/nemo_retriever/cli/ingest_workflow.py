@@ -65,6 +65,8 @@ def _ingest_plan_to_dry_run_data(plan: ResolvedIngestPlan) -> dict[str, Any]:
     return {
         "dry_run": True,
         "profile": plan.profile,
+        "requested_index_mode": plan.requested_index_mode,
+        "index_mode": plan.index_mode,
         "documents": list(plan.documents),
         "branches": [
             {

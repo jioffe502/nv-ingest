@@ -5,16 +5,14 @@
 from pathlib import Path
 
 import pytest
-
 from nemo_retriever.harness.benchmark_registry import (
+    VIDORE_V3_EMBED_MODEL,
+    VIDORE_V3_PUBLIC_DATASETS,
     get_benchmark,
     get_dataset,
     get_runset,
-    VIDORE_V3_EMBED_MODEL,
-    VIDORE_V3_PUBLIC_DATASETS,
 )
 from nemo_retriever.harness.runfile import load_runfile
-
 
 VIDORE_V3_DATASET_FACTS = {
     "vidore_v3_computer_science": (2, 1360, 1290),
@@ -47,6 +45,7 @@ def test_vidore_v3_benchmarks_use_page_level_multimodal_defaults(dataset_name: s
         "embed_modality": "text_image",
         "embed_granularity": "page",
     }
+    assert benchmark.ingest["storage"]["index_mode"] == "hybrid"
     assert benchmark.query["embed_model_name"] == VIDORE_V3_EMBED_MODEL
     assert benchmark.evaluation["dataset_name"] == dataset_name
     assert benchmark.evaluation["doc_id_field"] == "pdf_page"
@@ -71,3 +70,13 @@ def test_vidore_v3_all_runset_contains_every_public_dataset() -> None:
     runset = get_runset("vidore_v3_all")
 
     assert runset.runs == tuple(f"{name}_beir" for name in VIDORE_V3_PUBLIC_DATASETS)
+
+
+def test_vidore_v3_dense_runset_keeps_historical_configuration_explicit() -> None:
+    runset = get_runset("vidore_v3_all_dense")
+
+    assert runset.runs == tuple(f"{name}_beir_dense" for name in VIDORE_V3_PUBLIC_DATASETS)
+    for benchmark_name in runset.runs:
+        benchmark = get_benchmark(benchmark_name)
+        assert benchmark.ingest["storage"]["index_mode"] == "dense"
+        assert benchmark.query["retrieval_mode"] == "dense"
