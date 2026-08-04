@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="670" viewBox="0 0 1000 670" role="img" aria-labelledby="title desc">
-  <title id="title">Controlled local OCR batching results</title>
-  <desc id="desc">The patch reduces model calls per 128 crops from 128 to 16, increases actor throughput from 34.4 to 55.8 crops per second, and reduces mean BO767 ingest time from 1608.0 to 1483.3 seconds.</desc>
-  <rect width="1000" height="670" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1010" viewBox="0 0 1000 1010" role="img" aria-labelledby="title desc">
+  <title id="title">Issue 2323 local OCR batching evidence</title>
+  <desc id="desc">The patch reduces model calls per 128 crops from 128 to 16, increases actor throughput from 34.4 to 55.8 crops per second, and reduces mean BO767 ingest time from 1608.0 to 1483.3 seconds. Full ViDoRe validation compares the patched one-GPU local path, one-GPU self-hosted NIMs, and four-GPU service mode without attributing backend differences to the local-only patch.</desc>
+  <rect width="1000" height="1010" fill="#ffffff"/>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2937; }
     .title { font-size: 22px; font-weight: 650; }
@@ -13,10 +13,13 @@
     .axis { stroke: #6b7280; stroke-width: 1.2; }
     .upstream { fill: #6b7280; }
     .patch { fill: #76b900; }
+    .nim { fill: #2563eb; }
+    .service { fill: #7c3aed; }
+    .nightly { fill: #ffffff; stroke: #6b7280; stroke-width: 2; }
   </style>
-  <text x="40" y="34" class="title">Ray Data → OCRActor → local Nemotron OCR v2</text>
+  <text x="40" y="34" class="title">Issue #2323 · bounded cross-page local OCR batching</text>
 
-  <text x="40" y="70" class="panel">Model invocations per 128 crops</text>
+  <text x="40" y="70" class="panel">Cross-page model invocations per 128 crops</text>
   <line x1="70" y1="300" x2="445" y2="300" class="axis"/>
   <line x1="70" y1="120" x2="445" y2="120" class="grid"/>
   <line x1="70" y1="210" x2="445" y2="210" class="grid"/>
@@ -80,4 +83,52 @@
   <text x="695" y="622" text-anchor="middle" class="label">Upstream</text>
   <text x="850" y="622" text-anchor="middle" class="label">Patch · +8.41%</text>
   <text x="500" y="652" text-anchor="middle" class="note">54,730 pages · 991 queries · aggregate retrieval metrics neutral within baseline variance</text>
+
+  <line x1="40" y1="685" x2="960" y2="685" class="grid"/>
+  <text x="40" y="720" class="title">Full ViDoRe v3 deployment validation</text>
+  <text x="40" y="743" class="note">Backend compatibility evidence · four-GPU service results are not attributed to this local-only patch</text>
+
+  <text x="40" y="780" class="panel">Ingest throughput (pages/s · higher is better)</text>
+  <line x1="70" y1="940" x2="490" y2="940" class="axis"/>
+  <line x1="70" y1="865" x2="490" y2="865" class="grid"/>
+  <line x1="70" y1="790" x2="490" y2="790" class="grid"/>
+  <text x="48" y="945" class="label">0</text>
+  <text x="40" y="870" class="label">10</text>
+  <text x="40" y="795" class="label">20</text>
+  <rect x="105" y="870.5" width="90" height="69.5" rx="3" class="patch"/>
+  <rect x="245" y="867.6" width="90" height="72.4" rx="3" class="nim"/>
+  <rect x="385" y="813.8" width="90" height="126.2" rx="3" class="service"/>
+  <text x="150" y="862" text-anchor="middle" class="value">9.268</text>
+  <text x="290" y="859" text-anchor="middle" class="value">9.652</text>
+  <text x="430" y="805" text-anchor="middle" class="value">16.820</text>
+  <text x="150" y="962" text-anchor="middle" class="label">Local HF</text>
+  <text x="150" y="980" text-anchor="middle" class="note">1 GPU</text>
+  <text x="290" y="962" text-anchor="middle" class="label">Self-hosted NIMs</text>
+  <text x="290" y="980" text-anchor="middle" class="note">1 GPU</text>
+  <text x="430" y="962" text-anchor="middle" class="label">Full service</text>
+  <text x="430" y="980" text-anchor="middle" class="note">4 GPUs</text>
+
+  <text x="535" y="780" class="panel">Macro retrieval quality (all datasets)</text>
+  <text x="557" y="810" class="note">Path</text>
+  <text x="810" y="810" text-anchor="end" class="note">Recall@5</text>
+  <text x="940" y="810" text-anchor="end" class="note">nDCG@10</text>
+  <line x1="535" y1="821" x2="950" y2="821" class="grid"/>
+  <rect x="540" y="837" width="12" height="12" class="patch"/>
+  <text x="560" y="848" class="label">Local HF</text>
+  <text x="810" y="848" text-anchor="end" class="value">0.4645</text>
+  <text x="940" y="848" text-anchor="end" class="value">0.5204</text>
+  <rect x="540" y="870" width="12" height="12" class="nim"/>
+  <text x="560" y="881" class="label">Self-hosted NIMs</text>
+  <text x="810" y="881" text-anchor="end" class="value">0.4541</text>
+  <text x="940" y="881" text-anchor="end" class="value">0.5095</text>
+  <rect x="540" y="903" width="12" height="12" class="service"/>
+  <text x="560" y="914" class="label">Full service</text>
+  <text x="810" y="914" text-anchor="end" class="value">0.4581</text>
+  <text x="940" y="914" text-anchor="end" class="value">0.5127</text>
+  <rect x="540" y="936" width="12" height="12" class="nightly"/>
+  <text x="560" y="947" class="label">Nightly reference</text>
+  <text x="810" y="947" text-anchor="end" class="value">0.4650</text>
+  <text x="940" y="947" text-anchor="end" class="value">0.5210</text>
+  <text x="535" y="978" class="note">Service vs local HF: -0.0064 Recall@5 · -0.0078 nDCG@10</text>
+  <text x="500" y="1000" text-anchor="middle" class="note">19,252 pages · 14,514 queries · zero OCR errors/OOMs · isolated service runs had zero foreign sources</text>
 </svg>

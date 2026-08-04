@@ -54,9 +54,13 @@ empty and malformed pages, native-text preservation, batch exceptions,
 wrong-result-count fallback, and per-crop failure isolation. Fallback occurs
 only on an exception or wrong result count.
 
-### Attributable OCR speedup
+### Result summary
 
-![Controlled batching results](proof-summary.svg)
+![Issue 2323 OCR batching and deployment validation](proof-summary.svg)
+
+The actor/model and BO767 comparisons are attributable A/B evidence for this
+patch. The ViDoRe deployment panel is compatibility context only: its backend
+paths and GPU counts differ.
 
 The controlled GPU A/B traversed Ray Data, the real `OCRActor`, one persistent
 local wrapper, and the locked Nemotron OCR v2 model. It used 128 fixed real
