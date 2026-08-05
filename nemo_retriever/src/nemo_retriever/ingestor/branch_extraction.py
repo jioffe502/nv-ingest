@@ -78,7 +78,7 @@ class ExtractionBranchExecutor:
         return self._execute_inprocess()
 
     def _execute_batch(self) -> Any:
-        ray, cluster_resources = self.ensure_batch_runtime()
+        ray_module, cluster_resources = self.ensure_batch_runtime()
         effective_allow_no_gpu = self.allow_no_gpu or cluster_resources.available_gpu_count() == 0
         branch_datasets: list[Any] = []
         for branch in self.branches:
@@ -104,7 +104,7 @@ class ExtractionBranchExecutor:
             if file_paths:
                 branch_datasets.append(executor.build_dataset(file_paths))
             if inline_rows:
-                branch_datasets.append(executor.build_dataset(ray.data.from_items(inline_rows)))
+                branch_datasets.append(executor.build_dataset(ray_module.data.from_items(inline_rows)))
 
         normalized = normalize_ray_branch_datasets(branch_datasets)
         combined = normalized[0]

@@ -74,6 +74,12 @@ class _CreatedJob(NamedTuple):
     trace_id: str | None = None
 
 
+class _UploadOutcome(NamedTuple):
+    filename: str
+    document_id: str = ""
+    error: str | None = None
+
+
 class InMemoryUpload(NamedTuple):
     """Document bytes that should be uploaded without a temporary file."""
 
@@ -405,6 +411,25 @@ class RetrieverServiceClient:
 
         raise RuntimeError(f"Upload of {filename} failed after {_MAX_UPLOAD_RETRIES} retries")
 
+    async def _upload_source(
+        self,
+        client: httpx.AsyncClient,
+        source: UploadInput,
+        *,
+        job_id: str,
+        pipeline_spec: dict[str, Any] | None,
+        semaphore: asyncio.Semaphore,
+    ) -> _UploadOutcome:
+        """Upload one source and capture the common success or failure outcome."""
+        filename = _upload_filename(source)
+        async with semaphore:
+            try:
+                response = await self._upload_one(client, source, job_id=job_id, pipeline_spec=pipeline_spec)
+            except Exception as exc:
+                logger.error("Upload failed for %s: %s", filename, exc)
+                return _UploadOutcome(filename=filename, error=str(exc))
+        return _UploadOutcome(filename=filename, document_id=response.get("document_id", ""))
+
     # ------------------------------------------------------------------
     # SSE consumer
     # ------------------------------------------------------------------
@@ -642,19 +667,20 @@ class RetrieverServiceClient:
             upload_failures: list[tuple[str, str]] = []
 
             async def _upload_one_file(source: UploadInput) -> None:
-                filename = _upload_filename(source)
-                async with upload_sem:
-                    try:
-                        resp_json = await self._upload_one(client, source, job_id=job_id, pipeline_spec=pipeline_spec)
-                        doc_id = resp_json.get("document_id", "")
-                        if doc_id:
-                            pending.add(doc_id)
-                            document_ids.append(doc_id)
-                            if on_file_submitted:
-                                on_file_submitted(filename, doc_id)
-                    except Exception as exc:
-                        upload_failures.append((filename, str(exc)))
-                        logger.error("Upload failed for %s: %s", filename, exc)
+                outcome = await self._upload_source(
+                    client,
+                    source,
+                    job_id=job_id,
+                    pipeline_spec=pipeline_spec,
+                    semaphore=upload_sem,
+                )
+                if outcome.error is not None:
+                    upload_failures.append((outcome.filename, outcome.error))
+                elif outcome.document_id:
+                    pending.add(outcome.document_id)
+                    document_ids.append(outcome.document_id)
+                    if on_file_submitted:
+                        on_file_submitted(outcome.filename, outcome.document_id)
 
             progress_ctx = _make_progress() if show_progress else None
 
@@ -758,31 +784,32 @@ class RetrieverServiceClient:
             upload_sem = asyncio.Semaphore(self._max_concurrency)
 
             async def _upload_one_file(source: UploadInput) -> None:
-                filename = _upload_filename(source)
-                async with upload_sem:
-                    try:
-                        resp_json = await self._upload_one(client, source, job_id=job_id, pipeline_spec=pipeline_spec)
-                        doc_id = resp_json.get("document_id", "")
-                        if doc_id:
-                            pending.add(doc_id)
-                            await event_queue.put(
-                                {
-                                    "event": "upload_complete",
-                                    "filename": filename,
-                                    "document_id": doc_id,
-                                    "job_id": job_id,
-                                }
-                            )
-                    except Exception as exc:
-                        logger.error("Upload failed for %s: %s", filename, exc)
-                        await event_queue.put(
-                            {
-                                "event": "upload_failed",
-                                "filename": filename,
-                                "error": str(exc),
-                                "job_id": job_id,
-                            }
-                        )
+                outcome = await self._upload_source(
+                    client,
+                    source,
+                    job_id=job_id,
+                    pipeline_spec=pipeline_spec,
+                    semaphore=upload_sem,
+                )
+                if outcome.error is not None:
+                    await event_queue.put(
+                        {
+                            "event": "upload_failed",
+                            "filename": outcome.filename,
+                            "error": outcome.error,
+                            "job_id": job_id,
+                        }
+                    )
+                elif outcome.document_id:
+                    pending.add(outcome.document_id)
+                    await event_queue.put(
+                        {
+                            "event": "upload_complete",
+                            "filename": outcome.filename,
+                            "document_id": outcome.document_id,
+                            "job_id": job_id,
+                        }
+                    )
 
             async def _upload_all() -> None:
                 tasks = [asyncio.create_task(_upload_one_file(f)) for f in files]

@@ -210,16 +210,16 @@ def _normalize_files(files: Union[str, List[str], List[Path]]) -> list[Path]:
     return [Path(f) for f in files]
 
 
-def _empty_inline_text_dataframe(result_schema: ResultSchema) -> Any:
-    """Return the empty public result schema for inline text."""
+def _empty_service_result_dataframe(result_schema: ResultSchema) -> Any:
+    """Return an empty DataFrame matching the selected public result schema."""
+    if result_schema == "legacy":
+        from nemo_retriever.common.modality.txt.split import empty_text_chunks_df
+
+        return empty_text_chunks_df()
+
     import pandas as pd
 
-    columns = (
-        ["text", "source_id", "element_type", "page_number"]
-        if result_schema == "compact"
-        else ["text", "content", "path", "page_number", "metadata"]
-    )
-    return pd.DataFrame(columns=columns).astype({"page_number": "int64"})
+    return pd.DataFrame(columns=["text", "source_id", "element_type", "page_number"]).astype({"page_number": "int64"})
 
 
 # ----------------------------------------------------------------------
@@ -1196,7 +1196,7 @@ class ServiceIngestor(ingestor):
             self._last_job_id = None
             result = ServiceIngestResult()
             if return_results:
-                result.dataframe = _empty_inline_text_dataframe(result_schema)
+                result.dataframe = _empty_service_result_dataframe(result_schema)
             if return_failures and return_traces:
                 return result, [], []
             if return_failures or return_traces:
