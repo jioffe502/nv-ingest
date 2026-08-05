@@ -108,8 +108,8 @@
   <text x="655" y="844" text-anchor="middle" class="value">≈14.994</text>
   <text x="835" y="827" text-anchor="middle" class="value">16.820</text>
 
-  <text x="135" y="1018" text-anchor="middle" class="label">Local HF upstream</text>
-  <text x="135" y="1037" text-anchor="middle" class="small">1× H100</text>
+  <text x="135" y="1018" text-anchor="middle" class="label">Local HF · upstream</text>
+  <text x="135" y="1037" text-anchor="middle" class="small">exact parent · 1× H100</text>
   <text x="305" y="1018" text-anchor="middle" class="label">Local HF patch</text>
   <text x="305" y="1037" text-anchor="middle" class="small">1× H100</text>
   <text x="475" y="1018" text-anchor="middle" class="label">Self-hosted NIMs</text>
@@ -119,6 +119,6 @@
   <text x="835" y="1018" text-anchor="middle" class="label">Service compatibility</text>
   <text x="835" y="1037" text-anchor="middle" class="small">4× H100 · PR branch</text>
 
-  <text x="500" y="1070" text-anchor="middle" class="small">Nightly service value is calculated from supplied rounded per-dataset timers (19,252 pages / 1,284.02 s)</text>
+  <text x="500" y="1070" text-anchor="middle" class="small">Local HF A/B uses the same lock/profile · nightly service is calculated from supplied rounded per-dataset timers</text>
   <text x="500" y="1090" text-anchor="middle" class="small">NIM/service values compare deployment modes; they do not measure this local-only code change</text>
 </svg>
