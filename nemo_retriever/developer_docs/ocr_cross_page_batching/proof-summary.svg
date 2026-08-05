@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1320" viewBox="0 0 1000 1320" role="img" aria-labelledby="title desc">
-  <title id="title">Issue 2323 local OCR batching evidence</title>
-  <desc id="desc">The patch reduces model calls per 128 crops from 128 to 16, improves one-GPU actor and BO767 throughput, completes the full ViDoRe suite at two, four, and eight GPUs with four GPUs fastest under default scheduling, and completes four-GPU service BO767 at 87.8 pages per second.</desc>
-  <rect width="1000" height="1320" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1100" viewBox="0 0 1000 1100" role="img" aria-labelledby="title desc">
+  <title id="title">Issue 2323 local OCR batching evidence on NVIDIA H100 GPUs</title>
+  <desc id="desc">The patch batches crops across page rows and improves local OCR model and actor throughput on one H100. BO767 whole-ingest throughput improves by 8.41 percent, while full ViDoRe v3 one-H100 throughput is unchanged. Self-hosted NIM and four-H100 service results are deployment context only.</desc>
+  <rect width="1000" height="1100" fill="#ffffff"/>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2937; }
     .title { font-size: 22px; font-weight: 650; }
@@ -14,141 +14,111 @@
     .axis { stroke: #6b7280; stroke-width: 1.2; }
     .upstream { fill: #6b7280; }
     .patch { fill: #76b900; }
-    .patchLight { fill: #b5d97a; }
     .nim { fill: #2563eb; }
+    .serviceMain { fill: #ffffff; stroke: #7c3aed; stroke-width: 2; }
     .service { fill: #7c3aed; }
-    .baseline { fill: #ffffff; stroke: #6b7280; stroke-width: 2; }
   </style>
 
   <text x="40" y="34" class="title">Issue #2323 · bounded cross-page local OCR batching</text>
+  <text x="40" y="59" class="note">All GPU measurements use NVIDIA H100 80GB HBM3 · ingest timers exclude query evaluation</text>
+  <line x1="40" y1="78" x2="960" y2="78" class="grid"/>
 
-  <text x="40" y="70" class="panel">Cross-page model invocations per 128 crops</text>
-  <line x1="70" y1="300" x2="445" y2="300" class="axis"/>
-  <line x1="70" y1="120" x2="445" y2="120" class="grid"/>
-  <line x1="70" y1="210" x2="445" y2="210" class="grid"/>
-  <text x="48" y="305" class="label">0</text>
-  <text x="40" y="215" class="label">64</text>
-  <text x="32" y="125" class="label">128</text>
-  <rect x="135" y="120" width="90" height="180" rx="3" class="upstream"/>
-  <rect x="290" y="277.5" width="90" height="22.5" rx="3" class="patch"/>
-  <text x="180" y="110" text-anchor="middle" class="value">128</text>
-  <text x="335" y="267" text-anchor="middle" class="value">16</text>
-  <text x="180" y="322" text-anchor="middle" class="label">Upstream</text>
-  <text x="335" y="322" text-anchor="middle" class="label">Patch</text>
-  <text x="257" y="348" text-anchor="middle" class="note">87.5% fewer calls · bounded lists of 8</text>
+  <text x="40" y="112" class="title">What changed · local Hugging Face path · 1× H100</text>
+  <text x="40" y="137" class="note">128 fixed real crops · persistent Nemotron OCR v2 wrapper · outer lists bounded at 8</text>
 
-  <text x="525" y="70" class="panel">Median throughput (crops/s)</text>
-  <line x1="555" y1="300" x2="955" y2="300" class="axis"/>
-  <line x1="555" y1="210" x2="955" y2="210" class="grid"/>
-  <line x1="555" y1="120" x2="955" y2="120" class="grid"/>
-  <text x="535" y="305" class="label">0</text>
-  <text x="525" y="215" class="label">40</text>
-  <text x="525" y="125" class="label">80</text>
-  <rect x="595" y="222.6" width="58" height="77.4" rx="3" class="upstream"/>
-  <rect x="659" y="174.5" width="58" height="125.5" rx="3" class="patch"/>
-  <rect x="785" y="208.5" width="58" height="91.5" rx="3" class="upstream"/>
-  <rect x="849" y="134.9" width="58" height="165.1" rx="3" class="patch"/>
-  <text x="624" y="214" text-anchor="middle" class="value">34.4</text>
-  <text x="688" y="166" text-anchor="middle" class="value">55.8</text>
-  <text x="814" y="200" text-anchor="middle" class="value">40.7</text>
-  <text x="878" y="126" text-anchor="middle" class="value">73.4</text>
-  <text x="656" y="322" text-anchor="middle" class="label">Actor · 1.62x</text>
-  <text x="846" y="322" text-anchor="middle" class="label">Model · 1.81x</text>
-  <rect x="700" y="338" width="12" height="12" class="upstream"/>
-  <text x="718" y="349" class="note">Upstream</text>
-  <rect x="800" y="338" width="12" height="12" class="patch"/>
-  <text x="818" y="349" class="note">Patch</text>
+  <text x="40" y="170" class="panel">Model invocations per 128 crops</text>
+  <line x1="70" y1="340" x2="445" y2="340" class="axis"/>
+  <line x1="70" y1="180" x2="445" y2="180" class="grid"/>
+  <line x1="70" y1="260" x2="445" y2="260" class="grid"/>
+  <text x="48" y="345" class="label">0</text>
+  <text x="40" y="265" class="label">64</text>
+  <text x="32" y="185" class="label">128</text>
+  <rect x="135" y="180" width="90" height="160" rx="3" class="upstream"/>
+  <rect x="290" y="320" width="90" height="20" rx="3" class="patch"/>
+  <text x="180" y="170" text-anchor="middle" class="value">128</text>
+  <text x="335" y="310" text-anchor="middle" class="value">16</text>
+  <text x="180" y="362" text-anchor="middle" class="label">Upstream · scalar</text>
+  <text x="335" y="362" text-anchor="middle" class="label">Patch · lists of 8</text>
 
-  <line x1="40" y1="375" x2="960" y2="375" class="grid"/>
-  <text x="40" y="410" class="title">BO767 one-GPU batch A/B · complete ingest</text>
+  <text x="525" y="170" class="panel">Median throughput (crops/s)</text>
+  <line x1="555" y1="340" x2="955" y2="340" class="axis"/>
+  <line x1="555" y1="260" x2="955" y2="260" class="grid"/>
+  <line x1="555" y1="180" x2="955" y2="180" class="grid"/>
+  <text x="535" y="345" class="label">0</text>
+  <text x="525" y="265" class="label">40</text>
+  <text x="525" y="185" class="label">80</text>
+  <rect x="595" y="271.2" width="58" height="68.8" rx="3" class="upstream"/>
+  <rect x="659" y="228.4" width="58" height="111.6" rx="3" class="patch"/>
+  <rect x="785" y="258.7" width="58" height="81.3" rx="3" class="upstream"/>
+  <rect x="849" y="193.2" width="58" height="146.8" rx="3" class="patch"/>
+  <text x="624" y="263" text-anchor="middle" class="value">34.4</text>
+  <text x="688" y="220" text-anchor="middle" class="value">55.8</text>
+  <text x="814" y="250" text-anchor="middle" class="value">40.7</text>
+  <text x="878" y="185" text-anchor="middle" class="value">73.4</text>
+  <text x="656" y="362" text-anchor="middle" class="label">OCR actor · 1.62×</text>
+  <text x="846" y="362" text-anchor="middle" class="label">Local model · 1.81×</text>
 
-  <text x="40" y="440" class="panel">Ingest runtime (seconds · lower is better)</text>
-  <line x1="70" y1="610" x2="445" y2="610" class="axis"/>
-  <line x1="70" y1="470" x2="445" y2="470" class="grid"/>
-  <text x="48" y="615" class="label">0</text>
-  <text x="32" y="475" class="label">1800</text>
-  <rect x="135" y="484.9" width="90" height="125.1" rx="3" class="upstream"/>
-  <rect x="290" y="494.6" width="90" height="115.4" rx="3" class="patch"/>
-  <text x="180" y="477" text-anchor="middle" class="value">1608.0</text>
-  <text x="335" y="487" text-anchor="middle" class="value">1483.3</text>
-  <text x="180" y="632" text-anchor="middle" class="label">Upstream mean</text>
-  <text x="335" y="632" text-anchor="middle" class="label">Patch · -7.75%</text>
+  <line x1="40" y1="390" x2="960" y2="390" class="grid"/>
+  <text x="40" y="425" class="title">Whole-ingest impact · local Hugging Face path · 1× H100</text>
+  <text x="40" y="450" class="note">Extraction, OCR, embedding, and LanceDB indexing are all included</text>
 
-  <text x="525" y="440" class="panel">Throughput (pages/s · higher is better)</text>
-  <line x1="555" y1="610" x2="955" y2="610" class="axis"/>
-  <line x1="555" y1="470" x2="955" y2="470" class="grid"/>
-  <text x="535" y="615" class="label">0</text>
-  <text x="525" y="475" class="label">40</text>
-  <rect x="650" y="490.9" width="90" height="119.1" rx="3" class="upstream"/>
-  <rect x="805" y="480.9" width="90" height="129.1" rx="3" class="patch"/>
-  <text x="695" y="483" text-anchor="middle" class="value">34.04</text>
-  <text x="850" y="473" text-anchor="middle" class="value">36.90</text>
-  <text x="695" y="632" text-anchor="middle" class="label">Upstream mean</text>
-  <text x="850" y="632" text-anchor="middle" class="label">Patch · +8.41%</text>
-  <text x="500" y="660" text-anchor="middle" class="note">54,730 pages · counterbalanced A/B · retrieval neutral within repeat variance</text>
+  <text x="40" y="482" class="panel">BO767 throughput (pages/s)</text>
+  <line x1="70" y1="640" x2="445" y2="640" class="axis"/>
+  <line x1="70" y1="490" x2="445" y2="490" class="grid"/>
+  <text x="48" y="645" class="label">0</text>
+  <text x="40" y="495" class="label">40</text>
+  <rect x="135" y="512.4" width="90" height="127.6" rx="3" class="upstream"/>
+  <rect x="290" y="501.6" width="90" height="138.4" rx="3" class="patch"/>
+  <text x="180" y="504" text-anchor="middle" class="value">34.04</text>
+  <text x="335" y="493" text-anchor="middle" class="value">36.90</text>
+  <text x="180" y="662" text-anchor="middle" class="label">Upstream</text>
+  <text x="335" y="662" text-anchor="middle" class="label">Patch · +8.41%</text>
+  <text x="257" y="684" text-anchor="middle" class="small">54,730 pages · counterbalanced A/B</text>
 
-  <line x1="40" y1="685" x2="960" y2="685" class="grid"/>
-  <text x="40" y="720" class="title">Full ViDoRe v3 · default local batch scaling</text>
-  <text x="40" y="744" class="note">No worker overrides · 19,252 pages · all 8/8 datasets passed at every point</text>
+  <text x="525" y="482" class="panel">Full ViDoRe v3 throughput (pages/s)</text>
+  <line x1="555" y1="640" x2="955" y2="640" class="axis"/>
+  <line x1="555" y1="490" x2="955" y2="490" class="grid"/>
+  <text x="535" y="645" class="label">0</text>
+  <text x="525" y="495" class="label">10</text>
+  <rect x="650" y="500.8" width="90" height="139.2" rx="3" class="upstream"/>
+  <rect x="805" y="501.0" width="90" height="139.0" rx="3" class="patch"/>
+  <text x="695" y="492" text-anchor="middle" class="value">9.280</text>
+  <text x="850" y="492" text-anchor="middle" class="value">9.268</text>
+  <text x="695" y="662" text-anchor="middle" class="label">Upstream</text>
+  <text x="850" y="662" text-anchor="middle" class="label">Patch · −0.12%</text>
+  <text x="775" y="684" text-anchor="middle" class="small">19,252 pages · 8/8 passed · effectively flat</text>
 
-  <text x="40" y="780" class="panel">Aggregate throughput (pages/s)</text>
-  <line x1="70" y1="940" x2="600" y2="940" class="axis"/>
-  <line x1="70" y1="790" x2="600" y2="790" class="grid"/>
-  <text x="48" y="945" class="label">0</text>
-  <text x="40" y="795" class="label">22</text>
-  <rect x="105" y="825.1" width="82" height="114.9" rx="3" class="patchLight"/>
-  <rect x="225" y="802.0" width="82" height="138.0" rx="3" class="patch"/>
-  <rect x="345" y="807.5" width="82" height="132.5" rx="3" class="patchLight"/>
-  <rect x="465" y="804.1" width="82" height="135.9" rx="3" class="baseline"/>
-  <text x="146" y="817" text-anchor="middle" class="value">16.852</text>
-  <text x="266" y="794" text-anchor="middle" class="value">20.240</text>
-  <text x="386" y="799" text-anchor="middle" class="value">19.433</text>
-  <text x="506" y="796" text-anchor="middle" class="value">19.930</text>
-  <text x="146" y="962" text-anchor="middle" class="label">Patch · 2 GPU</text>
-  <text x="266" y="962" text-anchor="middle" class="label">Patch · 4 GPU</text>
-  <text x="386" y="962" text-anchor="middle" class="label">Patch · 8 GPU</text>
-  <text x="506" y="962" text-anchor="middle" class="label">Upstream · 8 GPU</text>
-  <text x="386" y="980" text-anchor="middle" class="small">mean of 2</text>
+  <line x1="40" y1="710" x2="960" y2="710" class="grid"/>
+  <text x="40" y="745" class="title">Full ViDoRe v3 deployment context · H100 80GB</text>
+  <text x="40" y="770" class="note">Only the two local-HF bars are the patch A/B · remote NIM and service paths are unchanged</text>
+  <text x="40" y="802" class="panel">Aggregate throughput (pages/s · higher is better)</text>
+  <line x1="60" y1="995" x2="960" y2="995" class="axis"/>
+  <line x1="60" y1="805" x2="960" y2="805" class="grid"/>
+  <text x="40" y="1000" class="label">0</text>
+  <text x="32" y="810" class="label">20</text>
 
-  <text x="650" y="780" class="panel">What the scale run established</text>
-  <rect x="650" y="800" width="310" height="155" rx="6" fill="#f3f4f6"/>
-  <text x="670" y="828" class="value">4 GPUs were the suite knee</text>
-  <text x="670" y="854" class="note">+4.16% vs patch 8-GPU mean</text>
-  <text x="670" y="878" class="note">2 GPU took 20.11% longer</text>
-  <text x="670" y="906" class="value">8-GPU patch was repeatable</text>
-  <text x="670" y="932" class="note">2.50% below exact upstream control</text>
-  <text x="670" y="975" class="small">OCR actors per dataset: 6 / 12 / 24</text>
-  <text x="670" y="995" class="small">Physical OCR GPUs used: 2 / 2 / 3</text>
+  <rect x="80" y="906.8" width="110" height="88.2" rx="3" class="upstream"/>
+  <rect x="250" y="907.0" width="110" height="88.0" rx="3" class="patch"/>
+  <rect x="420" y="903.3" width="110" height="91.7" rx="3" class="nim"/>
+  <rect x="600" y="852.6" width="110" height="142.4" rx="3" class="serviceMain"/>
+  <rect x="780" y="835.2" width="110" height="159.8" rx="3" class="service"/>
+  <text x="135" y="898" text-anchor="middle" class="value">9.280</text>
+  <text x="305" y="898" text-anchor="middle" class="value">9.268</text>
+  <text x="475" y="895" text-anchor="middle" class="value">9.652</text>
+  <text x="655" y="844" text-anchor="middle" class="value">≈14.994</text>
+  <text x="835" y="827" text-anchor="middle" class="value">16.820</text>
 
-  <line x1="40" y1="1020" x2="960" y2="1020" class="grid"/>
-  <text x="40" y="1055" class="title">Deployment compatibility</text>
-  <text x="40" y="1079" class="note">Remote NIM/service results are not attributed to this local-only patch</text>
+  <text x="135" y="1018" text-anchor="middle" class="label">Local HF upstream</text>
+  <text x="135" y="1037" text-anchor="middle" class="small">1× H100</text>
+  <text x="305" y="1018" text-anchor="middle" class="label">Local HF patch</text>
+  <text x="305" y="1037" text-anchor="middle" class="small">1× H100</text>
+  <text x="475" y="1018" text-anchor="middle" class="label">Self-hosted NIMs</text>
+  <text x="475" y="1037" text-anchor="middle" class="small">1× H100 · context</text>
+  <text x="655" y="1018" text-anchor="middle" class="label">Service · current main</text>
+  <text x="655" y="1037" text-anchor="middle" class="small">4× H100 · nightly</text>
+  <text x="835" y="1018" text-anchor="middle" class="label">Service compatibility</text>
+  <text x="835" y="1037" text-anchor="middle" class="small">4× H100 · PR branch</text>
 
-  <text x="40" y="1108" class="panel">Full ViDoRe throughput (pages/s)</text>
-  <line x1="70" y1="1260" x2="490" y2="1260" class="axis"/>
-  <line x1="70" y1="1125" x2="490" y2="1125" class="grid"/>
-  <text x="48" y="1265" class="label">0</text>
-  <text x="40" y="1125" class="label">20</text>
-  <rect x="105" y="1197.4" width="90" height="62.6" rx="3" class="patch"/>
-  <rect x="245" y="1194.8" width="90" height="65.2" rx="3" class="nim"/>
-  <rect x="385" y="1146.5" width="90" height="113.5" rx="3" class="service"/>
-  <text x="150" y="1189" text-anchor="middle" class="value">9.268</text>
-  <text x="290" y="1187" text-anchor="middle" class="value">9.652</text>
-  <text x="430" y="1138" text-anchor="middle" class="value">16.820</text>
-  <text x="150" y="1282" text-anchor="middle" class="label">Local HF · 1 GPU</text>
-  <text x="290" y="1282" text-anchor="middle" class="label">NIMs · 1 GPU</text>
-  <text x="430" y="1282" text-anchor="middle" class="label">Service · 4 GPU</text>
-
-  <text x="555" y="1108" class="panel">BO767 service throughput (pages/s)</text>
-  <line x1="585" y1="1260" x2="955" y2="1260" class="axis"/>
-  <line x1="585" y1="1125" x2="955" y2="1125" class="grid"/>
-  <text x="563" y="1265" class="label">0</text>
-  <text x="555" y="1125" class="label">95</text>
-  <rect x="660" y="1139.7" width="95" height="120.3" rx="3" class="baseline"/>
-  <rect x="810" y="1135.3" width="95" height="124.7" rx="3" class="service"/>
-  <text x="707" y="1131" text-anchor="middle" class="value">84.64</text>
-  <text x="857" y="1127" text-anchor="middle" class="value">87.772</text>
-  <text x="707" y="1282" text-anchor="middle" class="label">Supplied baseline</text>
-  <text x="857" y="1282" text-anchor="middle" class="label">Measured · +3.70%</text>
-  <text x="500" y="1310" text-anchor="middle" class="small">All reported ingest timers exclude query evaluation · no OOMs · NIM stacks stopped after testing</text>
+  <text x="500" y="1070" text-anchor="middle" class="small">Nightly service value is calculated from supplied rounded per-dataset timers (19,252 pages / 1,284.02 s)</text>
+  <text x="500" y="1090" text-anchor="middle" class="small">NIM/service values compare deployment modes; they do not measure this local-only code change</text>
 </svg>
