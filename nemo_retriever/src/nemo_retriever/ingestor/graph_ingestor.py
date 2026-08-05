@@ -852,7 +852,7 @@ class GraphIngestor(ingestor):
             num_gpus=self._num_gpus,
             node_overrides=merge_node_overrides(derived_overrides, self._node_overrides),
         )
-        executor_input = self._inline_text_dataset(ray.data) if self._inline_texts is not None else self._documents
+        executor_input = self._inline_text_dataset(ray.data) if self._inline_texts else self._documents
         result = executor.ingest(executor_input)
         self._rd_dataset = result
         return result
@@ -884,7 +884,7 @@ class GraphIngestor(ingestor):
         )
         executor = InprocessExecutor(graph, show_progress=self._show_progress)
         self._rd_dataset = None
-        if self._inline_texts is not None:
+        if self._inline_texts:
             return executor.ingest(self._inline_text_dataframe())
         if self._buffers:
             import pandas as pd
@@ -942,7 +942,7 @@ class GraphIngestor(ingestor):
     # ------------------------------------------------------------------
 
     def _has_mixed_inline_sources(self) -> bool:
-        return self._inline_texts is not None and bool(self._documents or self._buffers)
+        return bool(self._inline_texts) and bool(self._documents or self._buffers)
 
     def _inline_text_rows(self) -> list[dict[str, str]]:
         return [

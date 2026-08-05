@@ -1605,7 +1605,7 @@ class ServiceIngestor(ingestor):
     # ------------------------------------------------------------------
 
     def _has_mixed_inline_sources(self) -> bool:
-        return self._inline_texts is not None and bool(self._documents or self._buffers)
+        return bool(self._inline_texts) and bool(self._documents or self._buffers)
 
     def _collect_inputs(self) -> list[UploadInput]:
         """Gather filesystem and in-memory inputs for the service client."""

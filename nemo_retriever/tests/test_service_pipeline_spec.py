@@ -144,6 +144,23 @@ def test_service_empty_inline_text_does_not_hide_files(tmp_path, inline_texts: l
     assert ingestor._pipeline_payload() is None
 
 
+@pytest.mark.parametrize(("inline_texts", "expected_mode"), [([], "pdf"), ([""], "auto")])
+def test_service_empty_inline_list_preserves_explicit_extraction_mode(
+    tmp_path, inline_texts: list[str], expected_mode: str
+) -> None:
+    document = tmp_path / "document.pdf"
+    document.write_bytes(b"%PDF-1.4 stub")
+
+    ingestor = (
+        ServiceIngestor(base_url="http://retriever.example")
+        .files(str(document))
+        .texts(inline_texts)
+        .extract(extraction_mode="pdf")
+    )
+
+    assert ingestor._pipeline_payload()["extraction_mode"] == expected_mode
+
+
 @pytest.mark.parametrize("values", [[], ["", "  \n"]])
 @pytest.mark.parametrize(
     ("result_schema", "expected_columns"),

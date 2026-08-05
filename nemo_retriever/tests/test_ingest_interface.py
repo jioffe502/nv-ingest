@@ -233,6 +233,9 @@ def test_texts_plan_alongside_other_modalities_regardless_of_call_order(tmp_path
         ("image", (str(image),)),
     ]
 
+    explicit_image = GraphIngestor(run_mode="inprocess").files([str(image)]).texts([]).extract_image_files()
+    assert explicit_image._plan_default_extraction_branches() is None
+
 
 def test_empty_and_blank_inline_corpus_short_circuits_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     ingestor = create_ingestor(run_mode="inprocess").texts(["", "  \n"])
