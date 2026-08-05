@@ -74,6 +74,9 @@ curl -X POST http://localhost:7670/v1/query \
   -d '{"query": "find documents about parser behavior", "top_k": 5, "agentic": true}'
 ```
 
+Successful responses include ``query_mode``: ``"agentic"`` for this path and
+``"classic"`` for dense/hybrid ``/v1/query`` (including ``format=evidence``).
+
 Requests with `agentic: true` return HTTP `400` when agentic retrieval is not
 configured on the service. Agentic runs use a small dedicated worker pool in the
 VectorDB process so they cannot exhaust the capacity used by plain queries. A
@@ -88,9 +91,14 @@ For local stdio-based agents, run the MCP server as a shim that points at an exi
 ```bash
 retriever service mcp-stdio \
   --service-url http://localhost:7670 \
-  --agentic-query \
+  --query-methods agentic \
   --api-token "$NEMO_RETRIEVER_API_TOKEN"
 ```
+
+Use `--query-methods classic` (default), `agentic`, or `all` to choose which retrieval
+tools the MCP server registers. Mounted `/mcp` uses the same knob via
+`mcp.query_methods` in the service config; agentic tools are omitted unless
+`agentic.enabled` is also true.
 
 For remote agents, expose the retriever service URL and configure the agent to connect to:
 
