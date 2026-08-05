@@ -86,7 +86,7 @@ import httpx
 
 from nemo_retriever.ingestor.results import ResultSchema, concat_ingest_results
 from nemo_retriever.ingestor import _merge_params, ingestor
-from nemo_retriever.common.inline_text import inline_text_source_id, normalize_inline_texts
+from nemo_retriever.common.inline_text import inline_text_source_id, is_blank_inline_corpus, normalize_inline_texts
 from nemo_retriever.common.params import (
     CaptionParams,
     IngestExecuteParams,
@@ -1190,12 +1190,7 @@ class ServiceIngestor(ingestor):
             self._resolve_execute_flags(params, kwargs)
         )
         del params, kwargs
-        if (
-            self._inline_texts is not None
-            and not self._documents
-            and not self._buffers
-            and not any(text.strip() for text in self._inline_texts)
-        ):
+        if not self._documents and not self._buffers and is_blank_inline_corpus(self._inline_texts):
             self._document_ids.clear()
             self._last_run_elapsed_s = 0.0
             self._last_job_id = None
@@ -1614,12 +1609,7 @@ class ServiceIngestor(ingestor):
 
     def _collect_inputs(self) -> list[UploadInput]:
         """Gather filesystem and in-memory inputs for the service client."""
-        if (
-            self._inline_texts is not None
-            and not self._documents
-            and not self._buffers
-            and not any(text.strip() for text in self._inline_texts)
-        ):
+        if not self._documents and not self._buffers and is_blank_inline_corpus(self._inline_texts):
             return []
 
         files: list[UploadInput] = [Path(p) for p in self._documents]

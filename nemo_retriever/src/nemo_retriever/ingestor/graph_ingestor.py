@@ -44,7 +44,12 @@ from nemo_retriever.ingestor.manifest import (
     resolve_branch_extraction_inputs,
 )
 from nemo_retriever.ingestor import ingestor
-from nemo_retriever.common.inline_text import inline_text_source_id, is_inline_text_source, normalize_inline_texts
+from nemo_retriever.common.inline_text import (
+    inline_text_source_id,
+    is_blank_inline_corpus,
+    is_inline_text_source,
+    normalize_inline_texts,
+)
 from nemo_retriever.common.params import (
     ASRParams,
     AudioChunkParams,
@@ -750,12 +755,7 @@ class GraphIngestor(ingestor):
             service-style ``(source, error)`` tuples.
         """
         return_failures = self._resolve_return_failures(params, kwargs)
-        if (
-            self._inline_texts is not None
-            and not self._documents
-            and not self._buffers
-            and not any(text.strip() for text in self._inline_texts)
-        ):
+        if not self._documents and not self._buffers and is_blank_inline_corpus(self._inline_texts):
             result = empty_text_chunks_df()
             if self._run_mode == "batch":
                 self._rd_dataset = result

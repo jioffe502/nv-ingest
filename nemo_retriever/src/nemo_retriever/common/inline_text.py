@@ -27,10 +27,15 @@ def normalize_inline_texts(texts: str | Sequence[str]) -> list[str]:
 
 
 def inline_text_source_id(index: int) -> str:
-    """Return the stable logical identity for an inline document."""
+    """Return the deterministic ordinal identity for an inline document."""
     return f"{INLINE_TEXT_SOURCE_PREFIX}{index:08d}"
 
 
 def is_inline_text_source(source_id: str) -> bool:
     """Return whether a source identifier denotes inline text."""
     return source_id.startswith(INLINE_TEXT_SOURCE_PREFIX)
+
+
+def is_blank_inline_corpus(texts: Sequence[str] | None) -> bool:
+    """Return whether a configured inline corpus contains only blank text."""
+    return texts is not None and not any(text.strip() for text in texts)
