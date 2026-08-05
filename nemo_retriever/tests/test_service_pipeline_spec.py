@@ -34,6 +34,7 @@ from nemo_retriever.service.services.pipeline_executor import (
 )
 from nemo_retriever.service.utils.file_type import infer_extraction_mode_from_filename
 from nemo_retriever.service.service_ingestor import ServiceIngestor
+from nemo_retriever.service.client import InMemoryUpload
 
 
 class _TinyTokenizer:
@@ -72,6 +73,122 @@ def test_compact_result_schema_populates_pipeline_payload() -> None:
     assert payload is not None
     assert payload["result_schema"] == "compact"
     assert PipelineSpec.model_validate(payload).result_schema == "compact"
+
+
+def test_service_inline_text_builds_in_memory_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+    ingestor = ServiceIngestor(base_url="http://retriever.example")
+    monkeypatch.setattr("tempfile.mkdtemp", lambda *args, **kwargs: pytest.fail("inline text must remain in memory"))
+
+    ingestor.texts(["first", "first"]).extract(split_config={"text": {"max_tokens": 12}})
+
+    assert ingestor._collect_inputs() == [
+        InMemoryUpload(
+            filename="inline://00000000",
+            content=b"first",
+            content_type="text/plain; charset=utf-8",
+            classification_filename="inline-00000000.txt",
+        ),
+        InMemoryUpload(
+            filename="inline://00000001",
+            content=b"first",
+            content_type="text/plain; charset=utf-8",
+            classification_filename="inline-00000001.txt",
+        ),
+    ]
+    assert ingestor._pipeline_payload()["extraction_mode"] == "auto"
+    assert ingestor._pipeline_payload()["split_config"] == {"text": {"max_tokens": 12}}
+
+
+def test_service_inline_text_replaces_and_validates_inputs() -> None:
+    ingestor = ServiceIngestor(base_url="http://retriever.example").texts("first").texts(["second"])
+
+    assert [item.filename for item in ingestor._collect_inputs()] == ["inline://00000000"]
+    assert [item.content for item in ingestor._collect_inputs()] == [b"second"]
+
+    with pytest.raises(TypeError, match=r"texts\[1\] must be a string"):
+        ServiceIngestor(base_url="http://retriever.example").texts(["valid", None])
+
+
+@pytest.mark.parametrize("files_first", [True, False])
+def test_service_inline_text_composes_with_files_and_uses_auto_routing(tmp_path, files_first: bool) -> None:
+    document = tmp_path / "document.txt"
+    document.write_text("document", encoding="utf-8")
+
+    ingestor = ServiceIngestor(base_url="http://retriever.example")
+    if files_first:
+        ingestor.files(str(document)).texts(["inline"])
+    else:
+        ingestor.texts(["inline"]).files(str(document))
+    ingestor.extract(split_config={"text": {"max_tokens": 12}})
+
+    inputs = ingestor._collect_inputs()
+    assert inputs[0] == document
+    assert inputs[1] == InMemoryUpload(
+        filename="inline://00000000",
+        content=b"inline",
+        content_type="text/plain; charset=utf-8",
+        classification_filename="inline-00000000.txt",
+    )
+    assert ingestor._pipeline_payload()["extraction_mode"] == "auto"
+    assert ingestor._pipeline_payload()["split_config"] == {"text": {"max_tokens": 12}}
+
+
+@pytest.mark.parametrize("inline_texts", [[], ["", "  \n"]])
+def test_service_empty_inline_text_does_not_hide_files(tmp_path, inline_texts: list[str]) -> None:
+    document = tmp_path / "document.txt"
+    document.write_text("document", encoding="utf-8")
+
+    ingestor = ServiceIngestor(base_url="http://retriever.example").files(str(document)).texts(inline_texts)
+
+    assert ingestor._collect_inputs()[0] == document
+    assert ingestor._pipeline_payload() is None
+
+
+@pytest.mark.parametrize(("inline_texts", "expected_mode"), [([], "pdf"), ([""], "auto")])
+def test_service_empty_inline_list_preserves_explicit_extraction_mode(
+    tmp_path, inline_texts: list[str], expected_mode: str
+) -> None:
+    document = tmp_path / "document.pdf"
+    document.write_bytes(b"%PDF-1.4 stub")
+
+    ingestor = (
+        ServiceIngestor(base_url="http://retriever.example")
+        .files(str(document))
+        .texts(inline_texts)
+        .extract(extraction_mode="pdf")
+    )
+
+    assert ingestor._pipeline_payload()["extraction_mode"] == expected_mode
+
+
+@pytest.mark.parametrize("values", [[], ["", "  \n"]])
+@pytest.mark.parametrize(
+    ("result_schema", "expected_columns"),
+    [
+        ("legacy", ["text", "content", "path", "page_number", "metadata"]),
+        ("compact", ["text", "source_id", "element_type", "page_number"]),
+    ],
+)
+def test_service_inline_empty_corpus_short_circuits_with_schema(
+    values: list[str],
+    result_schema: str,
+    expected_columns: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingestor = ServiceIngestor(base_url="http://retriever.example").texts(values).embed()
+    monkeypatch.setattr(
+        ingestor,
+        "ingest_stream",
+        lambda **kwargs: pytest.fail("empty inline corpus must not contact the service"),
+    )
+
+    result = ingestor.ingest(result_schema=result_schema)
+
+    assert result.job_id is None
+    assert result.failures == []
+    assert result.dataframe.empty
+    assert result.dataframe.columns.tolist() == expected_columns
+    assert ingestor._collect_inputs() == []
 
 
 def test_legacy_pipeline_payload_disables_bulk_result_payloads() -> None:
@@ -528,6 +645,7 @@ def test_build_graph_ingestor_attaches_asr_params_for_explicit_audio_mode() -> N
         ("README.md", "text"),
         ("payload.json", "text"),
         ("setup.sh", "text"),
+        ("inline://00000000", "text"),
         ("page.html", "html"),
         ("report.pdf", "pdf"),
         ("diagram.png", "image"),
@@ -543,6 +661,7 @@ def test_infer_extraction_mode_from_filename(filename: str, expected: str | None
     ("extraction_mode", "filename", "resolved"),
     [
         ("auto", "notes.txt", "text"),
+        ("auto", "inline://00000000", "text"),
         ("auto", "page.html", "html"),
         ("auto", "report.pdf", "pdf"),
         ("pdf", "notes.txt", "pdf"),
@@ -553,7 +672,7 @@ def test_resolve_service_extraction_mode(extraction_mode: str, filename: str, re
     assert _resolve_service_extraction_mode(extraction_mode, filename) == resolved
 
 
-def test_build_graph_ingestor_uses_typed_txt_html_shortcuts() -> None:
+def test_build_graph_ingestor_routes_txt_and_html_inputs() -> None:
     base_extract: dict[str, object] = {}
     spec = {"extraction_mode": "auto", "stage_order": ["extract"]}
 
@@ -566,7 +685,16 @@ def test_build_graph_ingestor_uses_typed_txt_html_shortcuts() -> None:
     )
     assert txt_mode == "text"
     assert txt_ingestor._extraction_mode == "text"
-    assert txt_ingestor._text_params is not None
+
+    inline_ingestor, inline_mode, _ = _build_graph_ingestor_from_spec(
+        "inline://00000000",
+        b"The quick brown fox",
+        base_extract,
+        None,
+        None,
+    )
+    assert inline_mode == "text"
+    assert inline_ingestor._extraction_mode == "text"
 
     html_ingestor, html_mode, _ = _build_graph_ingestor_from_spec(
         "page.html",
@@ -610,6 +738,24 @@ def test_run_pipeline_in_process_html_txt_produce_rows(monkeypatch: pytest.Monke
     )
     assert html_rows >= 1
     assert txt_rows >= 1
+
+
+def test_run_pipeline_in_process_preserves_service_inline_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nemo_retriever.common.modality.txt.split._get_tokenizer", lambda *_, **__: _TinyTokenizer())
+
+    row_count, rows, _ = _run_pipeline_in_process(
+        "inline://00000003",
+        "café service".encode("utf-8"),
+        {},
+        None,
+        None,
+        None,
+    )
+
+    assert row_count == 1
+    assert rows[0]["text"] == "café service"
+    assert rows[0]["path"] == "inline://00000003"
+    assert rows[0]["metadata"]["source_path"] == "inline://00000003"
 
 
 def test_build_graph_ingestor_omits_asr_params_when_worker_unconfigured() -> None:
