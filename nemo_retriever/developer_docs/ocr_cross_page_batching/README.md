@@ -100,6 +100,15 @@ patched: **124.676 seconds (7.75%) less ingest time** and **8.41% higher
 throughput**. Both matched pairs were faster (`-8.47%` and `-7.03%`). This is
 the whole-ingest speedup result for the corrected batching behavior.
 
+The retained Ray progress trace also identifies why the gain reaches the
+whole-ingest timer here. The final OCR/embedding frontier completed at a mean
+1,270.069 seconds upstream and 1,141.847 seconds patched, approximately 128.2
+seconds earlier. Mean whole ingest moved 124.7 seconds, while the remaining
+indexing tail stayed similar (338.0 seconds upstream and 341.5 seconds
+patched). Ray reports these progress snapshots at roughly ten-second cadence,
+so they establish the critical-path relationship rather than sub-second stage
+timing.
+
 The shorter `vidore_v3_computer_science_beir` run is retained as a useful
 limit: it ran the same complete ingest boundary over 1,360 pages, but was too
 short to separate the patch from warm-run variation.
@@ -221,6 +230,14 @@ doubling of ViDoRe ingest throughput, while the small measured difference is
 too narrow to interpret as a regression from one run per side collected two
 days apart. ViDoRe therefore supplies full-suite correctness and quality
 evidence; BO767 remains the demonstrated whole-ingest speedup.
+
+The Ray progress trace explains the difference from BO767. Across the eight
+patched ViDoRe runs, OCR completed after an average 66.9 seconds from the
+execution-plan start, while page-image embedding completed after an average
+242.5 seconds. Depending on the dataset, embedding continued for another
+60-381 seconds after OCR had finished. The exact-parent runs showed the same
+pipeline shape. Faster OCR is therefore off the ViDoRe completion path under
+this page-granularity, vision-language embedding configuration.
 
 Per-dataset throughput changes ranged from -5.47% (`hr`) to +4.39%
 (`finance_fr`) without a consistent direction. No run failed or OOMed.
