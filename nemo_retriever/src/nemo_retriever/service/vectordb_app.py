@@ -7,7 +7,7 @@
 Provides three endpoints:
 
 - ``POST /internal/vectordb/write`` -- append embedding rows from ingest workers
-- ``POST /v1/query``               -- embed query text and search the index
+- ``POST /v1/query``               -- embed+search, or agentic ReAct when ``agentic=true``
 - ``GET  /v1/health``              -- liveness probe
 
 Run with a remote NIM embed endpoint::
@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Union
 
@@ -48,6 +49,8 @@ from nemo_retriever.common.vdb.lancedb_capabilities import (
     inspect_lancedb_table_object,
 )
 from nemo_retriever.query.evidence import build_evidence_result
+from nemo_retriever.service.agentic_query import run_agentic_query
+from nemo_retriever.service.config import AgenticConfig
 from nemo_retriever.service.query_schema import (
     EvidenceQueryResponse,
     EvidenceResult,
@@ -333,8 +336,15 @@ class VectorDBState:
 
 _state: VectorDBState | None = None
 _query_semaphore: asyncio.Semaphore | None = None
+_agentic_executor: ThreadPoolExecutor | None = None
+_agentic_slots: threading.BoundedSemaphore | None = None
 
 MAX_CONCURRENT_QUERIES = 4
+
+# Agentic retrieval runs a multi-step ReAct loop that can occupy a thread for
+# minutes and cannot be interrupted once started, so it gets its own small pool
+# instead of sharing capacity with plain /v1/query.
+MAX_CONCURRENT_AGENTIC_QUERIES = 2
 
 
 def create_vectordb_app(
@@ -350,12 +360,14 @@ def create_vectordb_app(
     hf_cache_dir: str | None = None,
     device: str | None = None,
     gpu_memory_utilization: float = 0.45,
+    agentic_config: AgenticConfig | None = None,
 ) -> FastAPI:
     """Build the VectorDB FastAPI application."""
+    agentic_config = agentic_config or AgenticConfig()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        global _state, _query_semaphore
+        global _state, _query_semaphore, _agentic_executor, _agentic_slots
         _state = VectorDBState(
             lancedb_uri=lancedb_uri,
             table_name=table_name,
@@ -370,6 +382,12 @@ def create_vectordb_app(
             gpu_memory_utilization=gpu_memory_utilization,
         )
         _query_semaphore = asyncio.Semaphore(MAX_CONCURRENT_QUERIES)
+        if agentic_config.enabled:
+            _agentic_executor = ThreadPoolExecutor(
+                max_workers=MAX_CONCURRENT_AGENTIC_QUERIES,
+                thread_name_prefix="agentic-query",
+            )
+            _agentic_slots = threading.BoundedSemaphore(MAX_CONCURRENT_AGENTIC_QUERIES)
         logger.info(
             "VectorDB service started: uri=%s table=%s embed_mode=%s max_concurrent_queries=%d",
             lancedb_uri,
@@ -386,6 +404,12 @@ def create_vectordb_app(
         yield
         _state = None
         _query_semaphore = None
+        if _agentic_executor is not None:
+            # Detach from in-flight ReAct work rather than blocking shutdown on
+            # LLM calls that may still have minutes left on their timeout.
+            _agentic_executor.shutdown(wait=False, cancel_futures=True)
+            _agentic_executor = None
+        _agentic_slots = None
         logger.info("VectorDB service stopped")
 
     app = FastAPI(
@@ -434,6 +458,9 @@ def create_vectordb_app(
         if _state is None:
             raise HTTPException(503, "VectorDB not initialised")
 
+        if req.agentic:
+            return await _run_agentic_query(req)
+
         if _state.embed_mode == "none":
             raise HTTPException(
                 501,
@@ -472,6 +499,90 @@ def create_vectordb_app(
 
         return QueryResponse(results=[QueryResult(hits=hits) for hits in hits_per_query])
 
+    async def _run_agentic_query(req: QueryRequest) -> QueryResponse:
+        if not agentic_config.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Agentic retrieval is not enabled in the VectorDB configuration. "
+                    "Start with --agentic and a remote LLM invoke URL/model, or set "
+                    "agentic.enabled in the service config."
+                ),
+            )
+        if _state is None:
+            raise HTTPException(503, "VectorDB not initialised")
+        if _state.embed_mode == "none":
+            raise HTTPException(
+                501,
+                "No embedding backend configured. Set --embed-endpoint for a remote "
+                "NIM or --local-embed for in-pod Hugging Face query embedding.",
+            )
+        if _state.embed_mode != "remote":
+            raise HTTPException(
+                501,
+                "Agentic service queries require a remote embedding endpoint.",
+            )
+        if not _state.table_exists:
+            raise HTTPException(
+                status_code=422,
+                detail="No data has been ingested yet. Ingest documents first, then query.",
+            )
+        if req.top_k > agentic_config.backend_top_k:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"top_k ({req.top_k}) cannot exceed the configured agentic "
+                    f"backend_top_k ({agentic_config.backend_top_k})."
+                ),
+            )
+
+        executor, slots = _agentic_executor, _agentic_slots
+        if executor is None or slots is None:
+            raise HTTPException(503, "Agentic retrieval workers are not running")
+
+        # The ReAct workflow is blocking and cannot be interrupted, so a caller
+        # that times out or disconnects does not free the worker. Admission is
+        # therefore tied to the worker's real lifetime: the slot is released from
+        # the future's done callback, never on request exit.
+        if not slots.acquire(blocking=False):
+            logger.warning(
+                "Rejecting agentic query: all %d agentic workers are busy",
+                MAX_CONCURRENT_AGENTIC_QUERIES,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All {MAX_CONCURRENT_AGENTIC_QUERIES} agentic retrieval workers are busy. "
+                    "Retry once an in-flight query finishes."
+                ),
+                headers={"Retry-After": "30"},
+            )
+
+        assert isinstance(req.query, str)
+        try:
+            future = executor.submit(
+                run_agentic_query,
+                query=req.query,
+                top_k=req.top_k,
+                config=agentic_config,
+                lancedb_uri=_state.lancedb_uri,
+                table_name=_state.table_name,
+                embed_endpoint=_state.embed_endpoint,
+                embed_model=_state.embed_model,
+                embed_model_provider_prefix=_state.embed_model_provider_prefix,
+                embed_api_key=_state.embed_api_key,
+            )
+        except RuntimeError as exc:
+            slots.release()
+            raise HTTPException(503, "VectorDB is shutting down") from exc
+
+        future.add_done_callback(lambda _future: slots.release())
+
+        try:
+            return await asyncio.wrap_future(future)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     return app
 
 
@@ -509,6 +620,23 @@ def main() -> None:
         default=0.45,
         help="vLLM GPU memory fraction when --local-embed-backend=vllm.",
     )
+    parser.add_argument(
+        "--agentic",
+        action="store_true",
+        help="Enable agentic=true on POST /v1/query using the agentic retrieval workflow.",
+    )
+    parser.add_argument("--agentic-llm-model", default="", help="Agentic retrieval chat model.")
+    parser.add_argument(
+        "--agentic-invoke-url",
+        default="",
+        help="OpenAI-compatible chat completions endpoint for agentic retrieval.",
+    )
+    parser.add_argument("--agentic-reasoning-effort", default="high")
+    parser.add_argument("--agentic-backend-top-k", type=int, default=20)
+    parser.add_argument("--agentic-react-max-steps", type=int, default=50)
+    parser.add_argument("--agentic-text-truncation", type=int, default=0)
+    parser.add_argument("--agentic-temperature", type=float, default=0.0)
+    parser.add_argument("--agentic-request-timeout", type=float, default=1800.0)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7671)
     parser.add_argument("--log-level", default="info")
@@ -534,6 +662,17 @@ def main() -> None:
         hf_cache_dir=args.hf_cache_dir or None,
         device=args.device or None,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        agentic_config=AgenticConfig(
+            enabled=args.agentic,
+            llm_model=args.agentic_llm_model or None,
+            invoke_url=args.agentic_invoke_url or None,
+            reasoning_effort=args.agentic_reasoning_effort or None,
+            backend_top_k=args.agentic_backend_top_k,
+            react_max_steps=args.agentic_react_max_steps,
+            text_truncation=args.agentic_text_truncation,
+            temperature=args.agentic_temperature,
+            request_timeout_s=args.agentic_request_timeout,
+        ),
     )
     uvicorn.run(app, host=args.host, port=args.port)
 
