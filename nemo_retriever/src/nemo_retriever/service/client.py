@@ -33,11 +33,13 @@ validates that response with the shared query schema.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, NamedTuple
+from typing import Any, AsyncIterator, Callable, Coroutine, NamedTuple, TypeVar
 
 import httpx
 from pydantic import ValidationError
@@ -50,6 +52,25 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from nemo_retriever.common.schemas.collections import (
+    CollectionDeleteResult,
+    CollectionInfo,
+    CollectionPage,
+    DocumentDeleteResult,
+    DocumentInfo,
+    DocumentPage,
+    QueryHit,
+)
+from nemo_retriever.common.schemas.responses import (
+    JobAggregateResponse,
+    JobDocumentsPage,
+)
+from nemo_retriever.service.errors import (
+    RetrieverServiceConflictError,
+    RetrieverServiceError,
+    RetrieverServiceNotFoundError,
+    RetrieverServiceValidationError,
+)
 from nemo_retriever.service.query_schema import QueryResponse
 
 logger = logging.getLogger(__name__)
@@ -58,6 +79,8 @@ _BULK_POLL_INTERVAL_S = 5.0
 _BULK_POLL_TIMEOUT_S = 1800.0
 _MAX_UPLOAD_RETRIES = 10
 _DEFAULT_RETRY_AFTER = 2.0
+
+_T = TypeVar("_T")
 
 _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     httpx.ReadError,
@@ -77,6 +100,7 @@ class _CreatedJob(NamedTuple):
 class _UploadOutcome(NamedTuple):
     filename: str
     document_id: str = ""
+    attempt_id: str = ""
     error: str | None = None
 
 
@@ -207,7 +231,7 @@ class DocumentTracker:
 
 
 class RetrieverServiceClient:
-    """Submits documents to a running retriever service and queries its VectorDB endpoint.
+    """Manage scoped collections, ingest documents, and query a retriever service.
 
     Ingest opens a job aggregate with ``POST /v1/ingest/job`` (sized to
     the number of files), then uses
@@ -225,47 +249,353 @@ class RetrieverServiceClient:
         max_concurrency: int = 8,
         *,
         api_token: str | None = None,
+        scope: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._max_concurrency = max_concurrency
         self._api_token = (api_token or "").strip() or None
+        self._scope = (scope or "").strip() or None
 
     @property
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_token}"} if self._api_token else {}
+        headers: dict[str, str] = {}
+        if self._scope:
+            headers["X-NRL-Scope"] = self._scope
+        if self._api_token:
+            headers["Authorization"] = f"Bearer {self._api_token}"
+        return headers
+
+    @staticmethod
+    def _raise_for_response(resp: httpx.Response, operation: str) -> None:
+        if resp.status_code < 400:
+            return
+        detail = resp.text[:1000] if resp.text else "(empty)"
+        error_type: type[RetrieverServiceError]
+        if resp.status_code == 404:
+            error_type = RetrieverServiceNotFoundError
+        elif resp.status_code == 409:
+            error_type = RetrieverServiceConflictError
+        elif resp.status_code in (400, 422):
+            error_type = RetrieverServiceValidationError
+        else:
+            error_type = RetrieverServiceError
+        raise error_type(
+            f"{operation} failed: HTTP {resp.status_code}: {detail}",
+            status_code=resp.status_code,
+        )
+
+    async def _arequest(self, method: str, path: str, **kwargs: Any) -> Any:
+        # Construct the client inside the coroutine. ``_run`` may drive this on
+        # a worker thread's event loop, and a client bound to a different loop
+        # fails there — so do not hoist it to ``__init__`` to pool connections.
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(300.0, connect=30.0), headers=self._auth_headers
+            ) as client:
+                resp = await client.request(method, f"{self._base_url}{path}", **kwargs)
+        except httpx.HTTPError as exc:
+            raise RetrieverServiceError(f"{method} {path} transport failure: {exc}") from exc
+        self._raise_for_response(resp, f"{method} {path}")
+        try:
+            return resp.json() if resp.content else None
+        except ValueError as exc:
+            raise RetrieverServiceError(f"{method} {path} returned malformed JSON") from exc
+
+    @staticmethod
+    def _run(coro: Coroutine[Any, Any, _T]) -> _T:
+        """Drive an async operation to completion from synchronous code.
+
+        Each operation is implemented once, asynchronously; the synchronous
+        methods are thin facades over it. When the caller already runs inside
+        an event loop we hand the coroutine to a worker thread, because
+        ``asyncio.run`` refuses to nest.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+
+    @staticmethod
+    def _model(model: Any, payload: Any, operation: str) -> Any:
+        try:
+            return model.model_validate(payload)
+        except (ValidationError, ValueError) as exc:
+            raise RetrieverServiceError(f"{operation} returned an invalid response: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Collection and document lifecycle
+    # ------------------------------------------------------------------
+
+    def create_collection(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None,
+    ) -> CollectionInfo:
+        """Create a logical collection in the client's configured scope."""
+
+        return self._run(
+            self.acreate_collection(
+                name,
+                description=description,
+                metadata=metadata,
+                expires_at=expires_at,
+            )
+        )
+
+    async def acreate_collection(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None,
+    ) -> CollectionInfo:
+        """Asynchronously create a logical collection."""
+
+        body = {
+            "name": name,
+            "description": description,
+            "metadata": metadata or {},
+            "expires_at": expires_at,
+        }
+        return self._model(
+            CollectionInfo,
+            await self._arequest("POST", "/v1/collections", json=body),
+            "create collection",
+        )
+
+    def get_collection(self, name: str) -> CollectionInfo:
+        """Return one logical collection from the configured scope."""
+
+        return self._run(self.aget_collection(name))
+
+    async def aget_collection(self, name: str) -> CollectionInfo:
+        """Asynchronously return one logical collection."""
+
+        return self._model(
+            CollectionInfo,
+            await self._arequest("GET", f"/v1/collections/{name}"),
+            "get collection",
+        )
+
+    def list_collections(self, *, limit: int = 100, continuation_token: str | None = None) -> CollectionPage:
+        """List logical collections in the configured scope."""
+
+        return self._run(self.alist_collections(limit=limit, continuation_token=continuation_token))
+
+    async def alist_collections(
+        self,
+        *,
+        limit: int = 100,
+        continuation_token: str | None = None,
+    ) -> CollectionPage:
+        """Asynchronously list logical collections."""
+
+        params = {
+            "limit": limit,
+            "continuation_token": continuation_token,
+        }
+        return self._model(
+            CollectionPage,
+            await self._arequest("GET", "/v1/collections", params=params),
+            "list collections",
+        )
+
+    def update_collection(self, name: str, **changes: Any) -> CollectionInfo:
+        """Update mutable properties of a logical collection."""
+
+        return self._run(self.aupdate_collection(name, **changes))
+
+    async def aupdate_collection(self, name: str, **changes: Any) -> CollectionInfo:
+        """Asynchronously update a logical collection."""
+
+        return self._model(
+            CollectionInfo,
+            await self._arequest("PATCH", f"/v1/collections/{name}", json=changes),
+            "update collection",
+        )
+
+    def delete_collection(self, name: str, *, if_exists: bool = False) -> CollectionDeleteResult:
+        """Request deletion of a logical collection and its VectorDB-owned data."""
+
+        return self._run(self.adelete_collection(name, if_exists=if_exists))
+
+    async def adelete_collection(self, name: str, *, if_exists: bool = False) -> CollectionDeleteResult:
+        """Asynchronously delete a logical collection."""
+
+        body = await self._arequest("DELETE", f"/v1/collections/{name}", params={"if_exists": if_exists})
+        return self._model(CollectionDeleteResult, body, "delete collection")
+
+    def list_documents(
+        self,
+        collection_name: str,
+        *,
+        limit: int = 100,
+        continuation_token: str | None = None,
+    ) -> DocumentPage:
+        """List committed documents in a logical collection."""
+
+        return self._run(
+            self.alist_documents(
+                collection_name,
+                limit=limit,
+                continuation_token=continuation_token,
+            )
+        )
+
+    async def alist_documents(
+        self,
+        collection_name: str,
+        *,
+        limit: int = 100,
+        continuation_token: str | None = None,
+    ) -> DocumentPage:
+        """Asynchronously list committed collection documents."""
+
+        params = {
+            "limit": limit,
+            "continuation_token": continuation_token,
+        }
+        return self._model(
+            DocumentPage,
+            await self._arequest("GET", f"/v1/collections/{collection_name}/documents", params=params),
+            "list documents",
+        )
+
+    def get_document(self, collection_name: str, document_id: str) -> DocumentInfo:
+        """Return one committed collection document."""
+
+        return self._run(self.aget_document(collection_name, document_id))
+
+    async def aget_document(self, collection_name: str, document_id: str) -> DocumentInfo:
+        """Asynchronously return one committed collection document."""
+
+        return self._model(
+            DocumentInfo,
+            await self._arequest("GET", f"/v1/collections/{collection_name}/documents/{document_id}"),
+            "get document",
+        )
+
+    def delete_document(
+        self,
+        collection_name: str,
+        document_id: str,
+        *,
+        if_exists: bool = False,
+    ) -> DocumentDeleteResult:
+        """Request deletion of one document and its collection chunks."""
+
+        return self._run(self.adelete_document(collection_name, document_id, if_exists=if_exists))
+
+    async def adelete_document(
+        self,
+        collection_name: str,
+        document_id: str,
+        *,
+        if_exists: bool = False,
+    ) -> DocumentDeleteResult:
+        """Asynchronously delete one collection document."""
+
+        return self._model(
+            DocumentDeleteResult,
+            await self._arequest(
+                "DELETE",
+                f"/v1/collections/{collection_name}/documents/{document_id}",
+                params={"if_exists": if_exists},
+            ),
+            "delete document",
+        )
+
+    def get_job(self, job_id: str) -> JobAggregateResponse:
+        """Return aggregate ingestion status for a job."""
+
+        return self._run(self.aget_job(job_id))
+
+    async def aget_job(self, job_id: str) -> JobAggregateResponse:
+        """Asynchronously return aggregate ingestion status."""
+
+        return self._model(
+            JobAggregateResponse,
+            await self._arequest("GET", f"/v1/ingest/job/{job_id}"),
+            "get job",
+        )
+
+    def list_job_documents(self, job_id: str, *, offset: int = 0, limit: int = 100) -> JobDocumentsPage:
+        """List per-document ingestion status for a job."""
+
+        return self._run(self.alist_job_documents(job_id, offset=offset, limit=limit))
+
+    async def alist_job_documents(self, job_id: str, *, offset: int = 0, limit: int = 100) -> JobDocumentsPage:
+        """Asynchronously list per-document ingestion status."""
+
+        return self._model(
+            JobDocumentsPage,
+            await self._arequest(
+                "GET",
+                f"/v1/ingest/job/{job_id}/documents",
+                params={"offset": offset, "limit": limit},
+            ),
+            "list job documents",
+        )
 
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
 
-    def query(self, query: str | list[str], *, top_k: int) -> list[list[dict[str, Any]]]:
-        """Search ingested documents through ``POST /v1/query``."""
-        url = f"{self._base_url}/v1/query"
-        expected_results = len(query) if isinstance(query, list) else 1
+    def query(
+        self,
+        query: str | list[str],
+        *,
+        top_k: int,
+        collection_name: str | None = None,
+    ) -> list[list[dict[str, Any]]] | list[QueryHit]:
+        """Search ingested documents through ``POST /v1/query``.
+
+        Note:
+            ``top_k`` is required here but defaults to 10 on :meth:`aquery`.
+            That asymmetry is part of the released signature; do not unify it.
+        """
+        return self._run(self.aquery(query, top_k=top_k, collection_name=collection_name))
+
+    def _query_hit(self, hit: dict[str, Any]) -> QueryHit:
+        return self._model(
+            QueryHit,
+            {
+                **hit,
+                "bbox": hit.get("bbox_xyxy_norm"),
+                "source": hit.get("source"),
+                "metadata": hit.get("metadata") or {},
+            },
+            "collection query",
+        )
+
+    async def aquery(
+        self,
+        query: str | list[str],
+        *,
+        top_k: int = 10,
+        collection_name: str | None = None,
+    ) -> list[list[dict[str, Any]]] | list[QueryHit]:
+        """Asynchronously search through ``POST /v1/query``."""
+
         payload: dict[str, Any] = {"query": query, "top_k": int(top_k)}
+        if collection_name:
+            payload["collection_name"] = collection_name
+        body = await self._arequest("POST", "/v1/query", json=payload)
         try:
-            with httpx.Client(
-                timeout=httpx.Timeout(300.0, connect=30.0),
-                headers=self._auth_headers,
-            ) as client:
-                resp = client.post(url, json=payload)
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"Service query failed: {type(exc).__name__}: {exc}") from exc
-
-        if resp.status_code >= 400:
-            detail = resp.text[:500] if resp.text else "(empty)"
-            raise RuntimeError(f"Service query failed: HTTP {resp.status_code}: {detail}")
-
-        try:
-            body = resp.json()
-        except ValueError as exc:
-            raise RuntimeError("Service query returned invalid JSON.") from exc
-
-        try:
-            query_response = QueryResponse.model_validate(body)
-            return query_response.hits_by_query(expected_results=expected_results)
+            parsed = QueryResponse.model_validate(body).hits_by_query(
+                expected_results=len(query) if isinstance(query, list) else 1
+            )
         except (ValidationError, ValueError) as exc:
-            raise RuntimeError(f"Service query returned invalid response: {exc}") from exc
+            raise RetrieverServiceError(f"Service query returned invalid response: {exc}") from exc
+        if collection_name and isinstance(query, str):
+            return [self._query_hit(hit) for hit in parsed[0]]
+        return parsed
 
     # ------------------------------------------------------------------
     # Job lifecycle
@@ -278,6 +608,11 @@ class RetrieverServiceClient:
         expected_documents: int,
         label: str | None = None,
         retain_results: bool = False,
+        collection_name: str | None = None,
+        operation: str = "append",
+        target_document_id: str | None = None,
+        idempotency_key: str | None = None,
+        document_manifest: list[dict[str, str]] | None = None,
     ) -> _CreatedJob:
         """Open a server-side job aggregate and return its client-visible metadata.
 
@@ -292,7 +627,19 @@ class RetrieverServiceClient:
         }
         if label is not None:
             payload["label"] = label
-        resp = await client.post(url, json=payload)
+        if collection_name is not None:
+            payload["collection_name"] = collection_name
+        payload["operation"] = operation
+        if target_document_id is not None:
+            payload["target_document_id"] = target_document_id
+        if idempotency_key is not None:
+            payload["idempotency_key"] = idempotency_key
+        if document_manifest:
+            payload["document_manifest"] = document_manifest
+        try:
+            resp = await client.post(url, json=payload)
+        except httpx.HTTPError as exc:
+            raise RetrieverServiceError(f"Job creation transport failure: {exc}") from exc
         # A 404/410 here means the deployed service does not advertise
         # the job-scoped ingest API.  Surface a dedicated compatibility
         # error instead of a generic HTTPStatusError so callers see one
@@ -306,14 +653,11 @@ class RetrieverServiceClient:
                     body=resp.text if resp.text else "",
                 )
             )
-        if resp.status_code >= 400:
-            detail = resp.text[:500] if resp.text else "(empty)"
-            raise httpx.HTTPStatusError(
-                f"Job creation failed: HTTP {resp.status_code}: {detail}",
-                request=resp.request,
-                response=resp,
-            )
-        body = resp.json()
+        self._raise_for_response(resp, "create ingestion job")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise RetrieverServiceError("Job creation returned malformed JSON") from exc
         job_id = body.get("job_id")
         if not job_id:
             raise RuntimeError(f"Job creation returned no job_id: {body!r}")
@@ -321,6 +665,123 @@ class RetrieverServiceClient:
         return _CreatedJob(
             job_id=job_id,
             trace_id=trace_id if isinstance(trace_id, str) and trace_id else None,
+        )
+
+    async def asubmit_documents(
+        self,
+        collection_name: str,
+        files: list[str | Path],
+        *,
+        idempotency_key: str | None = None,
+        operation: str = "append",
+        target_document_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        pipeline_spec: dict[str, Any] | None = None,
+    ) -> JobAggregateResponse:
+        """Create a job and upload its files, returning after acceptance.
+
+        Processing continues on the service. Poll :meth:`get_job` or
+        :meth:`aget_job` until the aggregate reaches a terminal state.
+        """
+        paths = [Path(file) for file in files]
+        if not paths:
+            raise RetrieverServiceValidationError("At least one file is required")
+        timeout = httpx.Timeout(timeout=None, connect=30.0)
+        limits = httpx.Limits(max_connections=200, max_keepalive_connections=100)
+        manifest = []
+        for position, path in enumerate(paths):
+            content_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+            manifest_entry_id = hashlib.sha256(f"{position}\0{path.name}\0{content_sha256}".encode("utf-8")).hexdigest()
+            manifest.append(
+                {
+                    "manifest_entry_id": manifest_entry_id,
+                    "filename": path.name,
+                    "content_sha256": content_sha256,
+                }
+            )
+        async with httpx.AsyncClient(timeout=timeout, limits=limits, headers=self._auth_headers) as client:
+            created = await self._create_job(
+                client,
+                expected_documents=len(paths),
+                collection_name=collection_name,
+                operation=operation,
+                target_document_id=target_document_id,
+                idempotency_key=idempotency_key,
+                document_manifest=manifest,
+            )
+            sem = asyncio.Semaphore(self._max_concurrency)
+
+            async def upload(path: Path, entry: dict[str, str]) -> None:
+                async with sem:
+                    await self._upload_one(
+                        client,
+                        path,
+                        job_id=created.job_id,
+                        metadata=metadata,
+                        pipeline_spec=pipeline_spec,
+                        manifest_entry_id=entry["manifest_entry_id"],
+                    )
+
+            await asyncio.gather(*(upload(path, entry) for path, entry in zip(paths, manifest, strict=True)))
+            resp = await client.get(f"{self._base_url}/v1/ingest/job/{created.job_id}")
+            self._raise_for_response(resp, "get accepted job")
+            try:
+                payload = resp.json()
+            except ValueError as exc:
+                raise RetrieverServiceError("Accepted job response was malformed JSON") from exc
+            return self._model(JobAggregateResponse, payload, "get accepted job")
+
+    def submit_documents(
+        self,
+        collection_name: str,
+        files: list[str | Path],
+        **kwargs: Any,
+    ) -> JobAggregateResponse:
+        """Synchronous accepted-not-completed collection ingestion."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.asubmit_documents(collection_name, files, **kwargs))
+        raise RuntimeError("submit_documents cannot run inside an event loop; use asubmit_documents")
+
+    def replace_document(
+        self,
+        collection_name: str,
+        document_id: str,
+        file: str | Path,
+        *,
+        idempotency_key: str | None = None,
+        **kwargs: Any,
+    ) -> JobAggregateResponse:
+        """Replace one stable document with a newly ingested file."""
+
+        return self.submit_documents(
+            collection_name,
+            [file],
+            operation="replace",
+            target_document_id=document_id,
+            idempotency_key=idempotency_key,
+            **kwargs,
+        )
+
+    async def areplace_document(
+        self,
+        collection_name: str,
+        document_id: str,
+        file: str | Path,
+        *,
+        idempotency_key: str | None = None,
+        **kwargs: Any,
+    ) -> JobAggregateResponse:
+        """Asynchronously replace one stable document."""
+
+        return await self.asubmit_documents(
+            collection_name,
+            [file],
+            operation="replace",
+            target_document_id=document_id,
+            idempotency_key=idempotency_key,
+            **kwargs,
         )
 
     # ------------------------------------------------------------------
@@ -335,6 +796,7 @@ class RetrieverServiceClient:
         job_id: str,
         metadata: dict[str, Any] | None = None,
         pipeline_spec: dict[str, Any] | None = None,
+        manifest_entry_id: str | None = None,
     ) -> dict[str, Any]:
         """Upload a file under an existing job, with retry on 429 + transient errors.
 
@@ -367,14 +829,22 @@ class RetrieverServiceClient:
                 resp = await client.post(
                     url,
                     files={"file": (filename, file_bytes, content_type)},
-                    data={"metadata": meta_json},
+                    data={
+                        "metadata": meta_json,
+                        **({"manifest_entry_id": manifest_entry_id} if manifest_entry_id else {}),
+                    },
                 )
             except _TRANSIENT_ERRORS as exc:
                 transport_attempts += 1
                 if transport_attempts > 5:
-                    raise
+                    raise RetrieverServiceError(f"Upload of {filename} transport failure after retries: {exc}") from exc
                 delay = min(_DEFAULT_RETRY_AFTER * (2 ** (transport_attempts - 1)), 60.0)
-                logger.debug("Transient %s uploading %s, retry in %.1fs", type(exc).__name__, filename, delay)
+                logger.debug(
+                    "Transient %s uploading %s, retry in %.1fs",
+                    type(exc).__name__,
+                    filename,
+                    delay,
+                )
                 await asyncio.sleep(delay)
                 continue
 
@@ -399,17 +869,13 @@ class RetrieverServiceClient:
                     )
                 )
 
-            if resp.status_code >= 400:
-                detail = resp.text[:500] if resp.text else "(empty)"
-                raise httpx.HTTPStatusError(
-                    f"Upload of {filename} returned HTTP {resp.status_code}: {detail}",
-                    request=resp.request,
-                    response=resp,
-                )
+            self._raise_for_response(resp, f"upload {filename}")
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise RetrieverServiceError(f"Upload of {filename} returned malformed JSON") from exc
 
-            return resp.json()
-
-        raise RuntimeError(f"Upload of {filename} failed after {_MAX_UPLOAD_RETRIES} retries")
+        raise RetrieverServiceError(f"Upload of {filename} failed after {_MAX_UPLOAD_RETRIES} retries")
 
     async def _upload_source(
         self,
@@ -428,7 +894,11 @@ class RetrieverServiceClient:
             except Exception as exc:
                 logger.error("Upload failed for %s: %s", filename, exc)
                 return _UploadOutcome(filename=filename, error=str(exc))
-        return _UploadOutcome(filename=filename, document_id=response.get("document_id", ""))
+        return _UploadOutcome(
+            filename=filename,
+            document_id=response.get("document_id", ""),
+            attempt_id=response.get("attempt_id", ""),
+        )
 
     # ------------------------------------------------------------------
     # SSE consumer
@@ -549,14 +1019,24 @@ class RetrieverServiceClient:
                         if _is_done():
                             break
                     elif line.startswith(":"):
-                        if _is_done():
+                        if uploads_done.is_set():
+                            _reconcile()
+                            if pending:
+                                logger.info(
+                                    "SSE keepalive arrived with %d items pending "
+                                    "after uploads completed; switching to bulk poll",
+                                    len(pending),
+                                )
                             break
 
         except Exception as exc:
             logger.warning("SSE stream error: %s: %s", type(exc).__name__, exc)
 
         if pending:
-            logger.info("SSE closed with %d items pending — falling back to bulk poll", len(pending))
+            logger.info(
+                "SSE closed with %d items pending — falling back to bulk poll",
+                len(pending),
+            )
             await self._bulk_poll_fallback(client, pending, tracker, on_event)
 
     # ------------------------------------------------------------------
@@ -603,7 +1083,11 @@ class RetrieverServiceClient:
                 status = info.get("status", "")
                 if status in ("completed", "failed"):
                     pending.discard(doc_id)
-                    event = {"id": doc_id, "status": status, "result_rows": info.get("result_rows", 0)}
+                    event = {
+                        "id": doc_id,
+                        "status": status,
+                        "result_rows": info.get("result_rows", 0),
+                    }
                     error_msg = info.get("error")
                     if error_msg:
                         event["error"] = error_msg
@@ -677,7 +1161,7 @@ class RetrieverServiceClient:
                 if outcome.error is not None:
                     upload_failures.append((outcome.filename, outcome.error))
                 elif outcome.document_id:
-                    pending.add(outcome.document_id)
+                    pending.add(outcome.attempt_id or outcome.document_id)
                     document_ids.append(outcome.document_id)
                     if on_file_submitted:
                         on_file_submitted(outcome.filename, outcome.document_id)
@@ -801,7 +1285,7 @@ class RetrieverServiceClient:
                         }
                     )
                 elif outcome.document_id:
-                    pending.add(outcome.document_id)
+                    pending.add(outcome.attempt_id or outcome.document_id)
                     await event_queue.put(
                         {
                             "event": "upload_complete",
