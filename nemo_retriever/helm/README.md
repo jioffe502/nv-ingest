@@ -344,10 +344,11 @@ The retriever service picks up the in-cluster ASR endpoint when `nimOperator.aud
 
 #### VectorDB and the embed endpoint { #vectordb-and-the-embed-endpoint }
 
-The VectorDB storage default is `indexMode: auto`. A fresh table creates and
-waits for its FTS index after the first write, while an existing dense table is
-left dense. Set `serviceConfig.vectordb.indexMode=hybrid` to perform the
-explicit dense-to-hybrid upgrade. Incremental rows remain searchable through
+The VectorDB storage default is `indexMode: auto`; most users should leave it
+unchanged. A fresh table creates and waits for its FTS index after the first
+write, while an existing dense table is left dense. Set
+`serviceConfig.vectordb.indexMode=hybrid` only when you explicitly want to
+upgrade an existing dense table. Incremental rows remain searchable through
 LanceDB's unindexed-tail scan; the service runs `optimize()` after 20 writes or
 100,000 added rows and reports FTS and optimization state from `/v1/health`.
 

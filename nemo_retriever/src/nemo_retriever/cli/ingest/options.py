@@ -200,9 +200,9 @@ IndexModeOption = Annotated[
     typer.Option(
         "--index-mode",
         help=(
-            "LanceDB index mode: auto, dense, hybrid, or sparse. Auto creates hybrid tables and preserves "
-            "an existing table's physical mode on append. Dense is vector-only; hybrid also builds BM25/FTS; "
-            "sparse skips dense embedding and writes an FTS-only table."
+            "Recommended: leave unset. Auto selects the tested hybrid default for new tables and preserves an "
+            "existing table on append. Dense, hybrid, and sparse are advanced overrides for experiments or "
+            "specialized deployments."
         ),
     ),
 ]
