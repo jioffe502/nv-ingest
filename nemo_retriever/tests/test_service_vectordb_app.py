@@ -7,11 +7,11 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock, PropertyMock, patch
 
-import nemo_retriever.service.vectordb_app as vectordb_module
 import pytest
 from fastapi.testclient import TestClient
+
+import nemo_retriever.service.vectordb_app as vectordb_module
 from nemo_retriever.common.vdb.hybrid_fusion import DEFAULT_HYBRID_FUSION_POLICY
-from nemo_retriever.service.config import VectorDbConfig
 from nemo_retriever.service.vectordb_app import (
     VectorDBState,
     _embed_queries_remote,
@@ -19,7 +19,6 @@ from nemo_retriever.service.vectordb_app import (
     _tensor_to_embedding_rows,
     create_vectordb_app,
 )
-from pydantic import ValidationError
 
 
 @pytest.mark.parametrize(
@@ -91,14 +90,6 @@ def test_health_reports_effective_retrieval_mode_none_without_table(tmp_path) ->
     assert body["fts_present"] is False
     assert body["fts_unindexed_rows"] is None
     assert body["last_optimization"]["status"] == "never"
-
-
-def test_vectordb_config_validates_index_mode() -> None:
-    assert VectorDbConfig().index_mode == "auto"
-    assert VectorDbConfig(index_mode="dense").index_mode == "dense"
-    assert VectorDbConfig(index_mode="hybrid").index_mode == "hybrid"
-    with pytest.raises(ValidationError):
-        VectorDbConfig(index_mode="sparse")
 
 
 def test_health_stays_ok_when_index_inspection_errors(tmp_path) -> None:

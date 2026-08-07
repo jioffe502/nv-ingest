@@ -6,15 +6,17 @@ import json
 import logging
 import os
 import time
+
 from collections.abc import Iterable, Sequence
 from datetime import timedelta
 from typing import Any, Final, FrozenSet
 
+import lancedb
 import pyarrow as pa
 import pyarrow.compute as pc
 
-import lancedb
 from nemo_retriever.common.vdb.adt_vdb import VDB
+
 from nemo_retriever.common.vdb.hybrid_fusion import (
     HybridFusionPolicy,
     WeightedRRFReranker,

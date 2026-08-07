@@ -56,7 +56,6 @@ recorded before this behavior changed are not directly comparable.
 | `run-files` | Run one or more portable runfiles as a session. |
 | `run-helm` | Provision a service, run one session, collect failure logs, and tear it down. |
 | `check-vidore-access` | Check remote ViDoRe queries, qrels, and corpora without downloading them. |
-| `compare-retrieval` | Replay dense, sparse, and hybrid retrieval against one completed ViDoRe index without re-ingesting. |
 | `post-slack` | Preview or post completed artifacts without rerunning a benchmark. |
 | `diff` | Compare summary metrics from two completed runs. |
 
@@ -138,33 +137,6 @@ A multi-run session has this stable layout:
 Dry-runs resolve configuration and write planning artifacts, but they are not
 execution evidence.
 
-### Compare ViDoRe retrieval modes
-
-Canonical BEIR benchmarks now ingest hybrid-capable tables. Explicitly named
-`*_dense` benchmarks and the `vidore_v3_all_dense` runset retain the historical
-dense configuration. Every run records both requested and resolved index mode
-in `results.json`, so baseline tooling can keep them distinct.
-
-Hybrid query execution uses the shared no-model-reranker weighted-RRF policy:
-50 candidates per dense/FTS leg, dense weight 0.8, sparse weight 0.2, and RRF
-`k=10`. Comparison summaries record this resolved fusion policy alongside the
-LanceDB version.
-
-After a completed local or batch ViDoRe run, replay all three retrieval modes
-against the identical extracted rows:
-
-```bash
-uv run --project nemo_retriever retriever harness compare-retrieval \
-  /path/to/completed-run \
-  --modes dense,sparse,hybrid
-```
-
-The command refuses non-hybrid source indexes and existing output directories.
-It writes `retrieval_comparison/summary.json`, `query_cases.jsonl`,
-`extraction_audit.json`, `report.md`, per-mode query/BEIR/TREC artifacts, and
-available annotated evidence crops. Extraction `needs_review` classifications
-are weak-overlap diagnostics, never confirmed extraction failures.
-
 ## Gates and Exit Codes
 
 Metric gates compare values in `results.json.summary_metrics`:
@@ -215,7 +187,6 @@ one release snapshot outside the repository:
     {
       "name": "RC26.05 Perflab",
       "dataset": "bo767",
-      "resolved_index_mode": "dense",
       "environment": {"gpu_sku": "NVIDIA H100 80GB HBM3", "gpu_count": 8},
       "metrics": {"ingest_secs": 4036.85, "pages_per_sec_ingest": 13.56}
     }
@@ -226,9 +197,7 @@ one release snapshot outside the repository:
 Pass it with `--reference-file` or set
 `RETRIEVER_HARNESS_REFERENCE_FILE`. The report shows the two observations with
 their GPU context; it does not assign a verdict, update the file, or maintain
-history. Retrieval references match only runs with the same
-`resolved_index_mode`; this prevents a dense baseline from being presented as
-a hybrid comparison.
+history.
 
 Compare two local runs without Slack:
 

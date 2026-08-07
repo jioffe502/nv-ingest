@@ -2,16 +2,17 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 import json
 import subprocess
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+
 from nemo_retriever.harness.artifact_writer import (
-    ArtifactWriter,
     append_text,
     artifact_paths,
+    ArtifactWriter,
     capture_output_to_log,
     redact,
 )
@@ -24,15 +25,9 @@ from nemo_retriever.harness.contracts import (
     HarnessRunError,
 )
 from nemo_retriever.harness.diff import diff_artifact_dirs
-from nemo_retriever.harness.environment import collect_environment
-from nemo_retriever.harness.execution import (
-    _concise_message,
-    _run_result_payload,
-    _write_failure_result,
-    run_benchmark,
-)
-
 from nemo_retriever.harness import environment as harness_environment
+from nemo_retriever.harness.environment import collect_environment
+from nemo_retriever.harness.execution import _concise_message, _run_result_payload, _write_failure_result, run_benchmark
 
 
 def _write_json(path, payload):
@@ -394,24 +389,7 @@ def test_diff_prefers_results_but_reads_legacy_summary(tmp_path):
 
     assert payload["left"].endswith("left/results.json")
     assert payload["right"].endswith("right/summary_metrics.json")
-    assert payload["comparable_index_mode"] is True
     assert payload["summary_metrics"]["recall_5"]["delta"] == pytest.approx(0.1)
-
-
-def test_diff_marks_cross_index_mode_results_as_distinct_baseline_series(tmp_path):
-    left = tmp_path / "dense"
-    right = tmp_path / "hybrid"
-    left.mkdir()
-    right.mkdir()
-    _write_json(left / "results.json", {"resolved_index_mode": "dense", "summary_metrics": {"recall_5": 0.8}})
-    _write_json(right / "results.json", {"resolved_index_mode": "hybrid", "summary_metrics": {"recall_5": 0.9}})
-
-    payload = diff_artifact_dirs(left, right)
-
-    assert payload["left_resolved_index_mode"] == "dense"
-    assert payload["right_resolved_index_mode"] == "hybrid"
-    assert payload["comparable_index_mode"] is False
-    assert "distinct baseline series" in payload["comparison_warning"]
 
 
 def test_environment_records_relevant_runtime_flags_without_credentials(monkeypatch):

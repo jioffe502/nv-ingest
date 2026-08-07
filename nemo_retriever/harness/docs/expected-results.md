@@ -93,8 +93,7 @@ Integrity facts:
 | Pharmaceuticals | 52 | 2,313 | 2,184 |
 | Physics | 42 | 1,674 | 1,812 |
 
-Observed complete **dense** batch runs on an eight-H100 DGX (these predate the
-hybrid default and must not be compared to hybrid runs as one baseline series):
+Observed complete batch runs on an eight-H100 DGX:
 
 | Dataset | Indexed rows | Ingest seconds | Pages/s | Recall@5 | Recall@10 | nDCG@10 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -111,10 +110,6 @@ Computer Science was run twice; the other domains have one complete observation.
 The observed all-domain macro-average nDCG@10 was about `0.519`. The observations
 predate separate physical and workload-visible GPU counts, so do not infer
 scaling behavior from their throughput.
-
-Canonical ViDoRe benchmarks now create hybrid tables. Register equal-RRF,
-weighted-hybrid, and historical dense results as distinct baseline series; use
-`vidore_v3_all_dense` only to reproduce the historical dense configuration.
 
 ### RC26.05 Recall Comparison
 

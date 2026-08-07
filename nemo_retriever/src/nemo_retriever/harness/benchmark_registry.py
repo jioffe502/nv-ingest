@@ -127,7 +127,7 @@ def _base_ingest(*, profile: str = "auto") -> dict[str, Any]:
         "storage": {
             "table_name": DEFAULT_TABLE_NAME,
             "overwrite": True,
-            "index_mode": "hybrid",
+            "index_mode": "dense",
         },
     }
 
@@ -193,7 +193,7 @@ def _vidore_v3_benchmark(dataset_name: str) -> BenchmarkSpec:
     )
 
 
-_CANONICAL_BENCHMARKS: dict[str, BenchmarkSpec] = {
+BENCHMARKS: dict[str, BenchmarkSpec] = {
     "jp20_smoke": BenchmarkSpec(
         name="jp20_smoke",
         dataset="jp20",
@@ -267,31 +267,6 @@ _CANONICAL_BENCHMARKS: dict[str, BenchmarkSpec] = {
     ),
 }
 
-
-def _dense_variant(spec: BenchmarkSpec) -> BenchmarkSpec:
-    ingest = deepcopy(dict(spec.ingest))
-    ingest["storage"] = {**dict(ingest.get("storage") or {}), "index_mode": "dense"}
-    return BenchmarkSpec(
-        name=f"{spec.name}_dense",
-        dataset=spec.dataset,
-        ingest=ingest,
-        query={**dict(spec.query), "retrieval_mode": "dense"},
-        evaluation=deepcopy(dict(spec.evaluation)),
-        summary_keys=spec.summary_keys,
-        tags=(*spec.tags, "dense-baseline"),
-        description=f"Dense historical baseline for {spec.description or spec.name}",
-    )
-
-
-BENCHMARKS: dict[str, BenchmarkSpec] = {
-    **_CANONICAL_BENCHMARKS,
-    **{
-        f"{name}_dense": _dense_variant(spec)
-        for name, spec in _CANONICAL_BENCHMARKS.items()
-        if (spec.evaluation or {}).get("mode") == "beir"
-    },
-}
-
 RUNSETS: dict[str, RunSet] = {
     "jp20_core": RunSet(
         name="jp20_core",
@@ -304,12 +279,6 @@ RUNSETS: dict[str, RunSet] = {
         runs=tuple(f"{dataset_name}_beir" for dataset_name in VIDORE_V3_PUBLIC_DATASETS),
         tags=("vidore", "beir", "all"),
         description="All eight public ViDoRe v3 BEIR retrieval benchmarks.",
-    ),
-    "vidore_v3_all_dense": RunSet(
-        name="vidore_v3_all_dense",
-        runs=tuple(f"{dataset_name}_beir_dense" for dataset_name in VIDORE_V3_PUBLIC_DATASETS),
-        tags=("vidore", "beir", "all", "dense-baseline"),
-        description="Historical dense baselines for all eight public ViDoRe v3 benchmarks.",
     ),
 }
 

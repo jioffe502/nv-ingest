@@ -30,12 +30,6 @@ class HybridFusionPolicy:
         if self.rrf_k <= 0:
             raise ValueError("rrf_k must be greater than zero")
 
-    def __str__(self) -> str:
-        return (
-            "weighted RRF "
-            f"(candidate_depth={self.candidate_depth}, dense_weight={self.dense_weight:g}, rrf_k={self.rrf_k})"
-        )
-
 
 DEFAULT_HYBRID_FUSION_POLICY = HybridFusionPolicy(candidate_depth=50, dense_weight=0.8, rrf_k=10)
 

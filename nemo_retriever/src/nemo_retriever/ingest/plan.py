@@ -10,11 +10,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence, cast
 
-from nemo_retriever.common.input_files import (
-    AUTO_INPUT_EXTENSIONS,
-    INPUT_TYPE_EXTENSIONS,
-    expand_input_file_patterns,
-    resolve_input_files,
+from nemo_retriever.ingestor.manifest import (
+    ExtractionBranchPlan,
+    build_input_manifest,
+    plan_extraction_branches,
 )
 from nemo_retriever.common.modality.ocr.config import OCRLang, OCRVersion
 from nemo_retriever.common.params import (
@@ -34,19 +33,19 @@ from nemo_retriever.common.params import (
     VideoFrameTextDedupParams,
     build_embed_option_kwargs,
 )
+from nemo_retriever.common.input_files import (
+    AUTO_INPUT_EXTENSIONS,
+    INPUT_TYPE_EXTENSIONS,
+    expand_input_file_patterns,
+    resolve_input_files,
+)
+from nemo_retriever.models import resolve_embed_model
 from nemo_retriever.ingest.index_mode import (
     RequestedIngestIndexMode,
-    ResolvedIngestIndexMode,
     inspect_existing_lancedb_mode,
     resolve_ingest_index_mode,
     validate_requested_index_mode,
 )
-from nemo_retriever.ingestor.manifest import (
-    ExtractionBranchPlan,
-    build_input_manifest,
-    plan_extraction_branches,
-)
-from nemo_retriever.models import resolve_embed_model
 
 IngestRunModeValue = Literal["inprocess", "batch"]
 IngestInputTypeValue = Literal["auto", "pdf", "doc", "txt", "html", "image", "audio", "video"]
@@ -312,8 +311,6 @@ class ResolvedIngestPlan:
     vdb_params: VdbUploadParams | None
     lancedb_uri: str
     table_name: str
-    requested_index_mode: IngestIndexModeValue
-    index_mode: ResolvedIngestIndexMode
     sparse: bool = False
 
     def extract_call_kwargs(self) -> dict[str, Any]:
@@ -756,7 +753,5 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
         vdb_params=vdb_params,
         lancedb_uri=storage.lancedb_uri,
         table_name=storage.table_name,
-        requested_index_mode=requested_index_mode,
-        index_mode=resolved_index_mode,
         sparse=resolved_index_mode == "sparse",
     )

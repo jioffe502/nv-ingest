@@ -126,14 +126,12 @@ vectordb:
   enabled: false
   lancedb_uri: "/data/vectordb"
   table_name: "nemo_retriever"
-  # auto creates hybrid storage when fresh and preserves existing physical indexes.
-  # Set hybrid explicitly to add FTS to an existing dense table.
-  index_mode: "auto"
   embed_model: "nvidia/llama-nemotron-embed-vl-1b-v2"
   embed_model_provider_prefix: null
   # /v1/query auto-detects retrieval from the table's own indexes: a table with
   # both a vector column and an FTS/BM25 index runs hybrid, a vector-only table
-  # runs dense. Fresh auto/hybrid storage builds FTS after its first write.
+  # runs dense. The FTS index must be built at ingestion time; the service never
+  # mutates the table at query time.
   vectordb_url: "http://nemo-retriever-vectordb:7671"
 
 resources:

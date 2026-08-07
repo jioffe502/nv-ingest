@@ -281,8 +281,6 @@ class VectorDBState:
             "effective_index_mode": None,
             "fts_present": False,
             "fts_unindexed_rows": None,
-            "writes_since_optimize": self._writes_since_optimize,
-            "rows_since_optimize": self._rows_since_optimize,
             "last_optimization": dict(self._last_optimization),
         }
         try:
@@ -548,8 +546,6 @@ def create_vectordb_app(
                 "effective_index_mode": None,
                 "fts_present": False,
                 "fts_unindexed_rows": None,
-                "writes_since_optimize": 0,
-                "rows_since_optimize": 0,
                 "last_optimization": {"status": "never", "completed_at": None, "error": None},
             }
         )

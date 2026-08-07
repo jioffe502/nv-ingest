@@ -8,12 +8,12 @@ import json
 from datetime import timedelta
 from unittest.mock import patch
 
+import lancedb
 import pytest
 from fastapi.testclient import TestClient
+
 from nemo_retriever.service import vectordb_app as vectordb_module
 from nemo_retriever.service.vectordb_app import VectorDBState, create_vectordb_app
-
-import lancedb
 
 _DIM = 4
 _ROW = {
@@ -100,8 +100,6 @@ def test_incremental_write_threshold_runs_optimize_and_updates_health(tmp_path, 
     optimize.assert_called_once()
     health = state.index_health()
     assert health["last_optimization"]["status"] == "ok"
-    assert health["writes_since_optimize"] == 0
-    assert health["rows_since_optimize"] == 0
 
 
 @pytest.mark.integration

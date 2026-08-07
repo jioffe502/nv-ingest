@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+
 from nemo_retriever.ingest.index_mode import resolve_ingest_index_mode
 
 

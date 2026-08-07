@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-_ROOT = Path(__file__).resolve().parents[2]
+_ROOT = Path(__file__).resolve().parents[3]
 _CHART = _ROOT / "nemo_retriever" / "helm"
 
 
@@ -35,15 +35,10 @@ def _helm_template(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.parametrize("mode", ["auto", "dense", "hybrid"])
-def test_vectordb_index_mode_renders_into_config_and_deployment(mode: str) -> None:
+def test_vectordb_index_mode_renders_into_deployment(mode: str) -> None:
     result = _helm_template("--set", f"serviceConfig.vectordb.indexMode={mode}")
     assert result.returncode == 0, result.stderr
     documents = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
-    configmap = next(
-        doc for doc in documents if doc.get("kind") == "ConfigMap" and "retriever-service.yaml" in doc.get("data", {})
-    )
-    config = yaml.safe_load(configmap["data"]["retriever-service.yaml"])
-    assert config["vectordb"]["index_mode"] == mode
     deployment = next(
         doc for doc in documents if doc.get("kind") == "Deployment" and doc["metadata"]["name"].endswith("-vectordb")
     )

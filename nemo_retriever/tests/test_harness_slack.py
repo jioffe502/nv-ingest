@@ -7,20 +7,21 @@ from pathlib import Path
 
 import pytest
 import requests
+from typer.testing import CliRunner
+
 from nemo_retriever.harness.benchmark_registry import VIDORE_V3_PUBLIC_DATASETS
 from nemo_retriever.harness.cli import app
 from nemo_retriever.harness.slack import (
     DEFAULT_SLACK_METRIC_KEYS,
-    MAX_SLACK_TABLE_ROWS,
-    VIDORE_V3_REPORT_DATASETS,
     HarnessRunReport,
     HarnessSessionReport,
+    MAX_SLACK_TABLE_ROWS,
+    VIDORE_V3_REPORT_DATASETS,
     build_slack_payload,
     load_replay_report,
     load_session_report,
     post_slack_payload,
 )
-from typer.testing import CliRunner
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -391,39 +392,3 @@ def test_post_slack_shows_current_release_reference_without_a_verdict(monkeypatc
         ["GPUs available to workload", "8", "N/A"],
         ["pages", "1940", "1940"],
     ]
-
-
-def test_release_reference_matches_resolved_index_mode(monkeypatch, tmp_path):
-    session_dir = _write_session(tmp_path)
-    results_path = session_dir / "001_jp20_beir" / "results.json"
-    results = json.loads(results_path.read_text(encoding="utf-8"))
-    results["resolved_index_mode"] = "hybrid"
-    _write_json(results_path, results)
-    reference_file = tmp_path / "mode-specific-reference.json"
-    _write_json(
-        reference_file,
-        {
-            "baselines": [
-                {
-                    "name": "Dense baseline",
-                    "dataset": "jp20",
-                    "resolved_index_mode": "dense",
-                    "metrics": {"pages": 1940},
-                },
-                {
-                    "name": "Hybrid baseline",
-                    "dataset": "jp20",
-                    "resolved_index_mode": "hybrid",
-                    "metrics": {"pages": 1940},
-                },
-            ],
-        },
-    )
-    monkeypatch.setenv("RETRIEVER_HARNESS_REFERENCE_FILE", str(reference_file))
-
-    result = CliRunner().invoke(app, ["post-slack", "--preview", str(session_dir)])
-
-    assert result.exit_code == 0
-    payload_text = result.stdout
-    assert "Dense baseline" not in payload_text
-    assert "Hybrid baseline" in payload_text

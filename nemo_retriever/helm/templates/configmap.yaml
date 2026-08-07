@@ -163,16 +163,11 @@ auth:
   header_name: {{ .Values.serviceConfig.auth.headerName | quote }}
   bypass_paths: {{ toJson .Values.serviceConfig.auth.bypassPaths }}
 
-{{- $indexMode := .Values.serviceConfig.vectordb.indexMode | default "auto" -}}
-{{- if not (has $indexMode (list "auto" "dense" "hybrid")) -}}
-{{- fail "serviceConfig.vectordb.indexMode must be one of: auto, dense, hybrid" -}}
-{{- end -}}
 {{- if .Values.serviceConfig.vectordb.enabled }}
 vectordb:
   enabled: true
   lancedb_uri: {{ .Values.serviceConfig.vectordb.lancedbUri | quote }}
   table_name: {{ .Values.serviceConfig.vectordb.tableName | quote }}
-  index_mode: {{ $indexMode | quote }}
   embed_model: {{ .Values.serviceConfig.vectordb.embedModel | quote }}
 {{- if .Values.serviceConfig.vectordb.embedModelProviderPrefix }}
   embed_model_provider_prefix: {{ .Values.serviceConfig.vectordb.embedModelProviderPrefix | quote }}

@@ -17,7 +17,6 @@ class ReleaseReference:
     dataset: str
     environment: dict[str, Any]
     metrics: dict[str, int | float]
-    resolved_index_mode: str | None = None
 
 
 def load_release_references(path: Path) -> list[ReleaseReference]:
@@ -34,7 +33,6 @@ def load_release_references(path: Path) -> list[ReleaseReference]:
         dataset = result.get("dataset")
         environment = result.get("environment", {})
         metrics = result.get("metrics")
-        resolved_index_mode = result.get("resolved_index_mode")
         if not isinstance(release, str) or not release.strip():
             raise ValueError(f"Release result at index {index} must define non-empty 'name' text")
         if not isinstance(dataset, str) or not dataset.strip():
@@ -45,15 +43,12 @@ def load_release_references(path: Path) -> list[ReleaseReference]:
             raise ValueError(f"Release result at index {index} must define non-empty 'metrics'")
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in metrics.values()):
             raise ValueError(f"Release result at index {index} metrics must be numeric")
-        if resolved_index_mode is not None and resolved_index_mode not in {"dense", "hybrid", "sparse"}:
-            raise ValueError(f"Release result at index {index} 'resolved_index_mode' must be dense, hybrid, or sparse")
         references.append(
             ReleaseReference(
                 release=release.strip(),
                 dataset=dataset.strip(),
                 environment=dict(environment),
                 metrics=dict(metrics),
-                resolved_index_mode=resolved_index_mode,
             )
         )
     return references

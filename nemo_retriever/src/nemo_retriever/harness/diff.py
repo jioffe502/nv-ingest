@@ -7,15 +7,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from nemo_retriever.harness.contracts import (
-    EXIT_INVALID,
-    FailurePayload,
-    HarnessRunError,
-)
+from nemo_retriever.harness.contracts import EXIT_INVALID, FailurePayload, HarnessRunError
 from nemo_retriever.harness.json_io import read_json_object
 
 
-def _read_summary(path_or_dir: Path) -> tuple[Path, dict[str, Any], str | None]:
+def _read_summary(path_or_dir: Path) -> tuple[Path, dict[str, Any]]:
     try:
         path = path_or_dir.expanduser().resolve()
         if path.is_dir():
@@ -35,10 +31,9 @@ def _read_summary(path_or_dir: Path) -> tuple[Path, dict[str, Any], str | None]:
             summary = payload.get("summary_metrics")
             if not isinstance(summary, dict):
                 raise ValueError(f"'summary_metrics' must be an object in {results_path}")
-            resolved_index_mode = payload.get("resolved_index_mode")
-            return results_path, summary, str(resolved_index_mode) if resolved_index_mode is not None else None
+            return results_path, summary
         if legacy_summary_path.exists():
-            return legacy_summary_path, read_json_object(legacy_summary_path), None
+            return legacy_summary_path, read_json_object(legacy_summary_path)
         raise FileNotFoundError(f"No results.json or summary_metrics.json found under {path}")
     except (FileNotFoundError, ValueError) as exc:
         raise HarnessRunError(
@@ -62,8 +57,8 @@ def _numeric(value: Any) -> float | None:
 
 
 def diff_artifact_dirs(left: Path, right: Path) -> dict[str, Any]:
-    left_path, left_summary, left_index_mode = _read_summary(left)
-    right_path, right_summary, right_index_mode = _read_summary(right)
+    left_path, left_summary = _read_summary(left)
+    right_path, right_summary = _read_summary(right)
     keys = sorted(set(left_summary) | set(right_summary))
     deltas: dict[str, dict[str, Any]] = {}
     for key in keys:
@@ -81,20 +76,8 @@ def diff_artifact_dirs(left: Path, right: Path) -> dict[str, Any]:
             payload["delta"] = delta
             payload["percent_delta"] = (delta / left_number * 100.0) if left_number else None
         deltas[key] = payload
-    same_index_mode = left_index_mode == right_index_mode
     return {
         "left": str(left_path),
         "right": str(right_path),
-        "left_resolved_index_mode": left_index_mode,
-        "right_resolved_index_mode": right_index_mode,
-        "comparable_index_mode": same_index_mode,
-        "comparison_warning": (
-            None
-            if same_index_mode
-            else (
-                "Dense, sparse, and hybrid results are distinct baseline series; "
-                "interpret this cross-mode diff explicitly."
-            )
-        ),
         "summary_metrics": deltas,
     }
