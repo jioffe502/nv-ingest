@@ -200,9 +200,9 @@ IndexModeOption = Annotated[
     typer.Option(
         "--index-mode",
         help=(
-            "Recommended: leave unset. Auto selects the tested hybrid default for new tables and preserves an "
-            "existing table on append. Dense, hybrid, and sparse are advanced overrides for experiments or "
-            "specialized deployments."
+            "Recommended: leave unset. Auto creates a hybrid table for new indexes and preserves an existing "
+            "table on append. Dense, hybrid, and sparse are advanced overrides for experiments or specialized "
+            "deployments."
         ),
     ),
 ]

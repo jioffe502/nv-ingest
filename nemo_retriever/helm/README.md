@@ -349,8 +349,8 @@ unchanged. A fresh table creates and waits for its FTS index after the first
 write, while an existing dense table is left dense. Set
 `serviceConfig.vectordb.indexMode=hybrid` only when you explicitly want to
 upgrade an existing dense table. Incremental rows remain searchable through
-LanceDB's unindexed-tail scan; the service runs `optimize()` after 20 writes or
-100,000 added rows and reports FTS and optimization state from `/v1/health`.
+LanceDB's unindexed-tail scan; the service performs incremental FTS maintenance
+automatically and reports FTS and maintenance state from `/v1/health`.
 
 The vectordb Pod's `/v1/query` handler embeds the incoming query text
 before searching LanceDB.  It needs a NIM embedding endpoint to do that,

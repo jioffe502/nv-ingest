@@ -53,6 +53,8 @@ _VALID_ON_BAD_VECTORS: Final[FrozenSet[str]] = frozenset({"drop", "fill", "null"
 _RETRIEVAL_MODE_METADATA_KEY: Final[bytes] = b"retrieval_mode"
 _NEMO_RETRIEVER_RETRIEVAL_MODE_METADATA_KEY: Final[bytes] = b"nemo_retriever.retrieval_mode"
 _EMBEDDING_MODEL_METADATA_KEY: Final[bytes] = b"nemo_retriever.embedding_model_name"
+# Appended rows remain searchable through LanceDB's unindexed-tail scan until
+# optimize() folds them into FTS. These thresholds follow its recommended cadence.
 _SERVICE_OPTIMIZE_WRITE_THRESHOLD: Final[int] = 20
 _SERVICE_OPTIMIZE_ROW_THRESHOLD: Final[int] = 100_000
 
@@ -574,7 +576,7 @@ class LanceDB(VDB):
         self._service_index_mode = str(service_index_mode) if service_index_mode is not None else None
         self._service_write_lock = threading.Lock()
         self._writes_since_optimize = 0
-        self._rows_since_optimize = 0
+        # Process-local status is diagnostic; persisted index statistics are authoritative.
         self._last_optimization: dict[str, Any] = {
             "status": "never",
             "completed_at": None,
@@ -625,9 +627,10 @@ class LanceDB(VDB):
         return sum(values) if values else None
 
     def _optimize_service_table_if_due(self, table: Any) -> None:
-        if (
-            self._writes_since_optimize < _SERVICE_OPTIMIZE_WRITE_THRESHOLD
-            and self._rows_since_optimize < _SERVICE_OPTIMIZE_ROW_THRESHOLD
+        # Persisted FTS statistics keep the row threshold valid across restarts.
+        unindexed_rows = self._fts_unindexed_rows(table)
+        if self._writes_since_optimize < _SERVICE_OPTIMIZE_WRITE_THRESHOLD and (
+            unindexed_rows is None or unindexed_rows < _SERVICE_OPTIMIZE_ROW_THRESHOLD
         ):
             return
         try:
@@ -639,9 +642,9 @@ class LanceDB(VDB):
                 "error": str(exc),
             }
             logger.exception("LanceDB optimization failed for table %r", self.table_name)
+            # Preserve the trigger state so a later write retries transient failures.
             return
         self._writes_since_optimize = 0
-        self._rows_since_optimize = 0
         self._last_optimization = {
             "status": "ok",
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -1104,12 +1107,9 @@ class LanceDB(VDB):
         lock = self._service_write_lock if service_write else nullcontext()
         with lock:
             table_existed = False
-            rows_before = 0
             if service_write:
                 db = lancedb.connect(uri=self.uri)
                 table_existed = self.table_name in db.list_tables().tables
-                if table_existed:
-                    rows_before = int(db.open_table(self.table_name).count_rows())
 
             table = self.create_index(records=records, table_name=self.table_name)
             if self.build_index:
@@ -1127,11 +1127,9 @@ class LanceDB(VDB):
             elif service_write:
                 if self.hybrid:
                     self._ensure_fts_index(table)
-                if table_existed:
+                if self.hybrid and table_existed:
                     self._writes_since_optimize += 1
-                    self._rows_since_optimize += max(0, int(table.count_rows()) - rows_before)
-                    if self.hybrid:
-                        self._optimize_service_table_if_due(table)
+                    self._optimize_service_table_if_due(table)
             else:
                 logger.info(
                     "Skipping LanceDB index creation for table %r because build_index=False.",

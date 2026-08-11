@@ -194,7 +194,7 @@ retriever ingest /your-example-dir \
 ```
 
 You do not need to choose a retrieval index mode for the normal workflow. The
-default `index_mode=auto` creates NeMo Retriever's tested hybrid table (dense
+default `index_mode=auto` creates a hybrid table (dense
 vectors plus BM25/full-text search), and query mode `auto` uses that table
 automatically. The explicit `dense`, `hybrid`, and `sparse` modes are advanced
 overrides for experiments or specialized deployments.

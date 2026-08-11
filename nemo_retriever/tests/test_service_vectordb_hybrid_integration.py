@@ -132,11 +132,22 @@ def test_explicit_dense_rejects_existing_hybrid_table(tmp_path) -> None:
 
 
 @pytest.mark.integration
-def test_incremental_write_threshold_optimizes_and_updates_health(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("write_threshold", "row_threshold"),
+    [(1, 100_000), (20, 1)],
+    ids=("write-count", "unindexed-rows"),
+)
+def test_incremental_maintenance_thresholds_optimize_and_update_health(
+    tmp_path,
+    monkeypatch,
+    write_threshold: int,
+    row_threshold: int,
+) -> None:
     backend = _backend(tmp_path)
     _write(backend, _RECORD)
     table = lancedb.connect(backend.uri).open_table(backend.table_name)
-    monkeypatch.setattr(lancedb_module, "_SERVICE_OPTIMIZE_WRITE_THRESHOLD", 1)
+    monkeypatch.setattr(lancedb_module, "_SERVICE_OPTIMIZE_WRITE_THRESHOLD", write_threshold)
+    monkeypatch.setattr(lancedb_module, "_SERVICE_OPTIMIZE_ROW_THRESHOLD", row_threshold)
 
     with patch.object(type(table), "optimize", autospec=True) as optimize:
         _write(backend, _record(text="second row"))
