@@ -39,13 +39,14 @@ from nemo_retriever.common.input_files import (
     expand_input_file_patterns,
     resolve_input_files,
 )
-from nemo_retriever.models import resolve_embed_model
 from nemo_retriever.ingest.index_mode import (
     RequestedIngestIndexMode,
     inspect_existing_lancedb_mode,
     resolve_ingest_index_mode,
     validate_requested_index_mode,
 )
+from nemo_retriever.models import resolve_embed_model
+from nemo_retriever.models.embed_model_spec import resolve_embed_model_revision
 
 IngestRunModeValue = Literal["inprocess", "batch"]
 IngestInputTypeValue = Literal["auto", "pdf", "doc", "txt", "html", "image", "audio", "video"]
@@ -646,6 +647,9 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
         extract_kwargs["batch_tuning"] = extract_tuning
 
     embedding_model_name = None if resolved_index_mode == "sparse" else resolve_embed_model(embed.embed_model_name)
+    embedding_model_revision = None
+    if embedding_model_name is not None and not str(embed.embed_invoke_url or "").strip():
+        embedding_model_revision = resolve_embed_model_revision(embedding_model_name, None)
     embed_runtime_model_name = (
         embedding_model_name
         if embed.embed_model_name is not None or embed.embed_model_provider_prefix is not None
@@ -654,6 +658,7 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
     embed_kwargs = build_embed_option_kwargs(
         embed.embed_invoke_url,
         embed_runtime_model_name,
+        embed_model_revision=embedding_model_revision if embed_runtime_model_name is not None else None,
         local_ingest_embed_backend=embed.local_ingest_embed_backend,
         embed_api_key=embed.embed_api_key,
         embed_model_provider_prefix=embed.embed_model_provider_prefix,
@@ -680,6 +685,10 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
         vdb_upload_kwargs["hybrid"] = True
     if embedding_model_name is not None:
         vdb_upload_kwargs["embedding_model_name"] = embedding_model_name
+        if embed.embed_model_name is not None:
+            vdb_upload_kwargs["vector_dim"] = None
+    if embedding_model_revision is not None:
+        vdb_upload_kwargs["embedding_model_revision"] = embedding_model_revision
     vdb_params = VdbUploadParams(vdb_kwargs=vdb_upload_kwargs)
     caption_params = build_caption_params(
         enabled=request.caption.enabled,
