@@ -31,7 +31,7 @@ from nemo_retriever.operators.extract.ocr.ocr import resolve_ocr_archetype
 from nemo_retriever.operators.extract.parse.nemotron_parse import NemotronParseActor
 from nemo_retriever.operators.extract.page_elements.page_elements import PageElementDetectionActor
 from nemo_retriever.operators.extract.table.table_detection import TableStructureActor
-from nemo_retriever.operators.extract.pdf.extract import PDFExtractionActor
+from nemo_retriever.operators.extract.pdf.extract import PDFExtractionActor, build_pdf_extraction_kwargs
 from nemo_retriever.operators.extract.pdf.split import PDFSplitActor
 from nemo_retriever.common.params import TextChunkParams, VdbUploadParams, resolve_split_params
 from nemo_retriever.operators.vdb import IngestVdbOperator
@@ -776,17 +776,7 @@ def build_graph(
             and (_positive(getattr(tuning, "nemotron_parse_batch_size", None)) is not None)
         )
 
-        extract_kwargs: dict[str, Any] = {
-            "method": extract_params.method,
-            "dpi": int(extract_params.dpi),
-            "extract_text": extract_params.extract_text,
-            "extract_images": extract_params.extract_images,
-            "extract_tables": extract_params.extract_tables,
-            "extract_charts": extract_params.extract_charts,
-            "extract_infographics": extract_params.extract_infographics,
-            "extract_page_as_image": extract_params.extract_page_as_image,
-            "api_key": extract_params.api_key,
-        }
+        extract_kwargs = build_pdf_extraction_kwargs(extract_params)
 
         if parse_mode:
             # PDF extraction renders pages to images required by Nemotron Parse.
