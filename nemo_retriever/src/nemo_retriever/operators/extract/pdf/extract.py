@@ -53,7 +53,14 @@ RenderMode = Literal["full_dpi", "fit_to_model"]
 
 
 def build_pdf_extraction_kwargs(params: ExtractParams) -> dict[str, Any]:
-    """Build ``PDFExtractionActor`` kwargs from ``ExtractParams``."""
+    """Build keyword arguments for ``PDFExtractionActor``.
+
+    Args:
+        params: PDF extraction configuration to convert.
+
+    Returns:
+        Keyword arguments accepted by ``PDFExtractionActor``.
+    """
     return {
         "method": params.method,
         "dpi": int(params.dpi),
