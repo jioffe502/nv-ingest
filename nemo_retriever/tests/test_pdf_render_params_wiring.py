@@ -9,6 +9,7 @@ from __future__ import annotations
 import pandas as pd
 
 from nemo_retriever.common.params import ExtractParams
+from nemo_retriever.graph.graph_pipeline_registry import get_node_kwargs
 from nemo_retriever.graph.ingestor_runtime import build_graph
 from nemo_retriever.operators.graph_ops import multi_type_extract_operator as multi_type_module
 from nemo_retriever.operators.graph_ops.multi_type_extract_operator import MultiTypeExtractCPUActor
@@ -24,20 +25,10 @@ def _render_params() -> ExtractParams:
     )
 
 
-def _node_by_name(graph, name: str):
-    node = graph.roots[0]
-    while True:
-        if node.name == name:
-            return node
-        if not node.children:
-            raise AssertionError(f"Graph does not contain {name!r}")
-        node = node.children[0]
-
-
 def test_pdf_graph_forwards_rendering_params() -> None:
     graph = build_graph(extraction_mode="pdf", extract_params=_render_params())
 
-    extract_kwargs = _node_by_name(graph, "PDFExtractionActor").operator_kwargs
+    extract_kwargs = get_node_kwargs(graph, "PDFExtractionActor")
 
     assert extract_kwargs["render_mode"] == "full_dpi"
     assert extract_kwargs["image_format"] == "png"
@@ -45,8 +36,8 @@ def test_pdf_graph_forwards_rendering_params() -> None:
 
 
 class _IdentityStage:
-    def __init__(self, **kwargs) -> None:
-        self.kwargs = kwargs
+    def __init__(self, **_kwargs) -> None:
+        pass
 
     def run(self, data):
         return data
@@ -58,7 +49,6 @@ def test_multitype_pdf_graph_forwards_rendering_params(monkeypatch) -> None:
     class _CapturingPDFExtractionActor(_IdentityStage):
         def __init__(self, **kwargs) -> None:
             captured.update(kwargs)
-            super().__init__(**kwargs)
 
     monkeypatch.setattr(multi_type_module, "DocToPdfConversionActor", _IdentityStage)
     monkeypatch.setattr(multi_type_module, "PDFSplitActor", _IdentityStage)

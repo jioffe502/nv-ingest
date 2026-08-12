@@ -38,9 +38,8 @@ from nemo_retriever.common.params import TextChunkParams
 from nemo_retriever.common.params import VideoFrameParams
 from nemo_retriever.common.params import VideoFrameTextDedupParams
 from nemo_retriever.common.params import resolve_split_params
-from nemo_retriever.common.params.utils import build_pdf_extraction_kwargs
 from nemo_retriever.operators.extract.parse.nemotron_parse import NemotronParseActor
-from nemo_retriever.operators.extract.pdf.extract import PDFExtractionActor
+from nemo_retriever.operators.extract.pdf.extract import PDFExtractionActor, build_pdf_extraction_kwargs
 from nemo_retriever.operators.extract.pdf.split import PDFSplitActor
 from nemo_retriever.operators.extract.table.table_detection import TableStructureActor
 from nemo_retriever.operators.extract.txt.ray_data import TextChunkCPUActor, TxtSplitActor

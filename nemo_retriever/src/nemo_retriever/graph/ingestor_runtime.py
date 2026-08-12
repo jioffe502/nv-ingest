@@ -31,10 +31,9 @@ from nemo_retriever.operators.extract.ocr.ocr import resolve_ocr_archetype
 from nemo_retriever.operators.extract.parse.nemotron_parse import NemotronParseActor
 from nemo_retriever.operators.extract.page_elements.page_elements import PageElementDetectionActor
 from nemo_retriever.operators.extract.table.table_detection import TableStructureActor
-from nemo_retriever.operators.extract.pdf.extract import PDFExtractionActor
+from nemo_retriever.operators.extract.pdf.extract import PDFExtractionActor, build_pdf_extraction_kwargs
 from nemo_retriever.operators.extract.pdf.split import PDFSplitActor
 from nemo_retriever.common.params import TextChunkParams, VdbUploadParams, resolve_split_params
-from nemo_retriever.common.params.utils import build_pdf_extraction_kwargs
 from nemo_retriever.operators.vdb import IngestVdbOperator
 from nemo_retriever.operators.extract.txt.ray_data import TextChunkActor
 from nemo_retriever.common.modality.convert.to_pdf import DocToPdfConversionActor

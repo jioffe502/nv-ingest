@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
-    from nemo_retriever.common.params.models import BatchTuningParams, ExtractParams
+    from nemo_retriever.common.params.models import BatchTuningParams
 
 
 def coerce_params[T](params: T | None, model_cls: type[T], kwargs: dict[str, Any]) -> T:
@@ -24,24 +24,6 @@ def coerce_params[T](params: T | None, model_cls: type[T], kwargs: dict[str, Any
     if kwargs:
         return params.model_copy(update=kwargs)  # type: ignore[return-value]
     return params
-
-
-def build_pdf_extraction_kwargs(params: ExtractParams) -> dict[str, Any]:
-    """Build the actor kwargs shared by every graph-backed PDF path."""
-    return {
-        "method": params.method,
-        "dpi": int(params.dpi),
-        "image_format": params.image_format,
-        "jpeg_quality": int(params.jpeg_quality),
-        "render_mode": params.render_mode,
-        "extract_text": params.extract_text,
-        "extract_images": params.extract_images,
-        "extract_tables": params.extract_tables,
-        "extract_charts": params.extract_charts,
-        "extract_infographics": params.extract_infographics,
-        "extract_page_as_image": params.extract_page_as_image,
-        "api_key": params.api_key,
-    }
 
 
 def normalize_embed_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
