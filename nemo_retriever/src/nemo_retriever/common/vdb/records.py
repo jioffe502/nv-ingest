@@ -329,6 +329,13 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
     return {"document_type": str(document_type), "metadata": record_metadata}
 
 
+def _row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
+    metadata = _dict_or_empty(row.get("metadata"))
+    if _embedding_from_graph_row(row, metadata) is not None:
+        return False
+    return bool(_text_from_graph_row(row, metadata)) or _is_image_backed_row(row)
+
+
 def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
     """Convert graph-ingest rows into the nested record shape expected by client VDBs.
 
@@ -337,6 +344,8 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
     ``if not records`` skips :meth:`~nemo_retriever.vdb.adt_vdb.VDB.run`.
     When at least one row converts, returns ``[batch]`` with a single non-empty inner list
     (never ``[[]]``, which would be truthy and could trip backends on an empty insert).
+    Uploadable graph content without an embedding raises ``ValueError`` when no
+    row survives conversion. Genuinely empty input continues to return ``[]``.
     """
     if isinstance(rows, list) and all(isinstance(batch, list) for batch in rows):
         return rows
@@ -344,14 +353,16 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
         rows = rows.to_pandas()
     if hasattr(rows, "to_dict"):
         rows = rows.to_dict("records")
+    graph_rows = [row for row in rows or [] if isinstance(row, dict)]
     # Walrus: bind conversion once per row — a plain ``if f(row)`` + ``f(row)`` list comp
     # would call _client_record_from_graph_row twice per row on large datasets.
     # isinstance(row, dict): plain lists are not normalized like DataFrame rows; skip None/Series/etc.
-    inner = [
-        record
-        for row in rows or []
-        if isinstance(row, dict) and (record := _client_record_from_graph_row(row)) is not None
-    ]
+    inner = [record for row in graph_rows if (record := _client_record_from_graph_row(row)) is not None]
+    if not inner and any(_row_has_uploadable_content_without_embedding(row) for row in graph_rows):
+        raise ValueError(
+            "vdb_upload requires embedded records, but no embeddings were found. "
+            "Add an embed stage or provide a supported embedding column."
+        )
     # Preserve legacy contract: no uploadable rows → [], not [[]].
     return [inner] if inner else []
 
