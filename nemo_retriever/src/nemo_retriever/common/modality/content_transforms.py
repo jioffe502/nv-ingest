@@ -193,27 +193,22 @@ def collapse_content_to_page_rows(
     modality: str = "text",
 ) -> Any:
     """Collapse each page into a single row for page-level embedding."""
-    if not isinstance(batch_df, pd.DataFrame) or batch_df.empty:
+    if not isinstance(batch_df, pd.DataFrame):
         return batch_df
+    if batch_df.empty:
+        return _normalize_bbox_column(batch_df)
 
-    batch_df = batch_df.copy()
-    batch_df[text_column] = batch_df.apply(
-        lambda row: _combine_text_with_content(row, text_column, content_columns),
-        axis=1,
-    )
+    has_page_image = "page_image" in batch_df.columns
+    new_rows: List[Dict[str, Any]] = []
+    for _, row in batch_df.iterrows():
+        row_dict = _deep_copy_row(row.to_dict())
+        row_dict[text_column] = _combine_text_with_content(row_dict, text_column, content_columns)
+        page_image = row_dict.get("page_image") if has_page_image else None
+        if modality in IMAGE_MODALITIES:
+            row_dict["_image_b64"] = inline_image_b64(page_image) if isinstance(page_image, dict) else None
+        if has_page_image:
+            row_dict["_stored_image_uri"] = page_image.get("stored_image_uri") if isinstance(page_image, dict) else None
+        row_dict["_embed_modality"] = modality
+        new_rows.append(row_dict)
 
-    if modality in IMAGE_MODALITIES:
-        if "page_image" in batch_df.columns:
-            batch_df["_image_b64"] = batch_df["page_image"].apply(
-                lambda page_image: inline_image_b64(page_image) if isinstance(page_image, dict) else None
-            )
-        else:
-            batch_df["_image_b64"] = None
-
-    if "page_image" in batch_df.columns:
-        batch_df["_stored_image_uri"] = batch_df["page_image"].apply(
-            lambda page_image: page_image.get("stored_image_uri") if isinstance(page_image, dict) else None
-        )
-
-    batch_df["_embed_modality"] = modality
-    return batch_df
+    return _normalize_bbox_column(pd.DataFrame(new_rows).reset_index(drop=True))

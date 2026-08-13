@@ -22,6 +22,7 @@ from nemo_retriever.graph.executor import (
 from nemo_retriever.graph.pipeline_graph import Graph
 from nemo_retriever.common.modality.content_transforms import collapse_content_to_page_rows, explode_content_to_rows
 from nemo_retriever.operators.abstract_operator import AbstractOperator
+from nemo_retriever.operators.extract.txt.ray_data import TextChunkCPUActor
 from nemo_retriever.operators.graph_ops.custom_operator import UDFOperator
 
 
@@ -125,6 +126,10 @@ def test_only_opted_in_udfs_preserve_pandas_output() -> None:
     assert not _preserves_pandas_output(_PassthroughOperator, {"preserve_pandas_output": True})
 
 
+def test_text_chunk_operator_preserves_heterogeneous_pandas_output() -> None:
+    assert _preserves_pandas_output(TextChunkCPUActor, {})
+
+
 def test_only_opted_in_udf_graphs_require_stable_pandas_blocks() -> None:
     stable_graph = Graph() >> UDFOperator(lambda frame: frame, preserve_pandas_output=True)
     default_graph = Graph() >> UDFOperator(lambda frame: frame)
@@ -211,3 +216,56 @@ def test_explode_leaves_non_dataframe_input_unchanged() -> None:
     batch = [{"text": "page text"}]
 
     assert explode_content_to_rows(batch) is batch
+
+
+def test_explode_text_image_does_not_boolean_evaluate_numpy_bbox() -> None:
+    result = explode_content_to_rows(
+        pd.DataFrame(
+            {
+                "text": ["page text"],
+                "page_image": [{"image_b64": "page_b64"}],
+                "table": [[{"text": "cell text", "bbox_xyxy_norm": np.array([0.1, 0.2, 0.8, 0.9])}]],
+            }
+        ),
+        modality="text_image",
+    )
+
+    table_bbox = result.loc[result["_content_type"] == "table", "_bbox_xyxy_norm"].iloc[0]
+    assert table_bbox == [0.1, 0.2, 0.8, 0.9]
+    assert not isinstance(table_bbox, np.ndarray)
+
+
+def test_collapse_returns_iterrows_safe_page_rows() -> None:
+    table = BlockAccessor.batch_to_block(
+        pd.DataFrame(
+            {
+                "text": ["page text"],
+                "table": [np.array([], dtype=object)],
+                "chart": [np.array([], dtype=object)],
+                "images": [np.array([], dtype=object)],
+            }
+        )
+    )
+
+    result = _ArrowPandasOperatorAdapter(
+        UDFOperator,
+        {
+            "fn": partial(collapse_content_to_page_rows, modality="text"),
+            "name": "CollapseContentToPageRows",
+            "preserve_pandas_output": True,
+        },
+        preserve_pandas_output=True,
+    )(table)
+
+    rows = list(result.iterrows())
+    assert len(rows) == 1
+    assert rows[0][1]["text"] == "page text"
+    assert result["_embed_modality"].tolist() == ["text"]
+
+
+def test_pipeline_content_reexports_canonical_transforms() -> None:
+    from nemo_retriever.common.modality import content_transforms
+    from nemo_retriever.common.modality.pipeline import content as pipeline_content
+
+    assert pipeline_content.explode_content_to_rows is content_transforms.explode_content_to_rows
+    assert pipeline_content.collapse_content_to_page_rows is content_transforms.collapse_content_to_page_rows
