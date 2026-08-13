@@ -35,7 +35,7 @@ It does not store the embeddings for images.
 NeMo Retriever Library supports uploading data through `.vdb_upload()` on `create_ingestor(...)` ([Python API guide](nemo-retriever-api-reference.md)).
 Currently, data upload is not supported through the [CLI](https://github.com/NVIDIA/NeMo-Retriever/tree/main/nemo_retriever/docs/cli).
 
-
+Add `.embed()` before `.vdb_upload()`. You can instead use a custom stage that provides vectors in `metadata["embedding"]` or the default `text_embeddings_1b_v2` payload. If the pipeline produces uploadable rows but none contains an embedding, `vdb_upload` raises `ValueError` instead of silently skipping the upload. A pipeline that produces no rows remains a successful no-op.
 
 ## LanceDB Overview { #why-lancedb }
 

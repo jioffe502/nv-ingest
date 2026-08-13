@@ -136,7 +136,7 @@ class IngestVdbOperator(AbstractOperator):
     def process(self, data: Any, **kwargs: Any) -> Any:
         # Graph ingest emits flat embedded rows, while
         # nv-ingest-client VDB.run still expects nested Nemo Retriever Library (NRL) records.
-        records = to_client_vdb_records(data)
+        records = to_client_vdb_records(data, raise_on_missing_embeddings=True)
         if self._sidecar_spec is not None and self._sidecar_lookup is not None:
             records = apply_sidecar_metadata_to_client_batches(
                 records,
