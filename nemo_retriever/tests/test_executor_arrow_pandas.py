@@ -12,8 +12,14 @@ import pandas as pd
 import pyarrow as pa
 from ray.data.block import BlockAccessor
 from ray.data import DataContext
+from ray.data.extensions import TensorArray
 
-from nemo_retriever.graph.executor import _ArrowPandasOperatorAdapter
+from nemo_retriever.graph.executor import (
+    _ArrowPandasOperatorAdapter,
+    _preserves_pandas_output,
+    _requires_stable_pandas_blocks,
+)
+from nemo_retriever.graph.pipeline_graph import Graph
 from nemo_retriever.common.modality.content_transforms import collapse_content_to_page_rows, explode_content_to_rows
 from nemo_retriever.operators.abstract_operator import AbstractOperator
 from nemo_retriever.operators.graph_ops.custom_operator import UDFOperator
@@ -90,6 +96,43 @@ def test_adapter_preserves_numeric_numpy_arrays() -> None:
     np.testing.assert_array_equal(result.iloc[0]["embedding"], np.array([0.1, 0.2]))
 
 
+def test_adapter_can_preserve_heterogeneous_udf_output_as_pandas() -> None:
+    context = DataContext.get_current()
+    original_arrow_format = context.batch_to_block_arrow_format
+    original_tensor_casting = context.enable_tensor_extension_casting
+    context.batch_to_block_arrow_format = True
+    context.enable_tensor_extension_casting = True
+    try:
+        result = _ArrowPandasOperatorAdapter(
+            _PassthroughOperator,
+            {},
+            preserve_pandas_output=True,
+        )(pa.table({"value": [1, 2]}))
+
+        assert isinstance(BlockAccessor.batch_to_block(result), pd.DataFrame)
+        assert not context.enable_tensor_extension_casting
+    finally:
+        context.batch_to_block_arrow_format = original_arrow_format
+        context.enable_tensor_extension_casting = original_tensor_casting
+
+
+def test_only_opted_in_udfs_preserve_pandas_output() -> None:
+    opted_in = UDFOperator(lambda frame: frame, preserve_pandas_output=True)
+    default = UDFOperator(lambda frame: frame)
+
+    assert _preserves_pandas_output(type(opted_in), opted_in.get_constructor_kwargs())
+    assert not _preserves_pandas_output(type(default), default.get_constructor_kwargs())
+    assert not _preserves_pandas_output(_PassthroughOperator, {"preserve_pandas_output": True})
+
+
+def test_only_opted_in_udf_graphs_require_stable_pandas_blocks() -> None:
+    stable_graph = Graph() >> UDFOperator(lambda frame: frame, preserve_pandas_output=True)
+    default_graph = Graph() >> UDFOperator(lambda frame: frame)
+
+    assert _requires_stable_pandas_blocks([stable_graph.roots[0]])
+    assert not _requires_stable_pandas_blocks([default_graph.roots[0]])
+
+
 def test_adapter_preserves_multimodal_content_semantics() -> None:
     table = BlockAccessor.batch_to_block(
         pd.DataFrame(
@@ -121,3 +164,50 @@ def test_adapter_preserves_multimodal_content_semantics() -> None:
     assert element_result["_content_type"].tolist() == ["text", "table", "chart"]
     pa.Table.from_pandas(page_result, preserve_index=False).validate(full=True)
     pa.Table.from_pandas(element_result, preserve_index=False).validate(full=True)
+
+
+def test_explode_normalizes_numpy_bbox_for_pandas_blocks() -> None:
+    result = explode_content_to_rows(
+        pd.DataFrame(
+            {
+                "text": ["page text"],
+                "table": [[{"text": "cell text", "bbox_xyxy_norm": np.array([0.1, 0.2, 0.8, 0.9])}]],
+            }
+        ),
+        modality="text",
+    )
+
+    assert result.loc[result["_content_type"] == "table", "_bbox_xyxy_norm"].iloc[0] == [
+        0.1,
+        0.2,
+        0.8,
+        0.9,
+    ]
+    assert isinstance(result.iloc[0]["table"], list)
+
+
+def test_explode_normalizes_ray_tensor_bbox_for_pandas_blocks() -> None:
+    bbox = TensorArray([np.array([0.1, 0.2, 0.8, 0.9])])[0]
+    result = explode_content_to_rows(
+        pd.DataFrame({"text": ["page text"], "table": [[{"text": "cell text", "bbox_xyxy_norm": bbox}]]}),
+        modality="text",
+    )
+
+    value = result.loc[result["_content_type"] == "table", "_bbox_xyxy_norm"].iloc[0]
+    assert value == [0.1, 0.2, 0.8, 0.9]
+    assert not isinstance(value, np.ndarray)
+
+
+def test_explode_normalizes_bbox_when_content_columns_are_absent() -> None:
+    bbox = TensorArray([np.array([0.1, 0.2, 0.8, 0.9])])[0]
+    result = explode_content_to_rows(pd.DataFrame({"text": ["page text"], "_bbox_xyxy_norm": [bbox]}))
+
+    assert result["_bbox_xyxy_norm"].dtype == object
+    assert result.iloc[0]["_bbox_xyxy_norm"] == [0.1, 0.2, 0.8, 0.9]
+    assert not hasattr(result.iloc[0]["_bbox_xyxy_norm"], "to_numpy")
+
+
+def test_explode_leaves_non_dataframe_input_unchanged() -> None:
+    batch = [{"text": "page text"}]
+
+    assert explode_content_to_rows(batch) is batch

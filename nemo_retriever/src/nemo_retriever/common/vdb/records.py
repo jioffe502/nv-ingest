@@ -138,6 +138,9 @@ def _embedding_from_graph_row(row: dict[str, Any], metadata: dict[str, Any]) -> 
         embedding = payload.get("embedding") if isinstance(payload, dict) else None
 
     if not isinstance(embedding, list):
+        to_numpy = getattr(embedding, "to_numpy", None)
+        if callable(to_numpy):
+            embedding = to_numpy()
         tolist = getattr(embedding, "tolist", None)
         if callable(tolist):
             embedding = tolist()

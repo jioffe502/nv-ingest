@@ -118,17 +118,46 @@ def call_pandas_function_on_arrow(
 class _ArrowPandasOperatorAdapter:
     """Convert valid Arrow batches to pandas before invoking an NRL operator."""
 
-    def __init__(self, operator_class: type, operator_kwargs: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        operator_class: type,
+        operator_kwargs: dict[str, Any],
+        preserve_pandas_output: bool = False,
+    ) -> None:
         self._operator = operator_class(**operator_kwargs)
+        self._preserve_pandas_output = preserve_pandas_output
 
     def __call__(self, table: Any) -> Any:
-        return self._operator(arrow_table_to_pandas(table))
+        result = self._operator(arrow_table_to_pandas(table))
+        if self._preserve_pandas_output and isinstance(result, pd.DataFrame):
+            # UDF stages reshape rows with heterogeneous nested metadata. Ray's
+            # automatic pandas-to-Arrow and ndarray-to-tensor conversions can
+            # infer incompatible schemas across blocks, so retain plain pandas
+            # object columns at this boundary.
+            from ray.data import DataContext
+
+            context = DataContext.get_current()
+            context.batch_to_block_arrow_format = False
+            context.enable_tensor_extension_casting = False
+        return result
 
 
 def _make_arrow_pandas_operator_adapter(operator_class: type) -> type[_ArrowPandasOperatorAdapter]:
     """Keep the wrapped operator recognizable in Ray plans and worker logs."""
     adapter_name = f"{operator_class.__name__}ArrowPandasAdapter"
     return type(adapter_name, (_ArrowPandasOperatorAdapter,), {})
+
+
+def _preserves_pandas_output(operator_class: type, operator_kwargs: dict[str, Any]) -> bool:
+    """Return whether an operator's heterogeneous rows should stay in pandas."""
+    from nemo_retriever.operators.graph_ops.custom_operator import UDFOperator
+
+    return issubclass(operator_class, UDFOperator) and bool(operator_kwargs.get("preserve_pandas_output", False))
+
+
+def _requires_stable_pandas_blocks(nodes: list[Node]) -> bool:
+    """Return whether repartitions must not promote object columns to tensors."""
+    return any(_preserves_pandas_output(node.operator_class, node.operator_kwargs) for node in nodes)
 
 
 def _concurrency_target(concurrency: Any) -> int:
@@ -514,17 +543,35 @@ class RayDataExecutor(AbstractExecutor):
         cluster = self._preflight_cluster_resources or gather_cluster_resources(ray)
         available_gpus = cluster.available_gpu_count()
         resolved_graph = resolve_graph(self.graph, cluster)
+        nodes = self._linearize(resolved_graph)
+        requires_stable_pandas_blocks = _requires_stable_pandas_blocks(nodes)
 
         if isinstance(data, rd.Dataset):
-            ds = data
+            ds = rd.Dataset.copy(data, _deep_copy=True) if requires_stable_pandas_blocks else data
+            if requires_stable_pandas_blocks:
+                # Ray copies this context into repartition workers. Disabling
+                # tensor promotion only on the UDF actor is too late because a
+                # preceding repartition can already have converted list-valued
+                # object columns into TensorArray columns.
+                ds.context.enable_tensor_extension_casting = False
         else:
             try:
-                ds = rd.read_binary_files(input_paths, include_paths=True)
+                if requires_stable_pandas_blocks:
+                    # read_binary_files snapshots the current context onto the
+                    # new Dataset; restore the process default immediately so
+                    # unrelated pipelines retain Ray's standard behavior.
+                    original_tensor_extension_casting = ctx.enable_tensor_extension_casting
+                    ctx.enable_tensor_extension_casting = False
+                try:
+                    ds = rd.read_binary_files(input_paths, include_paths=True)
+                finally:
+                    if requires_stable_pandas_blocks:
+                        ctx.enable_tensor_extension_casting = original_tensor_extension_casting
             except FileNotFoundError as exc:
                 raise_input_path_not_found(input_paths or [], exc)
-        nodes = self._linearize(resolved_graph)
         if nodes and not self._resources_preflight_complete:
             self._preflight_resources(nodes, cluster.available_cpu_count(), available_gpus)
+        preserve_pandas_output = False
         for node in nodes:
             overrides = dict(self._node_overrides.get(node.name, {}))
             target_num_rows_per_block = overrides.pop("target_num_rows_per_block", None)
@@ -580,10 +627,23 @@ class RayDataExecutor(AbstractExecutor):
                 # offsets for sliced structs with inferred null children.
                 # Compact the valid Arrow batch before that conversion.
                 map_operator_class = _make_arrow_pandas_operator_adapter(node.operator_class)
-                map_batch_format = "pyarrow"
+                stable_pandas_input = preserve_pandas_output
+                # Once an operator reshapes the dataset into heterogeneous
+                # object rows, keep those rows in pandas through every
+                # downstream map stage. Re-enabling Arrow at embedding would
+                # otherwise split optional bbox values into object and tensor
+                # schemas that Ray cannot concatenate.
+                preserve_pandas_output = preserve_pandas_output or _preserves_pandas_output(
+                    node.operator_class, node.operator_kwargs
+                )
+                # The reshaping UDF still needs the compacting Arrow adapter on
+                # its input. Its downstream consumers must not ask Ray to turn
+                # the intentionally preserved pandas block back into Arrow.
+                map_batch_format = "pandas" if stable_pandas_input else "pyarrow"
                 constructor_kwargs = {
                     "operator_class": node.operator_class,
                     "operator_kwargs": node.operator_kwargs,
+                    "preserve_pandas_output": preserve_pandas_output,
                 }
 
             ds = ds.map_batches(

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import numpy as np
+from ray.data.extensions import TensorArray
 import pytest
 from pydantic import ValidationError
 
@@ -201,6 +202,13 @@ def test_graph_record_conversion_normalizes_arrow_backed_embedding_array() -> No
             }
         ]
     )
+
+    assert records[0][0]["metadata"]["embedding"] == [0.1, 0.2]
+
+
+def test_graph_record_conversion_normalizes_ray_tensor_embedding() -> None:
+    embedding = TensorArray([np.array([0.1, 0.2])])[0]
+    records = to_client_vdb_records([{"text": "embedded content", "metadata": {"embedding": embedding}}])
 
     assert records[0][0]["metadata"]["embedding"] == [0.1, 0.2]
 
