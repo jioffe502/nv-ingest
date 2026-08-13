@@ -336,11 +336,7 @@ def _row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
     return bool(_text_from_graph_row(row, metadata)) or _is_image_backed_row(row)
 
 
-def to_client_vdb_records(
-    rows: Any,
-    *,
-    raise_on_missing_embeddings: bool = False,
-) -> list[list[dict[str, Any]]]:
+def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
     """Convert graph-ingest rows into the nested record shape expected by client VDBs.
 
     Dense rows require an embedding and either nonblank text or concrete image backing.
@@ -348,8 +344,8 @@ def to_client_vdb_records(
     ``if not records`` skips :meth:`~nemo_retriever.vdb.adt_vdb.VDB.run`.
     When at least one row converts, returns ``[batch]`` with a single non-empty inner list
     (never ``[[]]``, which would be truthy and could trip backends on an empty insert).
-    When ``raise_on_missing_embeddings`` is true, uploadable graph content with
-    no supported embedding payload raises ``ValueError`` instead of returning ``[]``.
+    Uploadable graph content without an embedding raises ``ValueError`` when no
+    row survives conversion. Genuinely empty input continues to return ``[]``.
     """
     if isinstance(rows, list) and all(isinstance(batch, list) for batch in rows):
         return rows
@@ -362,12 +358,7 @@ def to_client_vdb_records(
     # would call _client_record_from_graph_row twice per row on large datasets.
     # isinstance(row, dict): plain lists are not normalized like DataFrame rows; skip None/Series/etc.
     inner = [record for row in graph_rows if (record := _client_record_from_graph_row(row)) is not None]
-    if (
-        raise_on_missing_embeddings
-        and graph_rows
-        and not inner
-        and any(_row_has_uploadable_content_without_embedding(row) for row in graph_rows)
-    ):
+    if not inner and any(_row_has_uploadable_content_without_embedding(row) for row in graph_rows):
         raise ValueError(
             "vdb_upload requires embedded records, but no embeddings were found. "
             "Add an embed stage or provide a supported embedding column."
