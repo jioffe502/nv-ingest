@@ -166,7 +166,6 @@ def test_service_empty_inline_list_preserves_explicit_extraction_mode(
     assert ingestor._pipeline_payload()["extraction_mode"] == expected_mode
 
 
-@pytest.mark.parametrize("values", [[], ["", "  \n"]])
 @pytest.mark.parametrize(
     ("result_schema", "expected_columns"),
     [
@@ -174,13 +173,12 @@ def test_service_empty_inline_list_preserves_explicit_extraction_mode(
         ("compact", ["text", "source_id", "element_type", "page_number"]),
     ],
 )
-def test_service_inline_empty_corpus_short_circuits_with_schema(
-    values: list[str],
+def test_service_blank_inline_corpus_short_circuits_with_schema(
     result_schema: str,
     expected_columns: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ingestor = ServiceIngestor(base_url="http://retriever.example").texts(values).embed()
+    ingestor = ServiceIngestor(base_url="http://retriever.example").texts(["", "  \n"]).embed()
     monkeypatch.setattr(
         ingestor,
         "ingest_stream",
