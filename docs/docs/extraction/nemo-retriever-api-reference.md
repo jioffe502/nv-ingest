@@ -25,17 +25,18 @@ operator output columns, not to document extraction.
 
 ### Configure at least one input source
 
-Before you call `.ingest()`, configure at least one input source by calling
-`.files()`, `.texts()`, or `.buffers()` with a nonempty value. Omitting input
-configuration or passing an empty collection raises `ValueError` before
-pipeline execution.
+Before you call `.ingest()`, `.ingest_stream()`, or `.aingest_stream()`,
+configure at least one input source by calling `.files()`, `.texts()`, or
+`.buffers()` with a nonempty value. Omitting input configuration or passing an
+empty collection raises `ValueError` before pipeline execution.
 
 A configured source can legitimately produce blank text or an empty result.
 For example, OCR can find no text on an image-only page. This outcome does not
 raise the missing-input error.
 
 A nonempty optional glob passed to `.files()` also counts as a configured
-source. If it matches no files, `.ingest()` can return an empty result.
+source. If it matches no files, `.ingest()` can return an empty result, and the
+streaming methods can yield no results.
 
 ### Select a supported extraction method
 
