@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -330,8 +331,14 @@ def create_app(config: ServiceConfig) -> FastAPI:
                 name="dashboard-static",
             )
 
-    @app.get("/v1/health", tags=["system"], summary="Liveness / readiness probe")
-    async def health() -> dict:
+    @app.get("/v1/live", tags=["system"], summary="Shallow liveness probe")
+    async def live() -> dict:
+        """Report whether this service process can answer HTTP requests."""
+        return {"status": "ok", "mode": config.mode}
+
+    @app.get("/v1/health", tags=["system"], summary="Deep readiness probe")
+    async def health() -> JSONResponse:
+        """Report whether this service role is ready to serve its workload."""
         base: dict = {"status": "ok", "mode": config.mode}
         if (
             config.mode in ("standalone", "realtime", "batch")
@@ -351,14 +358,26 @@ def create_app(config: ServiceConfig) -> FastAPI:
             from nemo_retriever.service.services.proxy import get_proxy
 
             proxy = get_proxy()
-            if proxy is not None:
+            if proxy is None:
+                base["status"] = "unavailable"
+                base["backends"] = {"status": "unavailable", "error": "Gateway proxy not initialised"}
+            else:
                 from nemo_retriever.service.services.pipeline_pool import PoolType
 
+                realtime, batch = await asyncio.gather(
+                    proxy.check_backend(PoolType.REALTIME),
+                    proxy.check_backend(PoolType.BATCH),
+                )
                 base["backends"] = {
-                    "realtime": await proxy.check_backend(PoolType.REALTIME),
-                    "batch": await proxy.check_backend(PoolType.BATCH),
+                    "realtime": realtime,
+                    "batch": batch,
                 }
-        return base
+                if any(backend["status"] != "ok" for backend in base["backends"].values()):
+                    base["status"] = "unavailable"
+
+        status_code = 200 if base["status"] == "ok" else 503
+
+        return JSONResponse(status_code=status_code, content=base)
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
