@@ -101,6 +101,17 @@ inherits the NIMService resource name, so the mapping is fixed:
 {{- if or (not (regexMatch "^[1-9][0-9]*$" $maxUploadBytes)) (and (kindIs "float64" $rawMaxUploadBytes) (ne $rawMaxUploadBytes (float64 $maxUploadBytes))) -}}
 {{- fail "serviceConfig.resources.maxUploadBytes must be a positive integer" -}}
 {{- end -}}
+{{- $rawSidecarMaxPayloadBytes := .Values.serviceConfig.sidecarStore.maxPayloadBytes -}}
+{{- $sidecarMaxPayloadBytes := toString $rawSidecarMaxPayloadBytes -}}
+{{- if kindIs "float64" $rawSidecarMaxPayloadBytes -}}
+{{- $sidecarMaxPayloadBytes = printf "%.0f" $rawSidecarMaxPayloadBytes -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $sidecarMaxPayloadBytes)) (and (kindIs "float64" $rawSidecarMaxPayloadBytes) (ne $rawSidecarMaxPayloadBytes (float64 $sidecarMaxPayloadBytes))) -}}
+{{- fail "serviceConfig.sidecarStore.maxPayloadBytes must be a positive integer" -}}
+{{- end -}}
+{{- if gt (int $sidecarMaxPayloadBytes) (int $maxUploadBytes) -}}
+{{- fail "serviceConfig.sidecarStore.maxPayloadBytes must not exceed serviceConfig.resources.maxUploadBytes" -}}
+{{- end -}}
 server:
   host: {{ .Values.serviceConfig.server.host | quote }}
   port: {{ .Values.serviceConfig.server.port }}
@@ -209,6 +220,9 @@ resources:
   max_cpu_cores: {{ .Values.serviceConfig.resources.maxCpuCores | default "null" }}
   gpu_devices: {{ toJson .Values.serviceConfig.resources.gpuDevices }}
   max_upload_bytes: {{ $maxUploadBytes }}
+
+sidecar_store:
+  max_payload_bytes: {{ $sidecarMaxPayloadBytes }}
 
 auth:
   enabled: {{ .Values.serviceConfig.auth.enabled }}
