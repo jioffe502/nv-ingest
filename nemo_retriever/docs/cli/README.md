@@ -265,12 +265,12 @@ These options apply to `retriever ingest`, `retriever ingest local`, and
 | Option | Default | Notes |
 |---|---|---|
 | `DOCUMENTS...` | required | Files, directories, or shell globs. Supported file families are detected automatically. |
-| `--profile` | `auto` | `auto` is normal manifest-routed ingest. `fast-text` is a PDF/document text-only profile for faster fallback ingest. |
+| `--profile` | `auto` | `auto` uses manifest-routed ingest and selects `pdfium_hybrid` for PDFs. `fast-text` selects `pdfium` and disables Page Elements, image, table, and chart extraction for text-only PDFs. |
 | `--lancedb-uri` | `lancedb` | LanceDB database URI. |
 | `--table-name` | `nemo-retriever` | LanceDB table name. Must match query-time storage flags. |
 | `--overwrite/--append` | overwrite | Overwrite the table by default; use `--append` to add rows. |
 | `--index-mode` | `dense` | Dense vector index by default; `hybrid` also builds BM25/FTS and `sparse` builds an FTS-only table. |
-| `--method` | planner default | PDF extraction method such as `pdfium` or `nemotron_parse`. |
+| `--method` | profile default | PDF extraction method: `pdfium`, `pdfium_hybrid`, `ocr`, or `nemotron_parse`. The `auto` profile selects `pdfium_hybrid`; `fast-text` selects `pdfium`. An explicit value overrides the profile-selected method. |
 | `--extract-text`, `--extract-tables`, `--extract-charts` | planner default | Enable or disable extraction families. |
 | `--ocr-version` | planner default | OCR engine version for local extraction. |
 | `--ocr-lang` | planner default | OCR v2 language selector for local extraction. |
@@ -392,14 +392,22 @@ available to every Ray worker or service replica that loads the model.
 ### PDF extraction method
 
 Use `--method` to select how the CLI extracts text from PDF pages. The default
-method is `pdfium`.
+`auto` profile selects `pdfium_hybrid` so that scanned pages can use OCR without
+bypassing Page Elements. An explicit `--method` value overrides the method
+selected by the profile.
 
 - `pdfium` extracts native PDF text. It does not use OCR as a fallback for
-  scanned-page text.
-- `pdfium_hybrid` extracts native PDF text and uses OCR as a fallback for
-  scanned pages.
-- `ocr` uses OCR for PDF page text.
-- `nemotron_parse` uses the Nemotron Parse extraction path.
+  scanned-page text. Page Elements still supports enabled table and chart
+  extraction, but it does not recover page text in this method.
+- `pdfium_hybrid` extracts native text from text-bearing pages. For pages
+  classified as scanned, it uses Page Elements and OCR to recover page text.
+- `ocr` uses Page Elements and OCR for PDF page text on every page.
+- `nemotron_parse` uses the Nemotron Parse visual extraction path instead of
+  the Page Elements and OCR path.
+
+The `fast-text` profile is the explicit text-only exception. It selects
+`pdfium` and disables Page Elements, page rendering, image extraction, table
+extraction, and chart extraction.
 
 For example, select hybrid extraction for a PDF that contains scanned pages:
 

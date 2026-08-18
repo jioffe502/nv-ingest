@@ -366,7 +366,7 @@ def profile_extract_defaults(profile: IngestProfileValue) -> dict[str, Any]:
             "extract_page_as_image": False,
             "use_page_elements": False,
         }
-    return {}
+    return {"method": "pdfium_hybrid"}
 
 
 def _build_asr_params(*, segment_audio: bool | None, needed: bool) -> ASRParams | None:
