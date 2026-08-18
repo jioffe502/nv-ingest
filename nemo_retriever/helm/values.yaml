@@ -556,12 +556,16 @@ serviceConfig:
     # endpoints, set the matching model explicitly.
     nemotronParseModel: ""
     embedInvokeUrl: ""
-    # Optional remote reranking endpoint used by POST /v1/query with
-    # rerank=true. The optional rerankqa NIM is not auto-wired; set this
-    # explicitly to its in-cluster Service URL or another compatible endpoint.
+    # Optional remote reranker used by POST /v1/query with rerank=true.
+    # Auto-wired from the in-cluster Service when
+    # `nimOperator.rerankqa.enabled=true` (and the NIM Operator CRDs are
+    # present). Set explicitly to point at a hosted or external ranking
+    # endpoint (e.g. http://llama-nemotron-rerank-vl-1b-v2:8000/v1/ranking).
     rerankInvokeUrl: ""
-    # Server-owned model identifier sent to rerankInvokeUrl. Use the VL
-    # reranker ID for the chart's optional rerankqa NIM.
+    # Model identifier passed to the remote rerank endpoint. Auto-set to
+    # nvidia/llama-nemotron-rerank-vl-1b-v2 whenever a rerank URL is
+    # resolved from the operator-managed VL reranker. Override when
+    # pointing at a different ranking SKU.
     rerankModelName: ""
     # Optional remote VLM endpoint for image captioning (Nemotron 3 Nano
     # Omni). Auto-wired from the in-cluster Service when
@@ -1385,7 +1389,13 @@ nimOperator:
   # contract (see docs/extraction/deployment-options.md L21 and
   # docs/extraction/prerequisites-support-matrix.md L92 / L128). Opt in
   # only when the retrieval pipeline calls a reranker — enabling this NIM
-  # consumes one GPU and ~3.1 GiB of GPU memory at runtime.
+  # consumes one GPU and ~3.1 GiB of GPU memory at runtime. When enabled
+  # (and the NIM Operator CRDs are present), the chart auto-wires
+  # `nim_endpoints.rerank_invoke_url` / `rerank_model_name` into the
+  # rendered retriever-service ConfigMap so `/v1/query` with
+  # `rerank=true` reaches this NIM. Override via
+  # `serviceConfig.nimEndpoints.rerankInvokeUrl` /
+  # `rerankModelName` when pointing at an external ranking endpoint.
   #
   # IMPORTANT — VL vs text-only: 26.05 documents the **VL** reranker
   # (``llama-nemotron-rerank-vl-1b-v2``) as the supported NIM so the

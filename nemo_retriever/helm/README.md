@@ -71,9 +71,9 @@ nemo_retriever/helm/
         ├── nemotron-table-structure-v1.yaml   # NIMCache + NIMService
         ├── nemotron-ocr-v2.yaml               # NIMCache + NIMService
         ├── llama-nemotron-embed-vl-1b-v2.yaml           # NIMCache + NIMService (VLM embed)
-        ├── llama-nemotron-rerank-vl-1b-v2.yaml  # NIMCache + NIMService (optional; not auto-wired)
+        ├── llama-nemotron-rerank-vl-1b-v2.yaml  # NIMCache + NIMService (optional; auto-wired when enabled)
         ├── nemotron-parse.yaml                # NIMCache + NIMService (optional; not auto-wired)
-        ├── nemotron-3-nano-omni-30b-a3b-reasoning.yaml  # NIMCache + NIMService (optional; not auto-wired)
+        ├── nemotron-3-nano-omni-30b-a3b-reasoning.yaml  # NIMCache + NIMService (optional; auto-wired when enabled)
         └── audio.yaml                         # NIMCache + NIMService (optional; not auto-wired)
 ```
 
@@ -471,7 +471,7 @@ helm install retriever ./nemo_retriever/helm \
 
 > The VL reranker (`rerankqa`), Nemotron Parse, the Nemotron 3 Nano Omni 30B caption NIM, the generic answer-generation LLM (`answer_llm`, Super-49B defaults), and the Parakeet `audio` ASR NIM are **all off by default** — they only reconcile when you explicitly opt in. Opt-in flags:
 >
-> * VL reranker — `--set nimOperator.rerankqa.enabled=true`
+> * VL reranker — `--set nimOperator.rerankqa.enabled=true` (auto-wires `nim_endpoints.rerank_invoke_url` / `rerank_model_name` — refer to [Query-time reranking](#query-time-reranking))
 > * Nemotron Parse — `--set nimOperator.nemotron_parse.enabled=true`
 > * Omni 30B captioner — `--set nimOperator.nemotron_3_nano_omni_30b_a3b_reasoning.enabled=true`
 > * Answer generation LLM — `--set nimOperator.answer_llm.enabled=true`
@@ -662,10 +662,11 @@ listen on `networkService.port` and route to the container listener on
 | `serviceConfig.pipeline.batchWorkers`             | `48`    | Per-pod batch worker count. Refer to [Timeouts and alleviating ingest failures](#timeouts-and-alleviating-ingest-failures) if embed or pool errors appear under load. |
 | `serviceConfig.resources.maxUploadBytes`          | `500000000` | Maximum upload file size in bytes; requests exceeding the limit are rejected before buffering. |
 | `serviceConfig.sidecarStore.maxPayloadBytes`      | `33554432` | Maximum sidecar metadata upload size in bytes. The service rejects a larger upload with HTTP `413` before buffering the complete payload. This value cannot exceed `serviceConfig.resources.maxUploadBytes`. |
-| `serviceConfig.nimEndpoints.*InvokeUrl`           | `""`    | Override the auto-resolved NIM Operator URL. Available knobs: `pageElementsInvokeUrl`, `tableStructureInvokeUrl`, `ocrInvokeUrl`, `embedInvokeUrl`, and `captionInvokeUrl` (refer to [Image captioning (Omni 30B)](#image-captioning-omni-30b)). |
+| `serviceConfig.nimEndpoints.*InvokeUrl`           | `""`    | Override the auto-resolved NIM Operator URL. Available knobs: `pageElementsInvokeUrl`, `tableStructureInvokeUrl`, `ocrInvokeUrl`, `embedInvokeUrl`, `rerankInvokeUrl` (refer to [Query-time reranking](#query-time-reranking)), and `captionInvokeUrl` (refer to [Image captioning (Omni 30B)](#image-captioning-omni-30b)). |
+| `serviceConfig.nimEndpoints.rerankModelName`      | `""`    | Model id sent to the remote reranker. Auto-set to `nvidia/llama-nemotron-rerank-vl-1b-v2` whenever a rerank URL is resolved. |
 | `serviceConfig.nimEndpoints.captionModelName`     | `""`    | Model id sent to the remote VLM. Auto-set to `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` whenever a caption URL is resolved. |
-| `serviceConfig.nimEndpoints.rerankInvokeUrl`      | `""`    | Ranking API URL used by `POST /v1/query` when `rerank=true`. The optional `rerankqa` NIM is not auto-wired; configure this URL explicitly. |
-| `serviceConfig.nimEndpoints.rerankModelName`      | `""`    | Model ID sent to the ranking API. Defaults to `nvidia/llama-nemotron-rerank-vl-1b-v2` when a rerank URL is configured; set it explicitly for a different compatible reranker. |
+| `serviceConfig.nimEndpoints.rerankInvokeUrl`      | `""`    | Ranking API URL used by `POST /v1/query` when `rerank=true`. Auto-wired from the optional `rerankqa` NIM when enabled; override to point at a hosted or external ranking endpoint. |
+| `serviceConfig.nimEndpoints.rerankModelName`      | `""`    | Model ID sent to the ranking API. Auto-set to `nvidia/llama-nemotron-rerank-vl-1b-v2` whenever a rerank URL is resolved; override for a different compatible reranker. |
 | `serviceConfig.nimEndpoints.audioGrpcEndpoint`    | `""`    | gRPC endpoint for Parakeet ASR. Not auto-wired from `nimOperator.audio`. Set `audio:50051` when you enable the audio NIM. |
 | `serviceConfig.llm.enabled`                         | `false` | Enables `POST /v1/answer`. Auto-flips to true when `nimOperator.answer_llm` is enabled and the operator URL resolves. |
 | `serviceConfig.llm.apiBase`                         | `""`    | OpenAI-compatible LLM base URL. Explicit value wins; otherwise `answer_llm` opt-in resolves to `http://answer-llm:8000/v1` by default. |
@@ -849,7 +850,7 @@ gated on three conditions ALL holding:
 | `nimOperator.vlm_embed.enabled`        | `true`  | Multimodal embedding NIM (also used by the vectordb Pod). |
 | `nimOperator.vlm_embed.nimServiceName` | `llama-nemotron-embed-vl-1b-v2` | NIMService / in-cluster DNS name. |
 | `nimOperator.vlm_embed.image`          | `nvcr.io/nim/nvidia/llama-nemotron-embed-vl-1b-v2:2.3.0` | Default VLM embed NIM image. |
-| `nimOperator.rerankqa.enabled`         | `false` | VL reranker NIM (optional; not auto-wired). Set `true` to opt in. Default `false` so chart installs honor the "optional and disabled by default" contract in [deployment-options.md](https://github.com/NVIDIA/NeMo-Retriever/blob/main/docs/docs/extraction/deployment-options.md) and do not silently provision an extra ≈ 3.1 GiB GPU NIM. The image points at the **VL** SKU (`llama-nemotron-rerank-vl-1b-v2`) per [prerequisites-support-matrix.md](https://github.com/NVIDIA/NeMo-Retriever/blob/main/docs/docs/extraction/prerequisites-support-matrix.md#default-helm-nims) — the text-only `llama-nemotron-rerank-1b-v2` silently degrades multimodal reranking and is not the documented POR. |
+| `nimOperator.rerankqa.enabled`         | `false` | VL reranker NIM (optional). Set `true` to opt in — refer to [Query-time reranking](#query-time-reranking). Default `false` so chart installs honor the "optional and disabled by default" contract in [deployment-options.md](https://github.com/NVIDIA/NeMo-Retriever/blob/main/docs/docs/extraction/deployment-options.md) and do not silently provision an extra ≈ 3.1 GiB GPU NIM. The image points at the **VL** SKU (`llama-nemotron-rerank-vl-1b-v2`) per [prerequisites-support-matrix.md](https://github.com/NVIDIA/NeMo-Retriever/blob/main/docs/docs/extraction/prerequisites-support-matrix.md#default-helm-nims) — the text-only `llama-nemotron-rerank-1b-v2` silently degrades multimodal reranking and is not the documented POR. |
 | `nimOperator.rerankqa.image`           | `nvcr.io/nim/nvidia/llama-nemotron-rerank-vl-1b-v2:2.3.0` | Default optional VL reranker NIM image. |
 | `nimOperator.nemotron_parse.enabled`   | `false` | Structured-parse NIM (optional). Set `true` when using `method="nemotron_parse"`. Default `false` so chart installs honor the "optional and disabled by default" contract in [deployment-options.md](https://github.com/NVIDIA/NeMo-Retriever/blob/main/docs/docs/extraction/deployment-options.md). The default image is Parse v1.2; you can select Parse v2.0 with its documented image override. Image tags follow the [image tag conventions](#image-tag-conventions). |
 | `nimOperator.nemotron_3_nano_omni_30b_a3b_reasoning.enabled` | `false` | Omni 30B caption NIM (optional). Set `true` to enable image captioning — refer to [Image captioning (Omni 30B)](#image-captioning-omni-30b). Default `false` so chart installs do not silently pull ≈ 62 GiB of BF16 weights or claim a second dedicated GPU. Image tag follows the [image tag conventions](#image-tag-conventions). |
@@ -870,11 +871,15 @@ gated on three conditions ALL holding:
 | `nimOperator.<key>.expose.service.port` | `8000` (9000 for audio) | HTTP port. |
 | `nimOperator.<key>.expose.service.grpcPort` | `8001` (50051 for audio) | gRPC port. |
 
-> Only the four "core" NIMs (page_elements, table_structure, ocr, vlm_embed)
-> are auto-wired into the retriever-service config. Optional NIMs may reconcile
-> when `nimOperator.<key>.enabled` is `true` in `values.yaml`, but the
-> retriever-service won't call them unless you wire your pipeline to use them.
-> For minimal installs, prefer the [minimal install](#recommended-minimal-install-2608) overrides.
+> The four "core" NIMs (page_elements, table_structure, ocr, vlm_embed)
+> are enabled and auto-wired by default. Optional NIMs stay off until
+> `nimOperator.<key>.enabled` is `true`. When you opt in, the chart
+> auto-wires Omni captioning and VL reranking into `nim_endpoints`
+> (refer to [Image captioning (Omni 30B)](#image-captioning-omni-30b) and
+> [Query-time reranking](#query-time-reranking)); other optional NIMs
+> still need an explicit serviceConfig hook (for example
+> `audioGrpcEndpoint` for Parakeet ASR). For minimal installs, prefer the
+> [minimal install](#recommended-minimal-install-2608) overrides.
 
 #### Filtering cached GPU profiles { #filtering-cached-gpu-profiles }
 
@@ -1069,6 +1074,49 @@ same upgrade so Helm creates the cache instead of patching it.
 
 Changing `service.image.repository` or `service.image.tag` does not
 use `NIMCache` and is not subject to this rule.
+
+#### Query-time reranking { #query-time-reranking }
+
+The VL reranker NIM (`llama-nemotron-rerank-vl-1b-v2`) backs
+`POST /v1/query` with `rerank=true`. When you enable it,
+
+```bash
+helm upgrade --install retriever ./nemo_retriever/helm \
+  --set nimOperator.rerankqa.enabled=true \
+  ...
+```
+
+the chart auto-wires two fields into the rendered
+`retriever-service.yaml` ConfigMap (including every split-topology
+role ConfigMap):
+
+```yaml
+nim_endpoints:
+  rerank_invoke_url: "http://llama-nemotron-rerank-vl-1b-v2:8000/v1/ranking"
+  rerank_model_name: "nvidia/llama-nemotron-rerank-vl-1b-v2"
+```
+
+Without those fields the gateway returns
+`HTTP 400 Reranking is not configured` even when the Rerank NIM Pod is
+Ready.
+
+Resolution order mirrors every other NIM endpoint (see the
+[NIM Operator sub-stack](#nim-operator-sub-stack) section):
+
+1. Explicit `serviceConfig.nimEndpoints.rerankInvokeUrl` always wins
+   (use this to point at a hosted or external ranking endpoint).
+2. Otherwise the operator-managed URL of
+   `llama-nemotron-rerank-vl-1b-v2` is used, provided
+   `nimOperator.rerankqa.enabled=true` **and** the
+   `apps.nvidia.com/v1alpha1` CRDs are installed.
+3. Otherwise `rerank_invoke_url` stays `null` and query-time reranking
+   stays disabled.
+
+`serviceConfig.nimEndpoints.rerankModelName` follows the same order —
+it defaults to the canonical VL reranker model id
+(`nvidia/llama-nemotron-rerank-vl-1b-v2`) whenever the chart resolves any
+rerank URL. Override only when pointing at a different ranking SKU.
+
 
 #### Image captioning (Omni 30B) { #image-captioning-omni-30b }
 
