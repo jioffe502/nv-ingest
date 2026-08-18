@@ -1304,11 +1304,14 @@ serviceConfig:
 configured key. `nrl-internal-vdb-auth` must contain a distinct, high-entropy
 credential. In split topology, the public token file mounts only on the
 gateway. The gateway authenticates public requests, then uses the internal
-credential for restricted worker handoffs. Workers do not receive or validate
-the public bearer token. Internal authentication is opt-in for local
-compatibility; enable it for production deployments. When enabled, a missing
-Secret or key prevents the pods from starting instead of falling back to
-unauthenticated VectorDB access. Inline `serviceConfig.auth.apiToken` is rejected unless
+credential for restricted worker handoffs and pull-worker claims of
+`/v1/internal/work/claim`. Workers do not receive or validate the public
+bearer token, so `serviceConfig.auth.scopeTokenSecret.name` also requires
+`serviceConfig.vectordb.internalAuth.enabled=true`. Internal authentication
+is opt-in for local compatibility; enable it for production deployments. When
+enabled, a missing Secret or key prevents the pods from starting instead of
+falling back to unauthenticated VectorDB access. Inline
+`serviceConfig.auth.apiToken` is rejected unless
 `allowInsecureInlineApiToken=true`, and must never be used for production.
 
 ### Disable one NIM and supply an external URL for it
