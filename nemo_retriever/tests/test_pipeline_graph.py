@@ -1379,13 +1379,9 @@ class TestRayDataExecutor:
         pdf_path.write_bytes(b"pdf")
 
         class _FakeDataset:
-            def iter_batches(self, *, batch_format):
-                assert batch_format == "pyarrow"
-                return iter([])
+            pass
 
-            def schema(self):
-                return SimpleNamespace(names=[])
-
+        fake_dataset = _FakeDataset()
         captured: dict[str, object] = {}
 
         class _FakeDataContext:
@@ -1399,7 +1395,11 @@ class TestRayDataExecutor:
         def _fake_read_binary_files(paths, include_paths=True):
             captured["paths"] = list(paths)
             captured["include_paths"] = include_paths
-            return _FakeDataset()
+            return fake_dataset
+
+        def _fake_ray_dataset_to_pandas(dataset):
+            assert dataset is fake_dataset
+            return pd.DataFrame()
 
         fake_ray_data = SimpleNamespace(
             Dataset=_FakeDataset,
@@ -1415,6 +1415,7 @@ class TestRayDataExecutor:
             lambda ray: SimpleNamespace(available_gpu_count=lambda: 0),
         )
         monkeypatch.setattr("nemo_retriever.graph.executor.resolve_graph", lambda graph, cluster: graph)
+        monkeypatch.setattr("nemo_retriever.graph.executor.ray_dataset_to_pandas", _fake_ray_dataset_to_pandas)
 
         executor = RayDataExecutor(Graph())
         result = executor.ingest([str(tmp_path / "**" / "*.pdf")])
