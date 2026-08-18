@@ -5,11 +5,13 @@
 """Regression tests for Ray's Arrow-to-pandas operator boundary."""
 
 from functools import partial
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import ray
 from ray.data.block import BlockAccessor
 from ray.data import DataContext
 from ray.data.extensions import TensorArray
@@ -60,7 +62,7 @@ def test_adapter_compacts_sliced_nested_arrow_columns() -> None:
     assert isinstance(result.dtypes["text"], pd.ArrowDtype)
 
 
-def test_dataset_materialization_returns_row_safe_pandas_dataframe() -> None:
+def test_dataset_materialization_returns_row_safe_pandas_dataframe(monkeypatch) -> None:
     table = pa.Table.from_pylist(
         [
             {
@@ -76,13 +78,50 @@ def test_dataset_materialization_returns_row_safe_pandas_dataframe() -> None:
             assert batch_format == "pyarrow"
             yield table.slice(1, 1)
 
+        def iter_internal_ref_bundles(self):
+            yield SimpleNamespace(blocks=(SimpleNamespace(ref=table.slice(1, 1)),))
+
         def schema(self):
             return table.schema
 
+    monkeypatch.setattr(ray, "get", lambda refs: refs)
     result = ray_dataset_to_pandas(_Dataset())
 
     assert [row.text for row in result.itertuples(index=False)] == ["page 1"]
     assert result.to_dict("records") == [{"metadata": {"error": None, "timing": None}, "text": "page 1"}]
+
+
+def test_dataset_materialization_preserves_object_tensor_pandas_blocks(monkeypatch) -> None:
+    frame = pd.DataFrame(
+        {
+            "table": pd.Series(
+                TensorArray(
+                    [
+                        np.array([{"text": "table text"}], dtype=object),
+                        np.array([], dtype=object),
+                    ]
+                )
+            )
+        }
+    )
+
+    class _Dataset:
+        def iter_batches(self, *, batch_format: str):
+            assert batch_format == "pyarrow"
+            yield BlockAccessor.for_block(frame).to_arrow()
+
+        def iter_internal_ref_bundles(self):
+            yield SimpleNamespace(blocks=(SimpleNamespace(ref=frame),))
+
+        def schema(self):
+            return pa.schema([pa.field("table", pa.list_(pa.struct([pa.field("text", pa.string())])))])
+
+    monkeypatch.setattr(ray, "get", lambda refs: refs)
+    result = ray_dataset_to_pandas(_Dataset())
+
+    assert result["table"].dtype == object
+    assert result["table"].iloc[0].tolist() == [{"text": "table text"}]
+    assert result["table"].iloc[1].tolist() == []
 
 
 def test_adapter_preserves_ray_pandas_conversion_policy() -> None:
