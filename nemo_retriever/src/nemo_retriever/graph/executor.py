@@ -100,9 +100,9 @@ def _normalize_object_tensor_columns(frame: pd.DataFrame) -> pd.DataFrame:
     if not columns:
         return frame
 
-    normalized = frame.copy()
+    normalized = frame.copy(deep=False)
     for name in columns:
-        normalized[name] = pd.Series(frame[name].to_numpy().tolist(), index=frame.index, dtype=object)
+        normalized[name] = frame[name].astype(object)
     return normalized
 
 
@@ -146,12 +146,7 @@ def ray_dataset_to_pandas(dataset: ray.data.Dataset) -> pd.DataFrame:
     pandas.DataFrame
         Row-safe DataFrame containing all rows from ``dataset``.
     """
-    import ray
-
-    frames = []
-    for ref_bundle in dataset.iter_internal_ref_bundles():
-        blocks = ray.get([entry.ref for entry in ref_bundle.blocks])
-        frames.extend(arrow_table_to_pandas(block) for block in blocks)
+    frames = [arrow_table_to_pandas(block) for block in dataset.iter_batches(batch_format=None, batch_size=None)]
     if frames:
         return pd.concat(frames, ignore_index=True)
 
