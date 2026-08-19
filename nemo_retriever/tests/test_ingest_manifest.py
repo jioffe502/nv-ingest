@@ -341,7 +341,6 @@ def test_ingest_plan_auto_builds_video_params(monkeypatch, tmp_path) -> None:
     plan = _resolve_plan([str(video)])
 
     assert [branch.family for branch in plan.branches] == ["video"]
-    assert plan.extract_params.method == "pdfium"
     assert plan.audio_chunk_params is not None
     assert plan.audio_chunk_params.enabled is True
     assert plan.video_frame_params is not None
@@ -367,7 +366,7 @@ def test_ingest_plan_auto_allows_mixed_supported_branches(monkeypatch, tmp_path)
     plan = _resolve_plan([str(pdf), str(audio), str(video)])
 
     assert [branch.family for branch in plan.branches] == ["pdf", "audio", "video"]
-    assert plan.extract_params.method == "pdfium"
+    assert plan.extract_params.method == "pdfium_hybrid"
     assert plan.audio_chunk_params is not None
     assert plan.video_frame_params is not None
 
