@@ -995,6 +995,10 @@ class LanceDB(VDB):
         hybrid = hybrid if hybrid is not None else self.hybrid
         sparse = sparse if sparse is not None else self.sparse
         fts_language = fts_language or self.fts_language
+        phase_timings = kwargs.pop("_phase_timings", None)
+        if isinstance(phase_timings, dict):
+            phase_timings.setdefault("vector_index", 0.0)
+            phase_timings.setdefault("fts_index", 0.0)
 
         if sparse:
             fts_index_start = time.perf_counter()
@@ -1002,7 +1006,10 @@ class LanceDB(VDB):
             for index_stub in table.list_indices():
                 if "text" in index_stub.name.lower() or "fts" in index_stub.name.lower():
                     table.wait_for_index([index_stub.name], timeout=timedelta(seconds=600))
-            _record_timing("lancedb.fts_index_ready", time.perf_counter() - fts_index_start)
+            fts_duration = time.perf_counter() - fts_index_start
+            _record_timing("lancedb.fts_index_ready", fts_duration)
+            if isinstance(phase_timings, dict):
+                phase_timings["fts_index"] = fts_duration
             return
 
         num_rows = int(table.count_rows())
@@ -1048,7 +1055,10 @@ class LanceDB(VDB):
             )
             for index_stub in table.list_indices():
                 table.wait_for_index([index_stub.name], timeout=timedelta(seconds=600))
-            _record_timing("lancedb.vector_index_ready", time.perf_counter() - vector_index_start)
+        vector_duration = time.perf_counter() - vector_index_start
+        _record_timing("lancedb.vector_index_ready", vector_duration)
+        if isinstance(phase_timings, dict):
+            phase_timings["vector_index"] = vector_duration
 
         if hybrid:
             fts_index_start = time.perf_counter()
@@ -1056,7 +1066,10 @@ class LanceDB(VDB):
             for index_stub in table.list_indices():
                 if "text" in index_stub.name.lower() or "fts" in index_stub.name.lower():
                     table.wait_for_index([index_stub.name], timeout=timedelta(seconds=600))
-            _record_timing("lancedb.fts_index_ready", time.perf_counter() - fts_index_start)
+            fts_duration = time.perf_counter() - fts_index_start
+            _record_timing("lancedb.fts_index_ready", fts_duration)
+            if isinstance(phase_timings, dict):
+                phase_timings["fts_index"] = fts_duration
 
     def run(self, records):
         """Orchestrate index creation and data ingestion."""
@@ -1211,6 +1224,9 @@ class LanceDB(VDB):
             where_clause = str(where_clause).strip() or None
 
         table = lancedb.connect(uri=table_path).open_table(table_name)
+        from nemo_retriever.common.vdb.sink import assert_lancedb_table_ready
+
+        assert_lancedb_table_ready(table)
 
         search_results = []
         for query_text in query_texts:
@@ -1289,6 +1305,9 @@ class LanceDB(VDB):
             where_clause = str(where_clause).strip() or None
 
         table = lancedb.connect(uri=table_path).open_table(table_name)
+        from nemo_retriever.common.vdb.sink import assert_lancedb_table_ready
+
+        assert_lancedb_table_ready(table)
 
         if hybrid:
             vectors_for_search = list(vectors)
