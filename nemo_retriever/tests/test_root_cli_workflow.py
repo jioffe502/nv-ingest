@@ -163,7 +163,7 @@ def test_root_ingest_runs_default_execution_chain(monkeypatch, tmp_path) -> None
         "overwrite": True,
         "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
-        "embedding_model_revision": "4ef1bfa6da3a909de6bd00611950b7ed99203117",
+        "embedding_model_revision": "582e3bf72aee355e3c59ed89de53543c5b0657ee",
     }
     assert "Ingested 1 file(s) → 7 row(s) in LanceDB lancedb/nemo-retriever." in result.output
 
@@ -206,7 +206,7 @@ def test_root_ingest_without_mode_accepts_local_options_before_documents(monkeyp
         "overwrite": False,
         "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
-        "embedding_model_revision": "4ef1bfa6da3a909de6bd00611950b7ed99203117",
+        "embedding_model_revision": "582e3bf72aee355e3c59ed89de53543c5b0657ee",
     }
 
 
@@ -404,7 +404,7 @@ def test_root_ingest_passes_vdb_options_and_run_mode(monkeypatch, tmp_path) -> N
         "overwrite": True,
         "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
-        "embedding_model_revision": "4ef1bfa6da3a909de6bd00611950b7ed99203117",
+        "embedding_model_revision": "582e3bf72aee355e3c59ed89de53543c5b0657ee",
     }
     assert "Ingested 2 file(s) → 12 row(s) in LanceDB /tmp/lancedb/docs." in result.output
 
@@ -425,7 +425,7 @@ def test_root_ingest_append_forwards_overwrite_false(monkeypatch, tmp_path) -> N
         "overwrite": False,
         "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
-        "embedding_model_revision": "4ef1bfa6da3a909de6bd00611950b7ed99203117",
+        "embedding_model_revision": "582e3bf72aee355e3c59ed89de53543c5b0657ee",
     }
 
 
@@ -659,6 +659,7 @@ def test_root_ingest_passes_ocr_lang_option(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     extract_params = fake_ingestor.extract.call_args.args[0]
     assert isinstance(extract_params, ExtractParams)
+    assert extract_params.method == "pdfium_hybrid"
     assert extract_params.ocr_version == "v2"
     assert extract_params.ocr_lang == "english"
 
@@ -1223,6 +1224,42 @@ def test_root_ingest_dry_run_prints_plan_without_creating_ingestor(monkeypatch, 
     assert payload["extract"]["extract_tables"] is False
 
 
+def test_root_ingest_dry_run_routes_avi_to_video(monkeypatch, tmp_path) -> None:
+    document = tmp_path / "sample.avi"
+    document.write_bytes(b"AVI")
+
+    def fail_create_ingestor(**_kwargs: Any) -> Any:
+        raise AssertionError("create_ingestor should not be called for --dry-run")
+
+    monkeypatch.setattr(ingest_execution, "create_ingestor", fail_create_ingestor)
+
+    result = RUNNER.invoke(cli_main.app, ["ingest", str(document), "--dry-run"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["documents"] == [str(document)]
+    assert payload["branch_summary"] == "video:1"
+
+
+def test_root_ingest_dry_run_discovers_avi_in_mixed_directory(monkeypatch, tmp_path) -> None:
+    avi_document = tmp_path / "sample.avi"
+    avi_document.write_bytes(b"AVI")
+    pdf_document = tmp_path / "sample.pdf"
+    pdf_document.write_bytes(b"%PDF-1.4\n")
+
+    def fail_create_ingestor(**_kwargs: Any) -> Any:
+        raise AssertionError("create_ingestor should not be called for --dry-run")
+
+    monkeypatch.setattr(ingest_execution, "create_ingestor", fail_create_ingestor)
+
+    result = RUNNER.invoke(cli_main.app, ["ingest", str(tmp_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["documents"] == sorted((str(avi_document), str(pdf_document)))
+    assert payload["branch_summary"] == "pdf:1, video:1"
+
+
 def test_dry_run_secret_redaction_covers_common_credential_names() -> None:
     payload = {
         "api_key": "nvapi-test",
@@ -1331,6 +1368,8 @@ def test_root_ingest_caption_is_optional_and_passes_minimal_caption_params(monke
             "http://vlm:8000/v1/chat/completions",
             "--caption-model-name",
             "nvidia/test-vlm",
+            "--caption-gpu-memory-utilization",
+            "0.8",
             "--caption-context-text-max-chars",
             "512",
             "--caption-infographics",
@@ -1350,6 +1389,7 @@ def test_root_ingest_caption_is_optional_and_passes_minimal_caption_params(monke
     assert isinstance(caption_params, CaptionParams)
     assert caption_params.endpoint_url == "http://vlm:8000/v1/chat/completions"
     assert caption_params.model_name == "nvidia/test-vlm"
+    assert caption_params.gpu_memory_utilization == 0.8
     assert caption_params.context_text_max_chars == 512
     assert caption_params.caption_infographics is True
 
@@ -1368,6 +1408,8 @@ def test_root_ingest_rejects_caption_options_without_caption(monkeypatch, tmp_pa
             str(document),
             "--caption-invoke-url",
             "http://vlm:8000/v1/chat/completions",
+            "--caption-gpu-memory-utilization",
+            "0.8",
         ],
     )
 
@@ -1440,7 +1482,6 @@ def test_root_ingest_auto_passes_video_params(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     extract_params = fake_ingestor.extract.call_args.args[0]
     assert isinstance(extract_params, ExtractParams)
-    assert extract_params.method == "pdfium"
     kwargs = fake_ingestor.extract.call_args.kwargs
     assert isinstance(kwargs["audio_chunk_params"], AudioChunkParams)
     assert kwargs["audio_chunk_params"].enabled is False
@@ -1714,7 +1755,7 @@ def test_root_ingest_index_mode_hybrid_passes_hybrid_into_vdb_kwargs(monkeypatch
         "overwrite": True,
         "hybrid": True,
         "embedding_model_name": "nvidia/llama-nemotron-embed-vl-1b-v2",
-        "embedding_model_revision": "4ef1bfa6da3a909de6bd00611950b7ed99203117",
+        "embedding_model_revision": "582e3bf72aee355e3c59ed89de53543c5b0657ee",
     }
 
 

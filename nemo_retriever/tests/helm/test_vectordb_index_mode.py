@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from nemo_retriever.service.config import VectorDbConfig
+
 _ROOT = Path(__file__).resolve().parents[3]
 _CHART = _ROOT / "nemo_retriever" / "helm"
 
@@ -50,3 +52,12 @@ def test_vectordb_index_mode_rejects_invalid_value() -> None:
     result = _helm_template("--set", "serviceConfig.vectordb.indexMode=sparse")
     assert result.returncode != 0
     assert "indexMode must be one of" in result.stderr
+
+
+def test_service_config_uses_the_same_index_modes_as_helm() -> None:
+    assert VectorDbConfig().index_mode == "auto"
+    assert [VectorDbConfig(index_mode=mode).index_mode for mode in ("auto", "dense", "hybrid")] == [
+        "auto",
+        "dense",
+        "hybrid",
+    ]

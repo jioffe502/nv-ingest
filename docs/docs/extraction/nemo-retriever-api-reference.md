@@ -23,6 +23,32 @@ not parse them as stable codes. The stable text-generation codes documented in
 [One-shot text generation](#one-shot-text-generation) apply to generation
 operator output columns, not to document extraction.
 
+### Configure at least one input source
+
+Before you call `.ingest()`, `.ingest_stream()`, or `.aingest_stream()`,
+configure at least one input source by calling `.files()`, `.texts()`, or
+`.buffers()` with a nonempty value. Omitting input configuration or passing an
+empty collection raises `ValueError` before pipeline execution.
+
+A configured source can legitimately produce blank text or an empty result.
+For example, OCR can find no text on an image-only page. This outcome does not
+raise the missing-input error.
+
+A nonempty optional glob passed to `.files()` also counts as a configured
+source. If it matches no files, `.ingest()` can return an empty result, and the
+streaming methods can yield no results.
+
+### Select a supported extraction method
+
+`ExtractParams` validates `method` when you construct the model. For PDF
+extraction, use `pdfium`, `pdfium_hybrid`, `ocr`, or `nemotron_parse`. The
+`audio` value remains available for the legacy params-driven audio path. For
+new audio pipelines, use `GraphIngestor.extract_audio()` instead.
+
+Any other value raises a Pydantic `ValidationError` before pipeline setup. The
+error lists the supported values, so spelling and configuration errors do not
+silently select another extraction path.
+
 ### Choose raise or collect behavior
 
 For graph run modes, `error_policy="raise"` raises `GraphIngestionError` when
@@ -142,11 +168,11 @@ actions, and escalation criteria, refer to
 
 Large PDFs are split into page batches before Ray processing so extraction can run in parallel. This happens on the default ingest path; you do not need extra configuration for typical workloads.
 
-To tune splitter throughput from the CLI, use `--pdf-split-batch-size` (Ray actor batch size for the splitter stage). Refer to [Text chunking and PDF page batches](https://github.com/NVIDIA/NeMo-Retriever/tree/main/nemo_retriever/docs/cli#text-chunking-and-pdf-page-batches) in the CLI reference.
+To tune splitter throughput from the CLI, use `--pdf-split-batch-size` (Ray actor batch size for the splitter stage). Refer to [Local and batch ingest](https://github.com/NVIDIA/NeMo-Retriever/tree/main/nemo_retriever/docs/cli#local-and-batch-ingest) in the CLI reference.
 
 **Python client (`pdf_split_config`):** Only `create_ingestor(run_mode="service")` implements `.pdf_split_config(pages_per_chunk=...)`, which records page-chunking settings in the request pipeline spec for the remote gateway. Local graph ingest (`run_mode="inprocess"` or `"batch"`) raises `NotImplementedError` if you call this method; PDFs are split automatically on the default ingest path without client-side configuration.
 
-## One-shot text generation
+## One-shot text generation { #one-shot-text-generation }
 
 `TextGenerationOperator` is the reusable base for synchronous, one-request-per-row text generation. It is a provisional text-only API: it does not support tool calls, agent loops, streaming, multiple choices, or structured domain results.
 
@@ -186,13 +212,37 @@ titles = GenericGenerationOperator(
 ).run(pd.DataFrame({"style": ["concise"], "document": ["Quarterly results"]}))
 ```
 
-`SummarizationOperator` defaults to `text`, `summary`, `summary_latency_s`, `summary_model`, and `summary_error`. `GenericGenerationOperator` maps each named prompt placeholder to a physical DataFrame column and derives the metadata column names from `output_column`. Prompt contracts are validated when the operator is constructed, before any provider request runs.
+`SummarizationOperator` defaults to `text`, `summary`, `summary_latency_s`, `summary_model`, and `summary_error`. `GenericGenerationOperator` maps each named prompt placeholder to a physical DataFrame column and derives the metadata column names from `output_column`. Prompt contracts are validated when the operator is constructed, before any provider request runs. `SummarizeTask` inherits from `TextGenerationTask` and supplies the built-in summarization prompt unless you override `prompt` on `TextGenerationParams`.
+
+### TextGenerationParams configuration { #textgenerationparams-configuration }
+
+Construct `TextGenerationParams` with `TextGenerationParams.from_kwargs(...)`. The following fields are supported.
+
+| Field | Purpose |
+|-------|---------|
+| `model` | Required provider model identifier. |
+| `api_base` | Optional OpenAI-compatible API base URL. |
+| `api_key` | Optional credential or `os.environ/<NAME>` reference. Literal keys are not written to persisted graph JSON. |
+| `temperature` | Optional sampling override. Valid values are 0.0 through 2.0. |
+| `top_p` | Optional sampling override. Valid values are 0.0 through 1.0. |
+| `max_tokens` | Optional positive token-limit override. Omit the field to inherit the task default. |
+| `extra_params` | Optional provider-specific request keys. Dedicated fields such as `model`, `messages`, sampling, and credentials must not be duplicated here. |
+| `num_retries` | Transport retry count. The default is 3. The value must be 0 or greater. |
+| `timeout` | Transport timeout in seconds. The default is 120.0. The value must be greater than 0. |
+| `prompt` | Optional user prompt or prompt template. `GenericGenerationOperator` requires this field. |
+| `system_prompt` | Optional system prompt. |
+| `rag_system_prompt` | Optional retrieval-augmented generation (RAG) system prompt. |
+| `rag_system_prompt_prefix` | Optional prefix applied to the RAG system prompt. |
+| `reasoning_enabled` | Optional reasoning toggle. When unset, transport reasoning defaults to true. |
+| `max_workers` | Concurrent row workers. The default is 8. The value must be 1 or greater. |
+
+Sampling fields that you omit inherit the task defaults. `temperature`, `top_p`, and `max_tokens` are applied only when you pass them explicitly.
 
 To define another one-request/one-text-result task, subclass `TextGenerationTask`, declare `required_inputs`, and implement `build_request()`. Then construct it from a `TextGenerationOperator` subclass with explicit logical-input-to-DataFrame-column mappings. This abstraction is intentionally text-only; use a separate operator family for embeddings, captioning, tools, streaming, or structured domain results.
 
 Generation failures are collected per row using stable error codes: `empty_input`, `request_error`, `transport_error`, `unsupported_response`, `parse_error`, `empty_output`, and the RAG-specific `thinking_truncated`. Raw provider exceptions and credentials are not written to DataFrame outputs.
 
-## Persisted graphs are trusted configuration
+## Persisted graphs are trusted configuration { #persisted-graphs-are-trusted-configuration }
 
 Graph loading imports operator classes and invokes their constructors. Load graph JSON only from trusted sources; do not expose graph payloads, callable references, or class names as model- or user-controlled agent tools.
 

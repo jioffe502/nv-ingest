@@ -25,6 +25,7 @@ from pydantic import (
 )
 
 from nemo_retriever.common.modality.caption.model_profiles import DEFAULT_LOCAL_CAPTION_MODEL_ID
+from nemo_retriever.common.params.utils import validate_nemotron_parse_endpoint_list
 from nemo_retriever.common.remote_auth import resolve_remote_api_key
 
 IngestorRunMode = Literal["inprocess", "batch", "service"]
@@ -516,7 +517,13 @@ class ExtractParams(_ParamsModel):
     extract_page_as_image: Optional[bool] = True
 
     # Extraction options
-    method: str = "pdfium"
+    method: Literal["pdfium", "pdfium_hybrid", "ocr", "nemotron_parse", "audio"] = Field(
+        default="pdfium",
+        description=(
+            "Extraction method. PDF extraction supports 'pdfium', 'pdfium_hybrid', 'ocr', and "
+            "'nemotron_parse'; 'audio' is retained for the legacy params-driven audio path."
+        ),
+    )
     # Run PageElementDetection (layout/yolox). Required by TableStructure and
     # OCR. Safe to disable for text-only ingests.
     use_page_elements: bool = True
@@ -575,6 +582,8 @@ class ExtractParams(_ParamsModel):
                 "`nemotron_parse_invoke_url` and `nemotron_parse_model` require "
                 "`method='nemotron_parse'`; Parse-specific configuration is otherwise ignored."
             )
+        if self.method == "nemotron_parse":
+            validate_nemotron_parse_endpoint_list(self.nemotron_parse_invoke_url or self.invoke_url)
         if not self.use_page_elements:
             consumers = [("use_table_structure", self.use_table_structure and self.extract_tables)]
             enabled = [name for name, on in consumers if on]
@@ -989,7 +998,12 @@ class CaptionParams(LLMInferenceParams):
     hf_cache_dir: Optional[str] = None
     context_text_max_chars: int = 0
     tensor_parallel_size: int = 1
-    gpu_memory_utilization: float = 0.5
+    gpu_memory_utilization: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=1,
+        description="Fraction of GPU memory reserved for local vLLM captioning; defaults to the model profile.",
+    )
     caption_infographics: bool = False
     extra_body: dict[str, Any] = Field(default_factory=dict)
 
