@@ -173,6 +173,12 @@ class IngestVdbOperator(AbstractOperator):
             self._vdb.run(records)
         return data
 
+    def supports_bounded_sink(self) -> bool:
+        """Return whether this operator can consume a bounded terminal stream."""
+        from nemo_retriever.common.vdb.lancedb import LanceDB
+
+        return self.SUPPORTS_BOUNDED_LANCEDB_SINK and isinstance(self._vdb, LanceDB)
+
     def consume_batches(
         self,
         batches: Iterable[Any],

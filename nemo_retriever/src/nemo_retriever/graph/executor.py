@@ -564,19 +564,16 @@ class RayDataExecutor(AbstractExecutor):
 
     @staticmethod
     def _bounded_vdb_sink_index(nodes: List[Node]) -> int | None:
-        """Return the one LanceDB sink position, if this graph has one."""
-        from nemo_retriever.common.vdb.lancedb import LanceDB
+        """Return the one bounded terminal VDB sink position, if present."""
         from nemo_retriever.operators.vdb import IngestVdbOperator
 
         positions = [
             index
             for index, node in enumerate(nodes)
-            if isinstance(node.operator, IngestVdbOperator)
-            and bool(getattr(node.operator, "SUPPORTS_BOUNDED_LANCEDB_SINK", False))
-            and isinstance(getattr(node.operator, "_vdb", None), LanceDB)
+            if isinstance(node.operator, IngestVdbOperator) and node.operator.supports_bounded_sink()
         ]
         if len(positions) > 1:
-            raise ValueError("RayDataExecutor supports at most one bounded LanceDB sink per linear graph.")
+            raise ValueError("RayDataExecutor supports at most one bounded terminal VDB sink per linear graph.")
         return positions[0] if positions else None
 
     def ingest(self, data: Any, **kwargs: Any) -> Any:
@@ -618,7 +615,7 @@ class RayDataExecutor(AbstractExecutor):
             for block in batch_iterator:
                 # Tee the public result while the sink consumes the one lazy
                 # upstream execution. Post-sink effects are rebuilt from this
-                # required result only after LanceDB finalizes; they must not
+                # required result only after the sink finalizes; they must not
                 # force a corpus-wide Ray materialization before the sink.
                 terminal_frames.append(arrow_table_to_pandas(block))
                 # Keep the sink side Arrow-native when Ray produced Arrow.
@@ -673,7 +670,7 @@ class RayDataExecutor(AbstractExecutor):
     def build_dataset(self, data: Any, **kwargs: Any) -> Any:
         """Build a lazy Ray Data pipeline from the graph.
 
-        A graph containing the coordinated LanceDB sink cannot be represented
+        A graph containing a coordinated bounded terminal sink cannot be represented
         as a lazy ``Dataset``: table finalization happens on the driver after
         the upstream Dataset is consumed. Call :meth:`ingest` for that graph.
 
@@ -737,7 +734,7 @@ class RayDataExecutor(AbstractExecutor):
                 nodes = all_nodes[sink_index + 1 :]
             else:
                 raise RuntimeError(
-                    "A graph containing the bounded LanceDB sink must be executed with "
+                    "A graph containing a bounded terminal VDB sink must be executed with "
                     "RayDataExecutor.ingest(); build_dataset() cannot finalize a terminal sink."
                 )
         else:
