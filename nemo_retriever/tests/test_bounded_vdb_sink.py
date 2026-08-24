@@ -217,7 +217,7 @@ def test_oversized_row_fails_before_arrow_allocation_or_table_mutation(
 
 @pytest.mark.parametrize(
     ("bad_vector_policy", "expected_vectors"),
-    [("drop", []), ("fill", [[-3.5, -3.5]]), ("null", [None])],
+    [("drop", []), ("fill", [[1.0, -3.5]]), ("null", [None])],
 )
 def test_bad_vector_policies_match_legacy(
     tmp_path: Path,
