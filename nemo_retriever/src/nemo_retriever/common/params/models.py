@@ -682,10 +682,24 @@ MetaJoinKey = Literal["auto", "source_id", "source_name"]
 class VdbSinkParams(_ParamsModel):
     """Bounded terminal-sink policy for Ray Data VDB ingestion."""
 
-    max_batch_bytes: int = Field(default=256 << 20, gt=0)
-    prefetch_batches: int = Field(default=1, ge=0)
-    optimize: bool = False
-    operation_id: Optional[str] = None
+    max_batch_bytes: int = Field(
+        default=256 << 20,
+        gt=0,
+        description="Maximum retained Arrow batch size in bytes for the coordinated VDB sink.",
+    )
+    prefetch_batches: int = Field(
+        default=1,
+        ge=0,
+        description="Number of upstream batches buffered while the VDB sink writes.",
+    )
+    optimize: bool = Field(
+        default=False,
+        description="Run the backend optimization lifecycle after the bounded write completes.",
+    )
+    operation_id: Optional[str] = Field(
+        default=None,
+        description="Stable retry identity used to recover or reject repeated sink operations.",
+    )
 
     @field_validator("operation_id")
     @classmethod

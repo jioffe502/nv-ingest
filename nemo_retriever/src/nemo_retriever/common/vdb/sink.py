@@ -658,20 +658,20 @@ def _apply_deferred_bad_vector_policy(
         has_nan = False
         normalized_vector: list[float | None] = []
         conversion_failed = False
-        if not wrong_dim:
-            for value in vector_values:
+        if vector_values is not None:
+            for index, value in enumerate(vector_values):
                 if value is None:
-                    normalized_vector.append(None)
-                    continue
-                try:
-                    normalized_value = float(value)
-                    normalized_vector.append(normalized_value)
-                    if math.isnan(normalized_value):
-                        has_nan = True
+                    normalized_value = None
+                else:
+                    try:
+                        normalized_value = float(value)
+                    except (TypeError, ValueError):
+                        conversion_failed = True
                         break
-                except (TypeError, ValueError):
-                    conversion_failed = True
-                    break
+                if normalized_value is not None and math.isnan(normalized_value):
+                    has_nan = True
+                if index < vector_dim:
+                    normalized_vector.append(normalized_value)
         if conversion_failed:
             # Let Arrow report non-coercible values exactly as the legacy
             # LanceDB Python-row conversion does. They are not shape/NaN cases
@@ -685,7 +685,19 @@ def _apply_deferred_bad_vector_policy(
         if vdb.on_bad_vectors == "drop":
             continue
         if vdb.on_bad_vectors == "fill":
-            yield {**row, "vector": [float(vdb.fill_value)] * vector_dim}
+            # The Python-row writer fills missing width element-by-element;
+            # preserve the valid prefix and only fill missing or NaN entries.
+            if vector_values is None:
+                repaired_vector = [float(vdb.fill_value)] * vector_dim
+            else:
+                repaired_vector = [
+                    float(vdb.fill_value)
+                    if value is not None and math.isnan(value)
+                    else value
+                    for value in normalized_vector
+                ]
+                repaired_vector.extend([float(vdb.fill_value)] * (vector_dim - len(repaired_vector)))
+            yield {**row, "vector": repaired_vector}
             continue
         if vdb.on_bad_vectors == "null":
             yield {**row, "vector": None}
