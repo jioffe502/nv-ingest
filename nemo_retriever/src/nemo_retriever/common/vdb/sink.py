@@ -691,9 +691,7 @@ def _apply_deferred_bad_vector_policy(
                 repaired_vector = [float(vdb.fill_value)] * vector_dim
             else:
                 repaired_vector = [
-                    float(vdb.fill_value)
-                    if value is not None and math.isnan(value)
-                    else value
+                    (float(vdb.fill_value) if value is not None and math.isnan(value) else value)
                     for value in normalized_vector
                 ]
                 repaired_vector.extend([float(vdb.fill_value)] * (vector_dim - len(repaired_vector)))
@@ -912,8 +910,8 @@ def _write_report(
         fragments_after=after.fragments,
         data_files_before=before.data_files,
         data_files_after=after.data_files,
-        write_rows_per_second=stats.rows_written / write_seconds if write_seconds > 0 else 0.0,
-        write_bytes_per_second=stats.logical_bytes / write_seconds if write_seconds > 0 else 0.0,
+        write_rows_per_second=(stats.rows_written / write_seconds if write_seconds > 0 else 0.0),
+        write_bytes_per_second=(stats.logical_bytes / write_seconds if write_seconds > 0 else 0.0),
         data_version=data_version,
         final_version=final_version,
         timings=normalized_timings,
