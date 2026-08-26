@@ -213,6 +213,50 @@ def _planned_concurrency(concurrency: Any, planned: int) -> Any:
     return planned
 
 
+def _allocate_auto_concurrency(
+    entries: list[tuple[Any, int, int, float, float]],
+    *,
+    used_cpu: float,
+    used_gpu: float,
+    available_cpus: int,
+    available_gpus: int,
+) -> dict[Any, int]:
+    """Fill local-model pools before spending remaining CPU on throughput pools.
+
+    Every automatic pool receives its initial actor before this function is
+    called. Local-model actors are the scarce work that CPU-only producers feed,
+    so fill their requested topology first. A second fair-share pass spends any
+    remaining resources across every pool.
+    """
+    planned = {key: initial for key, _target, initial, _cpu, _gpu in entries}
+
+    def fill(candidates: list[tuple[Any, int, int, float, float]]) -> None:
+        nonlocal used_cpu, used_gpu
+        while True:
+            eligible = sorted(
+                (item for item in candidates if planned[item[0]] < item[1]),
+                key=lambda item: planned[item[0]] / item[1],
+            )
+            selected = next(
+                (
+                    item
+                    for item in eligible
+                    if used_cpu + item[3] <= available_cpus and used_gpu + item[4] <= available_gpus
+                ),
+                None,
+            )
+            if selected is None:
+                return
+            key, _target, _initial, cpu, gpu = selected
+            planned[key] += 1
+            used_cpu += cpu
+            used_gpu += gpu
+
+    fill([item for item in entries if item[4] > 0])
+    fill(entries)
+    return planned
+
+
 def preflight_executors(executors: list[Any], cluster_resources: ClusterResources) -> None:
     """Plan all lazy executor pools against one shared Ray resource snapshot."""
     entries = []
@@ -250,26 +294,13 @@ def preflight_executors(executors: list[Any], cluster_resources: ClusterResource
             f"{available_cpus} CPUs and {available_gpus} GPUs available. "
             "Reduce explicit *_workers or node_overrides concurrency, or wait for cluster capacity."
         )
-    used_cpu, used_gpu = source_cpu_reservation + fixed_cpu + min_cpu, fixed_gpu + min_gpu
-    planned = {(id(item[0]), item[1]): item[4] for item in auto}
-    while True:
-        candidates = sorted(
-            (item for item in auto if planned[(id(item[0]), item[1])] < item[3]),
-            key=lambda item: planned[(id(item[0]), item[1])] / item[3],
-        )
-        selected = next(
-            (
-                item
-                for item in candidates
-                if used_cpu + item[5] <= available_cpus and used_gpu + item[6] <= available_gpus
-            ),
-            None,
-        )
-        if selected is None:
-            break
-        planned[(id(selected[0]), selected[1])] += 1
-        used_cpu += selected[5]
-        used_gpu += selected[6]
+    planned = _allocate_auto_concurrency(
+        [((id(item[0]), item[1]), item[3], item[4], item[5], item[6]) for item in auto],
+        used_cpu=source_cpu_reservation + fixed_cpu + min_cpu,
+        used_gpu=fixed_gpu + min_gpu,
+        available_cpus=available_cpus,
+        available_gpus=available_gpus,
+    )
     for executor, name, concurrency, _target, _initial, _cpu, _gpu, _auto in auto:
         executor._node_overrides.setdefault(name, {})["concurrency"] = _planned_concurrency(
             concurrency, planned[(id(executor), name)]
@@ -510,27 +541,13 @@ class RayDataExecutor(AbstractExecutor):
                 f"{available_cpus} CPUs and {available_gpus} GPUs available. "
                 "Reduce explicit *_workers or node_overrides concurrency, or wait for cluster capacity."
             )
-        used_cpu, used_gpu = self._source_cpu_reservation + fixed_cpu + minimum_cpu, fixed_gpu + minimum_gpu
-        planned = {name: initial for name, _concurrency, _count, initial, _cpu, _gpu in auto}
-        while True:
-            candidates = sorted(
-                (item for item in auto if planned[item[0]] < item[2]),
-                key=lambda item: planned[item[0]] / item[2],
-            )
-            selected = next(
-                (
-                    item
-                    for item in candidates
-                    if used_cpu + item[4] <= available_cpus and used_gpu + item[5] <= available_gpus
-                ),
-                None,
-            )
-            if selected is None:
-                break
-            name, _concurrency, _count, _initial, cpu, gpu = selected
-            planned[name] += 1
-            used_cpu += cpu
-            used_gpu += gpu
+        planned = _allocate_auto_concurrency(
+            [(item[0], item[2], item[3], item[4], item[5]) for item in auto],
+            used_cpu=self._source_cpu_reservation + fixed_cpu + minimum_cpu,
+            used_gpu=fixed_gpu + minimum_gpu,
+            available_cpus=available_cpus,
+            available_gpus=available_gpus,
+        )
         for name, concurrency, _count, _initial, _cpu, _gpu in auto:
             self._node_overrides.setdefault(name, {})["concurrency"] = _planned_concurrency(concurrency, planned[name])
 
