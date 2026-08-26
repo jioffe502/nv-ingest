@@ -217,7 +217,7 @@ def test_oversized_row_fails_before_arrow_allocation_or_table_mutation(
 
 @pytest.mark.parametrize(
     ("bad_vector_policy", "expected_vectors"),
-    [("drop", []), ("fill", [[1.0, -3.5]]), ("null", [None])],
+    [("drop", []), ("fill", [[-3.5, -3.5]]), ("null", [None])],
 )
 def test_bad_vector_policies_match_legacy(
     tmp_path: Path,
@@ -245,6 +245,25 @@ def test_bad_vector_policies_match_legacy(
     bounded_vectors = lancedb.connect(str(tmp_path / "bounded")).open_table("chunks").to_arrow()["vector"].to_pylist()
     assert bounded_vectors == legacy_vectors == expected_vectors
     assert report.rows_written == len(expected_vectors)
+
+
+def test_nan_fill_matches_legacy_complete_vector_replacement(tmp_path: Path) -> None:
+    frame = _frame(0, 1)
+    frame.at[0, "text_embeddings_1b_v2"] = {"embedding": [1.0, float("nan")]}
+    common = {
+        "validate_vector_length": False,
+        "on_bad_vectors": "fill",
+        "fill_value": -3.5,
+    }
+    legacy = _operator(tmp_path / "legacy", **common)
+    bounded = _operator(tmp_path / "bounded", **common)
+
+    legacy.process(frame)
+    bounded.consume_batches(iter([frame]), operation_id="nan-fill", policy=_POLICY)
+
+    legacy_vectors = lancedb.connect(str(tmp_path / "legacy")).open_table("chunks").to_arrow()["vector"].to_pylist()
+    bounded_vectors = lancedb.connect(str(tmp_path / "bounded")).open_table("chunks").to_arrow()["vector"].to_pylist()
+    assert bounded_vectors == legacy_vectors == [[-3.5, -3.5]]
 
 
 def test_nan_drop_and_deferred_dimension_inference_match_legacy(tmp_path: Path) -> None:

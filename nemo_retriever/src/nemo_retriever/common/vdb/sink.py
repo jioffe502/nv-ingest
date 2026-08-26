@@ -685,17 +685,11 @@ def _apply_deferred_bad_vector_policy(
         if vdb.on_bad_vectors == "drop":
             continue
         if vdb.on_bad_vectors == "fill":
-            # The Python-row writer fills missing width element-by-element;
-            # preserve the valid prefix and only fill missing or NaN entries.
-            if vector_values is None:
-                repaired_vector = [float(vdb.fill_value)] * vector_dim
-            else:
-                repaired_vector = [
-                    (float(vdb.fill_value) if value is not None and math.isnan(value) else value)
-                    for value in normalized_vector
-                ]
-                repaired_vector.extend([float(vdb.fill_value)] * (vector_dim - len(repaired_vector)))
-            yield {**row, "vector": repaired_vector}
+            # LanceDB 0.34 replaces the complete vector when its width is
+            # wrong or any element is NaN. Preserve that supported runtime
+            # contract instead of retaining a prefix that legacy ingestion
+            # discards.
+            yield {**row, "vector": [float(vdb.fill_value)] * vector_dim}
             continue
         if vdb.on_bad_vectors == "null":
             yield {**row, "vector": None}
