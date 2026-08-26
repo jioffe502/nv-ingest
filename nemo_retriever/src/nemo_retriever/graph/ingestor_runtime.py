@@ -49,6 +49,43 @@ DEFAULT_STORE_WORKERS = 4
 DEFAULT_STORE_CPUS_PER_ACTOR = 0.1
 
 
+def vdb_execution_kwargs(vdb_upload_params: Any | None) -> dict[str, Any]:
+    """Return public VDB execution settings for ``RayDataExecutor.ingest``."""
+    execution = getattr(vdb_upload_params, "execution", None)
+    if execution is None:
+        return {}
+    return execution.executor_kwargs()
+
+
+def _validate_compact_embedding_contract(
+    *,
+    embed_params: Any | None,
+    vdb_upload_params: Any | None,
+    reshape_content_before_embed: bool,
+) -> None:
+    """Fail before execution when compact transport cannot preserve semantics."""
+    execution = getattr(vdb_upload_params, "execution", None)
+    if getattr(execution, "embedding_transport_mode", None) != "compact":
+        return
+    if embed_params is None or not reshape_content_before_embed:
+        raise ValueError("Compact embedding transport requires a content reshape stage before embedding")
+
+    supported_fields = {
+        "text_column": "text",
+        "output_column": "text_embeddings_1b_v2",
+    }
+    incompatible = {
+        field: getattr(embed_params, field, None)
+        for field, expected in supported_fields.items()
+        if getattr(embed_params, field, None) != expected
+    }
+    if incompatible:
+        raise ValueError(
+            "Compact embedding transport currently supports the canonical embedding columns only; "
+            f"incompatible settings: {incompatible}"
+        )
+
+
 def _batch_tuning(params: Any) -> Any:
     return getattr(params, "batch_tuning", None)
 
@@ -544,6 +581,12 @@ def _append_ordered_transform_stages(
 ) -> Graph:
     """Append post-extraction transform stages in the exact recorded plan order."""
 
+    _validate_compact_embedding_contract(
+        embed_params=embed_params,
+        vdb_upload_params=vdb_upload_params,
+        reshape_content_before_embed=reshape_content_before_embed,
+    )
+
     pending_stages = [
         stage
         for stage in stage_order
@@ -579,6 +622,7 @@ def _append_ordered_transform_stages(
                         ),
                         name="CollapseContentToPageRows",
                         preserve_pandas_output=True,
+                        embedding_transport_boundary=True,
                     )
                 else:
                     graph = graph >> UDFOperator(
@@ -592,6 +636,7 @@ def _append_ordered_transform_stages(
                         ),
                         name="ExplodeContentToRows",
                         preserve_pandas_output=True,
+                        embedding_transport_boundary=True,
                     )
             graph = graph >> _BatchEmbedActor(
                 params=embed_params,

@@ -14,6 +14,12 @@ from typing import Any, TypedDict
 
 from pydantic import ValidationError
 
+from nemo_retriever.common.modality.embedding_transport import (
+    EMBEDDING_TRANSPORT_CONTENT_COUNTS_FIELD,
+    EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD,
+    EMBEDDING_TRANSPORT_VERSION,
+    EMBEDDING_TRANSPORT_VERSION_FIELD,
+)
 from nemo_retriever.common.schemas.collections import QueryHit
 from nemo_retriever.common.stage_errors import ERROR_FIELD_KEYS, iter_stage_errors_from_value
 
@@ -212,10 +218,17 @@ def _add_detection_metadata(
         if normalized_counts:
             content_metadata.setdefault("page_elements_v3_counts_by_label", normalized_counts)
 
-    for content_type in ("table", "chart", "infographic"):
-        detections = row.get(content_type)
-        if isinstance(detections, list):
-            content_metadata.setdefault(f"ocr_{content_type}_detections", len(detections))
+    transport_counts = row.get(EMBEDDING_TRANSPORT_CONTENT_COUNTS_FIELD)
+    if isinstance(transport_counts, dict):
+        for content_type in ("table", "chart", "infographic"):
+            count = _optional_int(transport_counts.get(content_type))
+            if count is not None and count >= 0:
+                content_metadata.setdefault(f"ocr_{content_type}_detections", count)
+    else:
+        for content_type in ("table", "chart", "infographic"):
+            detections = row.get(content_type)
+            if isinstance(detections, list):
+                content_metadata.setdefault(f"ocr_{content_type}_detections", len(detections))
 
 
 def _dict_or_empty(value: Any) -> dict[str, Any]:
@@ -251,8 +264,10 @@ def _is_inherited_page_uri(row: dict[str, Any], stored_image_uri: str, content_t
     if content_type not in {"table", "chart", "infographic"}:
         return False
 
-    page_image = row.get("page_image")
-    page_uri = page_image.get("stored_image_uri") if isinstance(page_image, dict) else None
+    page_uri = row.get(EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD)
+    if not isinstance(page_uri, str) or not page_uri.strip():
+        page_image = row.get("page_image")
+        page_uri = page_image.get("stored_image_uri") if isinstance(page_image, dict) else None
     return bool(_first_str(page_uri) == stored_image_uri)
 
 
@@ -276,6 +291,10 @@ def _derive_fidelity(content_type: Any, metadata: dict[str, Any], content_metada
 
 
 def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: bool = True) -> dict[str, Any] | None:
+    transport_version = row.get(EMBEDDING_TRANSPORT_VERSION_FIELD)
+    if transport_version not in (None, EMBEDDING_TRANSPORT_VERSION):
+        raise VdbUploadError(f"Unsupported embedding transport version: {transport_version!r}")
+
     metadata = _dict_or_empty(row.get("metadata"))
 
     embedding = _embedding_from_graph_row(row, metadata)

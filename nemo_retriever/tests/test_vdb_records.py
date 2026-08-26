@@ -5,10 +5,18 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from ray.data.extensions import TensorArray
 import pytest
 from pydantic import ValidationError
 
+from nemo_retriever.common.modality.content_transforms import explode_content_to_rows
+from nemo_retriever.common.modality.embedding_transport import (
+    EMBEDDING_TRANSPORT_CONTENT_COUNTS_FIELD,
+    EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD,
+    EMBEDDING_TRANSPORT_VERSION_FIELD,
+    project_embedding_transport,
+)
 from nemo_retriever.common.schemas.collections import QueryHit
 from nemo_retriever.common.vdb.records import (
     normalize_retrieval_results,
@@ -271,3 +279,87 @@ def test_narrow_lancedb_hit_promotes_canonical_multimodal_metadata() -> None:
     assert hit["bbox_xyxy_norm"] == [0.1, 0.2, 0.8, 0.9]
     assert hit["page_number"] == 7
     assert hit["source_id"] == "/tmp/source.pdf"
+
+
+def test_embedding_transport_projection_preserves_canonical_record() -> None:
+    source = pd.DataFrame(
+        {
+            "text": ["page text"],
+            "path": ["/docs/example.pdf"],
+            "page_number": [4],
+            "page_image": [{"image_b64": "page-bytes" * 100, "stored_image_uri": "s3://pages/4.png"}],
+            "page_elements_v3": [[{"label": "table", "bbox": [0.1, 0.2, 0.8, 0.9]}]],
+            "page_elements_v3_num_detections": [2],
+            "page_elements_v3_counts_by_label": [{"table": 2}],
+            "table": [[{"text": "table text"}, {"text": "second table"}]],
+            "chart": [[]],
+            "infographic": [[]],
+            "metadata": [{"content_metadata": {"page_number": 4}}],
+        }
+    )
+    wide = explode_content_to_rows(source, modality="text")
+    compact = project_embedding_transport(wide)
+    embedding = [0.1, 0.2]
+    for frame in (wide, compact):
+        frame["text_embeddings_1b_v2"] = [{"embedding": embedding}] * len(frame.index)
+
+    assert compact.memory_usage(index=True, deep=True).sum() < wide.memory_usage(index=True, deep=True).sum()
+    assert "page_elements_v3" not in compact.columns
+    assert "page_image" not in compact.columns
+    assert "table" not in compact.columns
+    assert compact.iloc[0][EMBEDDING_TRANSPORT_VERSION_FIELD] == 1
+    assert compact.iloc[0][EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD] == "s3://pages/4.png"
+    assert compact.iloc[0][EMBEDDING_TRANSPORT_CONTENT_COUNTS_FIELD] == {
+        "table": 2,
+        "chart": 0,
+        "infographic": 0,
+    }
+    assert to_client_vdb_records(compact) == to_client_vdb_records(wide)
+
+
+def test_embedding_transport_projection_preserves_errors_from_removed_payloads() -> None:
+    source = pd.DataFrame(
+        {
+            "text": [""],
+            "page_image": [{"error": "render failed"}],
+            "page_elements_v3": [[{"error": "detection failed"}]],
+        }
+    )
+
+    compact = project_embedding_transport(source)
+
+    with pytest.raises(ValueError, match=r"reported 2 structured row error\(s\)"):
+        to_client_vdb_records(compact)
+
+
+def test_embedding_transport_projection_drops_unknown_future_multimodal_payload() -> None:
+    compact = project_embedding_transport(
+        pd.DataFrame(
+            {
+                "text": ["searchable"],
+                "future_multimodal_payload": [{"image_b64": "x" * 4096}],
+            }
+        )
+    )
+
+    assert "future_multimodal_payload" not in compact.columns
+
+
+def test_embedding_transport_projection_drops_unknown_columns_from_empty_batches() -> None:
+    compact = project_embedding_transport(pd.DataFrame(columns=["text", "future_multimodal_payload"]))
+
+    assert "text" in compact.columns
+    assert "future_multimodal_payload" not in compact.columns
+
+
+def test_vdb_conversion_rejects_unknown_embedding_transport_version() -> None:
+    with pytest.raises(ValueError, match="Unsupported embedding transport version"):
+        to_client_vdb_records(
+            pd.DataFrame(
+                {
+                    "text": ["searchable"],
+                    "text_embeddings_1b_v2": [{"embedding": [0.1, 0.2]}],
+                    EMBEDDING_TRANSPORT_VERSION_FIELD: [999],
+                }
+            )
+        )

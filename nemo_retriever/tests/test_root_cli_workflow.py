@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import create_autospec
 
@@ -910,6 +911,56 @@ def test_resolved_ingest_plan_runs_through_workflow(monkeypatch, tmp_path) -> No
     assert isinstance(embed_params, EmbedParams)
     assert embed_params.local_ingest_embed_backend == "hf"
     assert embed_params.batch_tuning.gpu_embed == 0.5
+
+
+def test_resolved_batch_plan_exposes_compact_canonical_vdb_execution(monkeypatch, tmp_path) -> None:
+    document = tmp_path / "canonical.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(
+        ingest_plan,
+        "resolve_embed_model_spec",
+        lambda *_args, **_kwargs: SimpleNamespace(output_dimension=2048),
+    )
+
+    plan = ingest_plan.resolve_ingest_plan(
+        ingest_plan.IngestPlanRequest(
+            source=ingest_plan.IngestSourceOptions(documents=[str(document)], input_type="pdf"),
+            runtime=ingest_plan.IngestRuntimeOptions(run_mode="batch"),
+            storage=ingest_plan.IngestStorageOptions(
+                result_mode="write_receipt",
+                transport_mode="canonical_stream",
+                embedding_transport_mode="compact",
+                phase_telemetry=True,
+            ),
+        )
+    )
+
+    assert plan.vdb_params is not None
+    assert plan.vdb_params.vdb_kwargs["vector_dim"] == 2048
+    assert plan.vdb_params.execution.executor_kwargs() == {
+        "vdb_result_mode": "write_receipt",
+        "vdb_transport_mode": "canonical_stream",
+        "embedding_transport_mode": "compact",
+        "vdb_phase_telemetry": True,
+    }
+
+
+def test_canonical_remote_embedding_plan_requires_explicit_vector_dim(tmp_path) -> None:
+    document = tmp_path / "remote.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    with pytest.raises(ValueError, match="requires storage.vector_dim"):
+        ingest_plan.resolve_ingest_plan(
+            ingest_plan.IngestPlanRequest(
+                source=ingest_plan.IngestSourceOptions(documents=[str(document)], input_type="pdf"),
+                runtime=ingest_plan.IngestRuntimeOptions(run_mode="batch"),
+                embed=ingest_plan.IngestEmbedOptions(embed_invoke_url="http://embed.example/v1"),
+                storage=ingest_plan.IngestStorageOptions(
+                    result_mode="write_receipt",
+                    transport_mode="canonical_stream",
+                ),
+            )
+        )
 
 
 def test_build_ingest_pipeline_attaches_store_after_embed_with_tuning(monkeypatch, tmp_path) -> None:

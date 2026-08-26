@@ -39,6 +39,7 @@ from nemo_retriever.graph.ingestor_runtime import (
     batch_tuning_to_node_overrides,
     build_graph,
     default_concurrency_node_names,
+    vdb_execution_kwargs,
 )
 from nemo_retriever.ingestor.manifest import (
     ExtractionBranchPlan,
@@ -891,7 +892,7 @@ class GraphIngestor(ingestor):
             ),
         )
         executor_input = self._inline_text_dataset(ray.data) if self._inline_texts else self._documents
-        result = executor.ingest(executor_input)
+        result = executor.ingest(executor_input, **vdb_execution_kwargs(self._vdb_upload_params))
         self._rd_dataset = result
         return result
 
@@ -901,6 +902,9 @@ class GraphIngestor(ingestor):
         *,
         post_extract_order: tuple[str, ...],
     ) -> Any:
+        execution = getattr(self._vdb_upload_params, "execution", None)
+        if execution is not None and not execution.is_default():
+            raise ValueError("Non-default VDB execution modes require GraphIngestor(run_mode='batch')")
         graph = build_graph(
             extraction_mode=effective_extraction.extraction_mode,
             extract_params=effective_extraction.extract_params,

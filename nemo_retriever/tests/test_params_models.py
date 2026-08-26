@@ -13,6 +13,7 @@ from nemo_retriever.common.params.models import (
     NO_API_KEY,
     StoreParams,
     VdbSinkParams,
+    VdbExecutionParams,
     VdbUploadParams,
     VideoFrameParams,
 )
@@ -128,6 +129,34 @@ class TestVdbSinkParams:
     def test_invalid_bounds_and_identity_are_rejected(self, field: str, value) -> None:
         with pytest.raises(ValueError):
             VdbSinkParams(**{field: value})
+
+
+class TestVdbExecutionParams:
+    def test_compact_canonical_receipt_maps_to_executor_contract(self) -> None:
+        params = VdbExecutionParams(
+            result_mode="write_receipt",
+            transport_mode="canonical_stream",
+            embedding_transport_mode="compact",
+            phase_telemetry=True,
+        )
+
+        assert params.executor_kwargs() == {
+            "vdb_result_mode": "write_receipt",
+            "vdb_transport_mode": "canonical_stream",
+            "embedding_transport_mode": "compact",
+            "vdb_phase_telemetry": True,
+        }
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"transport_mode": "canonical_stream"},
+            {"embedding_transport_mode": "compact"},
+        ],
+    )
+    def test_invalid_transport_dependency_is_rejected(self, kwargs: dict[str, str]) -> None:
+        with pytest.raises(ValueError):
+            VdbExecutionParams(**kwargs)
 
 
 class TestResolveApiKeys:

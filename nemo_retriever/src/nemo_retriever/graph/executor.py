@@ -223,6 +223,75 @@ class _FinalProducerTelemetryAdapter:
         return produced
 
 
+class _NarrowEmbeddingTransportAdapter:
+    """Compact a reshape stage's output before Ray publishes it for embedding."""
+
+    def __init__(
+        self,
+        *,
+        operator_class: type,
+        operator_kwargs: dict[str, Any],
+        phase_telemetry: bool = False,
+    ) -> None:
+        self._operator = operator_class(**operator_kwargs)
+        self._phase_telemetry = bool(phase_telemetry)
+
+    def __call__(self, batch: Any) -> Any:
+        from nemo_retriever.common.modality.embedding_transport import project_embedding_transport
+
+        producer_started = time.monotonic()
+        produced = self._operator(batch)
+        producer_finished = time.monotonic()
+        if not self._phase_telemetry:
+            return project_embedding_transport(produced)
+
+        from nemo_retriever.common.modality.embedding_transport import embedding_transport_visible_bytes
+
+        wide_measurement_started = time.monotonic()
+        wide_pandas_deep_bytes = (
+            int(produced.memory_usage(index=True, deep=True).sum()) if isinstance(produced, pd.DataFrame) else None
+        )
+        wide_visible_bytes = embedding_transport_visible_bytes(produced)
+        wide_measurement_finished = time.monotonic()
+        compaction_started = wide_measurement_finished
+        compact = project_embedding_transport(produced)
+        compaction_finished = time.monotonic()
+        compact_measurement_started = compaction_finished
+        compact_pandas_deep_bytes = (
+            int(compact.memory_usage(index=True, deep=True).sum()) if isinstance(compact, pd.DataFrame) else None
+        )
+        compact_visible_bytes = embedding_transport_visible_bytes(compact)
+        compact_measurement_finished = time.monotonic()
+        print(
+            "NEMO_RETRIEVER_EMBEDDING_TRANSPORT "
+            + json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "mode": "posthoc_projection",
+                    "input_rows": len(batch),
+                    "output_rows": len(compact),
+                    "producer_seconds": producer_finished - producer_started,
+                    "wide_measurement_seconds": wide_measurement_finished - wide_measurement_started,
+                    "compaction_seconds": compaction_finished - compaction_started,
+                    "compact_measurement_seconds": compact_measurement_finished - compact_measurement_started,
+                    "adapter_seconds": compact_measurement_finished - producer_started,
+                    "wide_visible_bytes": wide_visible_bytes,
+                    "compact_visible_bytes": compact_visible_bytes,
+                    "wide_to_compact_visible_ratio": (
+                        wide_visible_bytes / compact_visible_bytes if compact_visible_bytes else None
+                    ),
+                    "wide_pandas_deep_bytes": wide_pandas_deep_bytes,
+                    "compact_pandas_deep_bytes": compact_pandas_deep_bytes,
+                    "wide_columns": list(produced.columns) if isinstance(produced, pd.DataFrame) else None,
+                    "compact_columns": list(compact.columns) if isinstance(compact, pd.DataFrame) else None,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return compact
+
+
 class _CanonicalVdbProducerAdapter:
     """Run the final producer and emit the versioned canonical VDB stream."""
 
@@ -734,6 +803,12 @@ class RayDataExecutor(AbstractExecutor):
             raise ValueError("A canonical VDB stream requires a producing operator before the sink")
         if canonical_stream:
             sink_operator.validate_canonical_stream()
+        embedding_transport_mode = str(kwargs.pop("embedding_transport_mode", "rich_records")).strip().lower()
+        if embedding_transport_mode not in {"rich_records", "compact"}:
+            raise ValueError("embedding_transport_mode must be 'rich_records' or 'compact'")
+        narrow_embedding_transport = embedding_transport_mode == "compact"
+        if narrow_embedding_transport and not canonical_stream:
+            raise ValueError("embedding_transport_mode='compact' requires vdb_transport_mode='canonical_stream'")
 
         dataset = self.build_dataset(
             data,
@@ -747,6 +822,7 @@ class RayDataExecutor(AbstractExecutor):
                 else None
             ),
             _final_producer_telemetry=phase_telemetry,
+            _narrow_embedding_transport=narrow_embedding_transport,
             **kwargs,
         )
 
@@ -900,6 +976,7 @@ class RayDataExecutor(AbstractExecutor):
         input_preserves_pandas_output = bool(kwargs.pop("_input_preserves_pandas_output", False))
         canonical_vdb_stream = kwargs.pop("_canonical_vdb_stream", None)
         final_producer_telemetry = bool(kwargs.pop("_final_producer_telemetry", False))
+        narrow_embedding_transport = bool(kwargs.pop("_narrow_embedding_transport", False))
         ray = ensure_local_ray_runtime(self._ray_address)
         import ray.data as rd
 
@@ -990,6 +1067,7 @@ class RayDataExecutor(AbstractExecutor):
             self._preflight_source_cpu_reservation = self._source_cpu_reservation
             self._preflight_cluster_resources = cluster
         preserve_pandas_output = input_preserves_pandas_output
+        narrow_embedding_transport_applied = False
         for node in nodes:
             overrides = dict(self._node_overrides.get(node.name, {}))
             target_num_rows_per_block = overrides.pop("target_num_rows_per_block", None)
@@ -1063,6 +1141,22 @@ class RayDataExecutor(AbstractExecutor):
                     "operator_kwargs": node.operator_kwargs,
                 }
 
+            if (
+                narrow_embedding_transport
+                and len(nodes) >= 2
+                and node is nodes[-2]
+                and bool(getattr(node.operator, "embedding_transport_boundary", False))
+            ):
+                reshape_operator_class = map_operator_class
+                reshape_constructor_kwargs = constructor_kwargs
+                map_operator_class = _NarrowEmbeddingTransportAdapter
+                constructor_kwargs = {
+                    "operator_class": reshape_operator_class,
+                    "operator_kwargs": reshape_constructor_kwargs,
+                    "phase_telemetry": final_producer_telemetry,
+                }
+                narrow_embedding_transport_applied = True
+
             if canonical_vdb_stream is not None and node is nodes[-1]:
                 producer_operator_class = map_operator_class
                 producer_constructor_kwargs = constructor_kwargs
@@ -1092,5 +1186,8 @@ class RayDataExecutor(AbstractExecutor):
                 fn_constructor_kwargs=constructor_kwargs,
                 **overrides,
             )
+
+        if narrow_embedding_transport and not narrow_embedding_transport_applied:
+            raise ValueError("Narrow embedding transport requires a content reshape stage before embedding.")
 
         return ds

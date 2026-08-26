@@ -19,12 +19,14 @@ from ray.data.extensions import TensorArray
 from nemo_retriever.graph.executor import (
     _ArrowPandasOperatorAdapter,
     _FinalProducerTelemetryAdapter,
+    _NarrowEmbeddingTransportAdapter,
     _preserves_pandas_output,
     _requires_stable_pandas_blocks,
     ray_dataset_to_pandas,
 )
 from nemo_retriever.graph.pipeline_graph import Graph
 from nemo_retriever.common.modality.content_transforms import collapse_content_to_page_rows, explode_content_to_rows
+from nemo_retriever.common.modality.embedding_transport import EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD
 from nemo_retriever.operators.abstract_operator import AbstractOperator
 from nemo_retriever.operators.extract.txt.ray_data import TextChunkCPUActor
 from nemo_retriever.operators.graph_ops.custom_operator import UDFOperator
@@ -55,6 +57,57 @@ def test_final_producer_telemetry_adapter_preserves_output_and_reports_phase(cap
     assert report["input_rows"] == report["output_rows"] == 2
     assert report["producer_seconds"] >= 0
     assert report["finished_at_monotonic_s"] >= report["started_at_monotonic_s"]
+
+
+def test_narrow_embedding_transport_adapter_reports_compaction(capsys) -> None:
+    batch = pd.DataFrame(
+        {
+            "text": ["page text"],
+            "page_image": [{"image_b64": "payload" * 100, "stored_image_uri": "s3://page.png"}],
+            "table": [[{"text": "table text"}]],
+        }
+    )
+
+    result = _NarrowEmbeddingTransportAdapter(
+        operator_class=_PassthroughOperator,
+        operator_kwargs={},
+        phase_telemetry=True,
+    )(batch)
+
+    assert "page_image" not in result.columns
+    assert result.iloc[0][EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD] == "s3://page.png"
+    prefix = "NEMO_RETRIEVER_EMBEDDING_TRANSPORT "
+    line = capsys.readouterr().out.strip()
+    assert line.startswith(prefix)
+    report = json.loads(line.removeprefix(prefix))
+    assert report["output_rows"] == 1
+    assert report["mode"] == "posthoc_projection"
+    assert report["producer_seconds"] >= 0
+    assert report["wide_measurement_seconds"] >= 0
+    assert report["compaction_seconds"] >= 0
+    assert report["compact_measurement_seconds"] >= 0
+    assert report["adapter_seconds"] >= report["producer_seconds"]
+    assert report["wide_visible_bytes"] > report["compact_visible_bytes"]
+    assert report["wide_to_compact_visible_ratio"] > 1
+
+
+def test_narrow_embedding_transport_adapter_skips_measurement_when_telemetry_is_disabled(
+    capsys, monkeypatch
+) -> None:
+    batch = pd.DataFrame({"text": ["page text"], "page_image": [{"image_b64": "payload" * 100}]})
+
+    def fail_measurement(_value: Any) -> int:
+        raise AssertionError("byte measurement must remain off on the production fast path")
+
+    monkeypatch.setattr(
+        "nemo_retriever.common.modality.embedding_transport.embedding_transport_visible_bytes",
+        fail_measurement,
+    )
+
+    result = _NarrowEmbeddingTransportAdapter(operator_class=_PassthroughOperator, operator_kwargs={})(batch)
+
+    assert "page_image" not in result.columns
+    assert capsys.readouterr().out == ""
 
 
 def _stored_image_table(page_count: int = 3) -> pa.Table:

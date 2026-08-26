@@ -28,6 +28,7 @@ from nemo_retriever.common.params import (
     HtmlChunkParams,
     StoreParams,
     TextChunkParams,
+    VdbExecutionParams,
     VdbUploadParams,
     VideoFrameParams,
     VideoFrameTextDedupParams,
@@ -40,7 +41,7 @@ from nemo_retriever.common.input_files import (
     resolve_input_files,
 )
 from nemo_retriever.models import resolve_embed_model
-from nemo_retriever.models.embed_model_spec import resolve_embed_model_revision
+from nemo_retriever.models.embed_model_spec import resolve_embed_model_revision, resolve_embed_model_spec
 
 IngestRunModeValue = Literal["inprocess", "batch"]
 IngestInputTypeValue = Literal["auto", "pdf", "doc", "txt", "html", "image", "audio", "video"]
@@ -207,6 +208,11 @@ class IngestStorageOptions:
     table_name: str = "nemo-retriever"
     overwrite: bool = True
     index_mode: IngestIndexModeValue = "dense"
+    vector_dim: int | None = None
+    result_mode: Literal["records", "write_receipt"] = "records"
+    transport_mode: Literal["compatibility", "canonical_stream"] = "compatibility"
+    embedding_transport_mode: Literal["rich_records", "compact"] = "rich_records"
+    phase_telemetry: bool = False
 
 
 @dataclass(frozen=True)
@@ -603,6 +609,17 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
     branches = plan_extraction_branches(build_input_manifest(document_list))
     _validate_profile_manifest(validated_profile, branches)
 
+    vdb_execution = VdbExecutionParams(
+        result_mode=storage.result_mode,
+        transport_mode=storage.transport_mode,
+        embedding_transport_mode=storage.embedding_transport_mode,
+        phase_telemetry=storage.phase_telemetry,
+    )
+    if not vdb_execution.is_default() and validated_run_mode != "batch":
+        raise ValueError("Non-default VDB execution modes require run_mode='batch'")
+    if not vdb_execution.is_default() and validated_index_mode == "sparse":
+        raise ValueError("Non-default VDB execution modes are not supported for sparse ingestion")
+
     extract_kwargs = profile_extract_defaults(validated_profile)
     extract_kwargs.update(
         {
@@ -679,7 +696,14 @@ def resolve_ingest_plan(request: IngestPlanRequest) -> ResolvedIngestPlan:
             vdb_upload_kwargs["vector_dim"] = None
     if embedding_model_revision is not None:
         vdb_upload_kwargs["embedding_model_revision"] = embedding_model_revision
-    vdb_params = VdbUploadParams(vdb_kwargs=vdb_upload_kwargs)
+    if storage.vector_dim is not None:
+        vdb_upload_kwargs["vector_dim"] = storage.vector_dim
+    elif vdb_execution.transport_mode == "canonical_stream" and embedding_model_name is not None:
+        if str(embed.embed_invoke_url or "").strip():
+            raise ValueError("Canonical VDB transport with a remote embedding endpoint requires storage.vector_dim")
+        model_spec = resolve_embed_model_spec(embedding_model_name, revision=embedding_model_revision)
+        vdb_upload_kwargs["vector_dim"] = model_spec.output_dimension
+    vdb_params = VdbUploadParams(vdb_kwargs=vdb_upload_kwargs, execution=vdb_execution)
     caption_params = build_caption_params(
         enabled=request.caption.enabled,
         caption_invoke_url=request.caption.caption_invoke_url,

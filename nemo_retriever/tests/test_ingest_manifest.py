@@ -26,7 +26,13 @@ from nemo_retriever.ingestor.manifest import (
     plan_extraction_branches,
     resolve_branch_extraction_inputs,
 )
-from nemo_retriever.common.params import ASRParams, EmbedParams, ExtractParams
+from nemo_retriever.common.params import (
+    ASRParams,
+    EmbedParams,
+    ExtractParams,
+    VdbExecutionParams,
+    VdbUploadParams,
+)
 
 
 def _resolve_plan(
@@ -598,7 +604,7 @@ def test_batch_branch_execution_uses_dataset_union(monkeypatch, tmp_path) -> Non
             return datasets.pop(0)
 
         def ingest(self, data: Any, **kwargs: Any) -> Any:
-            executor_calls.append({"method": "ingest", "data": data})
+            executor_calls.append({"method": "ingest", "data": data, "kwargs": kwargs})
             return pd.DataFrame({"done": [True]})
 
     monkeypatch.setattr(GraphIngestor, "_ensure_batch_runtime", lambda self: (None, FakeCluster()))
@@ -606,13 +612,34 @@ def test_batch_branch_execution_uses_dataset_union(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr("nemo_retriever.ingestor.branch_extraction.build_graph", lambda **_kwargs: Graph())
     monkeypatch.setattr("nemo_retriever.ingestor.branch_extraction.build_post_extract_graph", lambda **_kwargs: Graph())
 
-    result = GraphIngestor(run_mode="batch").files([str(pdf), str(image)]).extract().ingest()
+    result = (
+        GraphIngestor(run_mode="batch")
+        .files([str(pdf), str(image)])
+        .extract()
+        .vdb_upload(
+            VdbUploadParams(
+                execution=VdbExecutionParams(
+                    result_mode="write_receipt",
+                    transport_mode="canonical_stream",
+                    embedding_transport_mode="compact",
+                    phase_telemetry=True,
+                )
+            )
+        )
+        .ingest()
+    )
 
     assert [call["method"] for call in executor_calls] == ["build_dataset", "build_dataset", "ingest"]
     combined = executor_calls[2]["data"]
     assert isinstance(combined, _FakeDataset)
     assert len(combined.unioned) == 1
     assert combined.normalized_columns == ("path", "pdf_value", "image_value")
+    assert executor_calls[2]["kwargs"] == {
+        "vdb_result_mode": "write_receipt",
+        "vdb_transport_mode": "canonical_stream",
+        "embedding_transport_mode": "compact",
+        "vdb_phase_telemetry": True,
+    }
     assert result["done"].tolist() == [True]
 
 

@@ -19,6 +19,7 @@ from nemo_retriever.graph.ingestor_runtime import (
     build_post_extract_graph,
     default_concurrency_node_names,
     _image_embedding_requires_page_image,
+    vdb_execution_kwargs,
 )
 from nemo_retriever.ingestor.manifest import (
     ExtractionBranchPlan,
@@ -159,9 +160,12 @@ class ExtractionBranchExecutor:
         combined = normalized[0]
         for branch_ds in normalized[1:]:
             combined = combined.union(branch_ds)
-        return post_executor.ingest(combined)
+        return post_executor.ingest(combined, **vdb_execution_kwargs(self.vdb_upload_params))
 
     def _execute_inprocess(self) -> Any:
+        execution = getattr(self.vdb_upload_params, "execution", None)
+        if execution is not None and not execution.is_default():
+            raise ValueError("Non-default VDB execution modes require GraphIngestor(run_mode='batch')")
         frames = []
         for branch in self.branches:
             effective_extraction = self._resolve_branch(branch)

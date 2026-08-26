@@ -31,6 +31,8 @@ from nemo_retriever.common.params import (
     EmbedParams,
     ExtractParams,
     TextChunkParams,
+    VdbExecutionParams,
+    VdbUploadParams,
     VideoFrameTextDedupParams,
 )
 from nemo_retriever.common.input_files import INPUT_TYPE_EXTENSIONS
@@ -58,12 +60,33 @@ def test_post_extract_graph_uses_explicit_content_reshape_flag() -> None:
     graph = build_post_extract_graph(embed_params=EmbedParams(), reshape_content_before_embed=True)
 
     assert "ExplodeContentToRows" in _graph_node_names(graph)
+    reshape = next(
+        node.operator
+        for node in _graph_nodes(graph)
+        if getattr(node.operator, "name", None) == "ExplodeContentToRows"
+    )
+    assert reshape.embedding_transport_boundary is True
 
 
 def test_post_extract_graph_can_skip_content_reshape() -> None:
     graph = build_post_extract_graph(embed_params=EmbedParams(), reshape_content_before_embed=False)
 
     assert "ExplodeContentToRows" not in _graph_node_names(graph)
+
+
+def test_compact_embedding_transport_rejects_noncanonical_embedding_columns() -> None:
+    with pytest.raises(ValueError, match="canonical embedding columns"):
+        build_post_extract_graph(
+            embed_params=EmbedParams(output_column="custom_embedding"),
+            vdb_upload_params=VdbUploadParams(
+                execution=VdbExecutionParams(
+                    result_mode="write_receipt",
+                    transport_mode="canonical_stream",
+                    embedding_transport_mode="compact",
+                )
+            ),
+            reshape_content_before_embed=True,
+        )
 
 
 def test_text_build_graph_does_not_use_modal_content_reshape() -> None:

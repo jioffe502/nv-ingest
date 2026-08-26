@@ -712,6 +712,36 @@ class VdbSinkParams(_ParamsModel):
         return normalized
 
 
+class VdbExecutionParams(_ParamsModel):
+    """Ray execution contract for a terminal VDB upload."""
+
+    result_mode: Literal["records", "write_receipt"] = "records"
+    transport_mode: Literal["compatibility", "canonical_stream"] = "compatibility"
+    embedding_transport_mode: Literal["rich_records", "compact"] = "rich_records"
+    phase_telemetry: bool = False
+
+    @model_validator(mode="after")
+    def _validate_transport_dependencies(self) -> "VdbExecutionParams":
+        if self.transport_mode == "canonical_stream" and self.result_mode != "write_receipt":
+            raise ValueError("transport_mode='canonical_stream' requires result_mode='write_receipt'")
+        if self.embedding_transport_mode == "compact" and self.transport_mode != "canonical_stream":
+            raise ValueError("embedding_transport_mode='compact' requires transport_mode='canonical_stream'")
+        return self
+
+    def executor_kwargs(self) -> dict[str, Any]:
+        """Return the explicit argument names owned by ``RayDataExecutor``."""
+        return {
+            "vdb_result_mode": self.result_mode,
+            "vdb_transport_mode": self.transport_mode,
+            "embedding_transport_mode": self.embedding_transport_mode,
+            "vdb_phase_telemetry": self.phase_telemetry,
+        }
+
+    def is_default(self) -> bool:
+        """Return whether this policy preserves the legacy record result."""
+        return self == type(self)()
+
+
 class VdbUploadParams(_ParamsModel):
     """Post-graph vector DB upload configuration.
 
@@ -722,6 +752,7 @@ class VdbUploadParams(_ParamsModel):
     vdb_op: str = "lancedb"
     vdb_kwargs: dict[str, Any] = Field(default_factory=dict)
     sink: VdbSinkParams = Field(default_factory=VdbSinkParams)
+    execution: VdbExecutionParams = Field(default_factory=VdbExecutionParams)
     meta_dataframe: Optional[Any] = None
     """Path to csv/json/parquet or an in-memory :class:`pandas.DataFrame`."""
     meta_source_field: Optional[str] = None

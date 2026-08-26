@@ -70,6 +70,13 @@ emit the same schema without inferring it from another actor's batch. The
 terminal stream owner validates schema markers and makes stream-global empty or
 invalid-input decisions.
 
+For multimodal graphs, `embedding_transport_mode="compact"` adds an earlier
+producer boundary: the content reshape stage emits only the versioned fields
+needed by embedding and canonical VDB conversion. Unknown future extraction
+payloads are not forwarded implicitly. Errors from omitted payloads are
+consolidated into the transport diagnostics so admission remains fail-closed.
+The compact mode requires the canonical stream and write-receipt result modes.
+
 **In-process** execution (`InprocessExecutor`) does not use Ray Data; it already runs each operator on the **whole** `DataFrame`, so no repartition step is needed.
 
 ### Wiring ingestion today

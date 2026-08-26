@@ -249,6 +249,31 @@ diagnostics are validated by the stream owner before the write is finalized.
 Use receipt row counts and the canonical digest as correctness signals when
 comparing transport implementations.
 
+`GraphIngestor` exposes the same supported batch contract through
+`VdbUploadParams`. The compact embedding transport is allowlisted and
+versioned; it projects reshaped rows before Ray publishes the block while
+preserving canonical record content, extraction counts, image provenance, and
+structured errors.
+
+```python
+from nemo_retriever.common.params import VdbExecutionParams, VdbUploadParams
+
+
+ingestor.vdb_upload(
+    VdbUploadParams(
+        vdb_kwargs={"uri": "lancedb", "table_name": "chunks", "vector_dim": 2048},
+        execution=VdbExecutionParams(
+            result_mode="write_receipt",
+            transport_mode="canonical_stream",
+            embedding_transport_mode="compact",
+        ),
+    )
+)
+receipt = ingestor.ingest()
+```
+
+Non-default VDB execution modes require `GraphIngestor(run_mode="batch")`.
+
 ## Notes About Graph Shape
 
 The base `Graph` type supports multiple roots and fan-out.

@@ -25,6 +25,7 @@ from nemo_retriever.common.vdb.sink import VdbSinkPolicy
 from nemo_retriever.graph.executor import RayDataExecutor
 from nemo_retriever.graph.pipeline_graph import Graph
 from nemo_retriever.operators.abstract_operator import AbstractOperator
+from nemo_retriever.operators.graph_ops.custom_operator import UDFOperator
 from nemo_retriever.operators.vdb import IngestVdbOperator
 
 _GRAPH_SCHEMA = pa.schema(
@@ -343,9 +344,18 @@ def test_final_producer_emits_canonical_stream_and_returns_write_receipt(tmp_pat
     monkeypatch.setenv("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
     if ray.is_initialized():
         ray.shutdown()
-    ray.init(num_cpus=2, num_gpus=0, include_dashboard=False, log_to_driver=False)
+    ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, log_to_driver=False)
 
     try:
+        def _wide_reshape(data):
+            result = data.copy()
+            result["page_image"] = [
+                {"image_b64": "page-payload" * 100, "stored_image_uri": f"s3://pages/{row_id}.png"}
+                for row_id in result["page_number"]
+            ]
+            result["table"] = [[{"text": f"table-{row_id}"}] for row_id in result["page_number"]]
+            return result
+
         class _WideFinalProducer(AbstractOperator):
             PRESERVE_PANDAS_OUTPUT = True
 
@@ -362,6 +372,12 @@ def test_final_producer_emits_canonical_stream_and_returns_write_receipt(tmp_pat
 
         graph = (
             Graph()
+            >> UDFOperator(
+                _wide_reshape,
+                name="ArbitraryReshapeDisplayName",
+                preserve_pandas_output=True,
+                embedding_transport_boundary=True,
+            )
             >> _WideFinalProducer()
             >> IngestVdbOperator(
                 vdb_op="lancedb",
@@ -380,6 +396,7 @@ def test_final_producer_emits_canonical_stream_and_returns_write_receipt(tmp_pat
             dataset,
             vdb_result_mode="write_receipt",
             vdb_transport_mode="canonical_stream",
+            embedding_transport_mode="compact",
             vdb_phase_telemetry=True,
             vdb_sink_policy=VdbSinkPolicy(max_batch_bytes=4096, prefetch_batches=0),
         )
@@ -411,6 +428,7 @@ def test_final_producer_emits_canonical_stream_and_returns_write_receipt(tmp_pat
         compatibility_uri = tmp_path / "compatibility"
         compatibility_graph = (
             Graph()
+            >> UDFOperator(_wide_reshape, name="ExplodeContentToRows", preserve_pandas_output=True)
             >> _WideFinalProducer()
             >> IngestVdbOperator(
                 vdb_op="lancedb",
