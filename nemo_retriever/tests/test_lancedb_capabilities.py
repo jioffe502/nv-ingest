@@ -209,6 +209,16 @@ def test_detector_returns_sparse_for_fts_only_table(tmp_path) -> None:
     assert caps.retrieval_mode == "sparse"
 
 
+def test_fts_index_telemetry_failure_is_nonfatal() -> None:
+    class BrokenIndexTable:
+        def list_indices(self):
+            raise RuntimeError("transient index metadata failure")
+
+    backend = LanceDB.__new__(LanceDB)
+
+    assert backend._fts_unindexed_rows(BrokenIndexTable()) is None
+
+
 def test_sparse_query_does_not_call_embedding_graph(monkeypatch, tmp_path) -> None:
     uri = str(tmp_path / "db")
     _create_sparse_table(uri, "sparse")

@@ -659,7 +659,16 @@ class LanceDB(VDB):
 
     def _fts_unindexed_rows(self, table: Any) -> int | None:
         values: list[int] = []
-        for index in table.list_indices():
+        try:
+            indices = list(table.list_indices())
+        except Exception:
+            logger.debug(
+                "Unable to enumerate LanceDB indexes for %s",
+                getattr(self, "table_name", "<unknown>"),
+                exc_info=True,
+            )
+            return None
+        for index in indices:
             if not self._is_fts_index(index):
                 continue
             try:
