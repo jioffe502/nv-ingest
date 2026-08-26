@@ -1162,6 +1162,46 @@ class TestRayDataExecutor:
             <= 4
         )
 
+    @pytest.mark.parametrize("shared", [False, True])
+    def test_preflight_fills_gpu_stage_targets_before_cpu_only_throughput_extras(self, shared):
+        conversion = Node(CPUAdaptiveAddOperator(), name="conversion")
+        split = Node(CPUAdaptiveAddOperator(), name="split")
+        pdf_extract = Node(CPUAdaptiveAddOperator(), name="pdf_extract")
+        page_elements = Node(GPUAdaptiveAddOperator(), name="page_elements")
+        ocr = Node(GPUAdaptiveAddOperator(), name="ocr")
+        reshape = Node(CPUAdaptiveAddOperator(), name="reshape")
+        embed = Node(GPUAdaptiveAddOperator(), name="embed")
+        conversion >> split >> pdf_extract >> page_elements >> ocr >> reshape >> embed
+        graph = Graph()
+        graph.add_root(conversion)
+        executor = RayDataExecutor(
+            graph,
+            source_cpu_reservation=1,
+            node_overrides={
+                "pdf_extract": {"concurrency": 16, "num_cpus": 2},
+                "page_elements": {"concurrency": 3, "num_cpus": 1, "num_gpus": 0.1},
+                "ocr": {"concurrency": 3, "num_cpus": 1, "num_gpus": 0.1},
+                "embed": {"concurrency": 1, "num_cpus": 1, "num_gpus": 0.2},
+            },
+            auto_concurrency_nodes={"pdf_extract", "page_elements", "ocr", "embed"},
+        )
+
+        if shared:
+            from nemo_retriever.common.ray_resource_hueristics import ClusterResources
+
+            resources = Resources(cpu_count=32, gpu_count=1)
+            preflight_executors(
+                [executor],
+                ClusterResources(total_resources=resources, available_resources=resources),
+            )
+        else:
+            executor._preflight_resources(executor._linearize(graph), available_cpus=32, available_gpus=1)
+
+        assert executor._node_overrides["pdf_extract"]["concurrency"] == 10
+        assert executor._node_overrides["page_elements"]["concurrency"] == 3
+        assert executor._node_overrides["ocr"]["concurrency"] == 3
+        assert executor._node_overrides["embed"]["concurrency"] == 1
+
     def test_preflight_counts_implicit_gpu_operator_reservation(self):
         graph = Graph()
         graph.add_root(GPUAdaptiveAddOperator())
