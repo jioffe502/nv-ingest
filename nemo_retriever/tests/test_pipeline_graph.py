@@ -1327,6 +1327,47 @@ class TestRayDataExecutor:
         assert executor.last_vdb_operation_id
         assert any(executor.last_vdb_operation_id in note for note in getattr(exc_info.value, "__notes__", ()))
 
+    def test_canonical_vdb_stream_contract_is_validated_before_execution(self, tmp_path):
+        from nemo_retriever.operators.vdb import IngestVdbOperator
+
+        sink = IngestVdbOperator(
+            vdb_op="lancedb",
+            vdb_kwargs={
+                "uri": str(tmp_path),
+                "table_name": "chunks",
+                "vector_dim": 2,
+                "build_index": False,
+            },
+        )
+        graph = Graph() >> CPUAdaptiveAddOperator() >> sink
+
+        with pytest.raises(ValueError, match="vdb_result_mode must be 'records' or 'write_receipt'"):
+            RayDataExecutor(graph).ingest(object(), vdb_result_mode="summary")
+        with pytest.raises(ValueError, match="vdb_transport_mode must be 'compatibility' or 'canonical_stream'"):
+            RayDataExecutor(graph).ingest(object(), vdb_transport_mode="fused")
+        with pytest.raises(ValueError, match="requires vdb_result_mode='write_receipt'"):
+            RayDataExecutor(graph).ingest(object(), vdb_transport_mode="canonical_stream")
+
+    def test_canonical_vdb_stream_rejects_implicit_vector_schema(self, tmp_path):
+        from nemo_retriever.operators.vdb import IngestVdbOperator
+
+        graph = Graph() >> CPUAdaptiveAddOperator() >> IngestVdbOperator(
+            vdb_op="lancedb",
+            vdb_kwargs={
+                "uri": str(tmp_path),
+                "table_name": "chunks",
+                "vector_dim": None,
+                "build_index": False,
+            },
+        )
+
+        with pytest.raises(ValueError, match="require an explicit vector_dim"):
+            RayDataExecutor(graph).ingest(
+                object(),
+                vdb_result_mode="write_receipt",
+                vdb_transport_mode="canonical_stream",
+            )
+
     def test_preflight_counts_implicit_gpu_operator_reservation(self):
         graph = Graph()
         graph.add_root(GPUAdaptiveAddOperator())

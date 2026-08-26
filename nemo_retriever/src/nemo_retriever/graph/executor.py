@@ -6,35 +6,38 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import replace
+import json
+import logging
 import math
+import os
+import time
 import uuid
+from abc import ABC, abstractmethod
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+
 import pandas as pd
 
 if TYPE_CHECKING:
     import ray.data
 
-from nemo_retriever.operators.gpu_operator import GPUOperator
-from nemo_retriever.graph.pipeline_graph import Graph, Node
-from nemo_retriever.graph.operator_resolution import resolve_graph
-from nemo_retriever.common.ray_resource_hueristics import ClusterResources
+from nemo_retriever.common import ray_resource_hueristics as _rrh
 from nemo_retriever.common.input_files import (
     _is_explicit_glob_path,
     expand_input_file_patterns,
     raise_input_path_not_found,
 )
-from nemo_retriever.common.ray_runtime import ensure_local_ray_runtime
-from nemo_retriever.common import ray_resource_hueristics as _rrh
 from nemo_retriever.common.ray_resource_hueristics import (
-    gather_cluster_resources,
     NEMOTRON_PARSE_BATCH_SIZE,
-    VLLM_GPUS_PER_ACTOR,
     OCR_GPUS_PER_ACTOR,
+    VLLM_GPUS_PER_ACTOR,
+    ClusterResources,
+    gather_cluster_resources,
 )
-
-import logging
+from nemo_retriever.common.ray_runtime import ensure_local_ray_runtime
+from nemo_retriever.graph.operator_resolution import resolve_graph
+from nemo_retriever.graph.pipeline_graph import Graph, Node
+from nemo_retriever.operators.gpu_operator import GPUOperator
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +176,126 @@ class _ArrowPandasOperatorAdapter:
 
     def __call__(self, table: Any) -> Any:
         return self._operator(arrow_table_to_pandas(table))
+
+
+def _emit_final_producer_telemetry(
+    *, operator: Any, batch: Any, produced: Any, started: float, finished: float
+) -> None:
+    """Emit one comparable final-producer timing record from a Ray worker."""
+
+    print(
+        "NEMO_RETRIEVER_FINAL_PRODUCER "
+        + json.dumps(
+            {
+                "pid": os.getpid(),
+                "producer": type(operator).__name__,
+                "input_type": type(batch).__name__,
+                "input_rows": len(batch),
+                "output_type": type(produced).__name__,
+                "output_rows": len(produced),
+                "started_at_monotonic_s": started,
+                "finished_at_monotonic_s": finished,
+                "producer_seconds": finished - started,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
+class _FinalProducerTelemetryAdapter:
+    """Time the final producer without changing its input or output contract."""
+
+    def __init__(self, *, operator_class: type, operator_kwargs: dict[str, Any]) -> None:
+        self._operator = operator_class(**operator_kwargs)
+
+    def __call__(self, batch: Any) -> Any:
+        started = time.monotonic()
+        produced = self._operator(batch)
+        finished = time.monotonic()
+        _emit_final_producer_telemetry(
+            operator=self._operator,
+            batch=batch,
+            produced=produced,
+            started=started,
+            finished=finished,
+        )
+        return produced
+
+
+class _CanonicalVdbProducerAdapter:
+    """Run the final producer and emit the versioned canonical VDB stream."""
+
+    def __init__(
+        self,
+        *,
+        operator_class: type,
+        operator_kwargs: dict[str, Any],
+        sink_operator_kwargs: dict[str, Any],
+        max_batch_bytes: int,
+        phase_telemetry: bool = False,
+    ) -> None:
+        from nemo_retriever.operators.vdb import IngestVdbOperator
+
+        self._operator = operator_class(**operator_kwargs)
+        self._sink = IngestVdbOperator(**sink_operator_kwargs)
+        self._max_batch_bytes = int(max_batch_bytes)
+        self._phase_telemetry = bool(phase_telemetry)
+
+    def __call__(self, batch: Any) -> Any:
+        producer_started = time.monotonic()
+        produced = self._operator(batch)
+        producer_finished = time.monotonic()
+        if self._phase_telemetry:
+            _emit_final_producer_telemetry(
+                operator=self._operator,
+                batch=batch,
+                produced=produced,
+                started=producer_started,
+                finished=producer_finished,
+            )
+        canonical, report = self._sink.project_canonical_stream_batch(
+            produced,
+            max_batch_bytes=self._max_batch_bytes,
+        )
+        retained_ratio = (
+            report.input_retained_bytes / report.output_retained_bytes
+            if report.output_retained_bytes
+            else None
+        )
+        if self._phase_telemetry:
+            print(
+                "NEMO_RETRIEVER_CANONICAL_VDB_PROJECTION "
+                + json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "producer": type(self._operator).__name__,
+                        "producer_output_type": type(produced).__name__,
+                        "transitions": [
+                            f"{type(produced).__name__}->canonical_python_records",
+                            "canonical_python_records->canonical_arrow",
+                        ],
+                        "wide_rows": report.input_rows,
+                        "wide_logical_bytes": report.input_logical_bytes,
+                        "wide_retained_bytes": report.input_retained_bytes,
+                        "wide_unique_buffer_bytes": report.input_unique_buffer_bytes,
+                        "wide_unique_buffers": report.input_unique_buffers,
+                        "wide_unique_buffer_keys": report.input_unique_buffer_keys,
+                        "emitted_rows": report.output_rows,
+                        "emitted_logical_bytes": report.output_logical_bytes,
+                        "emitted_retained_bytes": report.output_retained_bytes,
+                        "emitted_unique_buffer_bytes": report.output_unique_buffer_bytes,
+                        "emitted_unique_buffers": report.output_unique_buffers,
+                        "emitted_unique_buffer_keys": report.output_unique_buffer_keys,
+                        "wide_to_canonical_retained_ratio": retained_ratio,
+                        "canonical_projection_seconds": report.projection_seconds,
+                        "emitted_at_monotonic_s": time.monotonic(),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        return canonical
 
 
 def _make_arrow_pandas_operator_adapter(operator_class: type) -> type[_ArrowPandasOperatorAdapter]:
@@ -595,10 +718,35 @@ class RayDataExecutor(AbstractExecutor):
         operation_id = str(kwargs.pop("vdb_operation_id", "") or sink_operator.operation_id or uuid.uuid4())
         self.last_vdb_operation_id = operation_id
         has_downstream_nodes = sink_index + 1 < len(nodes)
+        result_mode = str(kwargs.pop("vdb_result_mode", "records")).strip().lower()
+        if result_mode not in {"records", "write_receipt"}:
+            raise ValueError("vdb_result_mode must be 'records' or 'write_receipt'")
+        transport_mode = str(kwargs.pop("vdb_transport_mode", "compatibility")).strip().lower()
+        if transport_mode not in {"compatibility", "canonical_stream"}:
+            raise ValueError("vdb_transport_mode must be 'compatibility' or 'canonical_stream'")
+        phase_telemetry = bool(kwargs.pop("vdb_phase_telemetry", False))
+        canonical_stream = transport_mode == "canonical_stream"
+        if result_mode == "write_receipt" and has_downstream_nodes:
+            raise ValueError("vdb_result_mode='write_receipt' requires the bounded VDB sink to be terminal")
+        if canonical_stream and result_mode != "write_receipt":
+            raise ValueError("vdb_transport_mode='canonical_stream' requires vdb_result_mode='write_receipt'")
+        if canonical_stream and sink_index == 0:
+            raise ValueError("A canonical VDB stream requires a producing operator before the sink")
+        if canonical_stream:
+            sink_operator.validate_canonical_stream()
 
         dataset = self.build_dataset(
             data,
             _stop_before_bounded_vdb_sink=True,
+            _canonical_vdb_stream=(
+                {
+                    "sink_operator_kwargs": sink_operator.get_constructor_kwargs(),
+                    "max_batch_bytes": int(policy.max_batch_bytes),
+                }
+                if canonical_stream
+                else None
+            ),
+            _final_producer_telemetry=phase_telemetry,
             **kwargs,
         )
 
@@ -612,22 +760,78 @@ class RayDataExecutor(AbstractExecutor):
         )
 
         def sink_batches() -> Any:
-            for block in batch_iterator:
-                # Tee the public result while the sink consumes the one lazy
-                # upstream execution. Post-sink effects are rebuilt from this
-                # required result only after the sink finalizes; they must not
-                # force a corpus-wide Ray materialization before the sink.
-                terminal_frames.append(arrow_table_to_pandas(block))
+            block_index = 0
+            previous_received_at: float | None = None
+            while True:
+                request_at = time.monotonic()
+                try:
+                    block = next(batch_iterator)
+                except StopIteration:
+                    if phase_telemetry:
+                        exhausted_at = time.monotonic()
+                        print(
+                            "NEMO_RETRIEVER_VDB_PULL "
+                            + json.dumps(
+                                {
+                                    "block_index": block_index,
+                                    "event": "end_of_stream",
+                                    "requested_at_monotonic_s": request_at,
+                                    "received_at_monotonic_s": exhausted_at,
+                                    "ray_wait_seconds": exhausted_at - request_at,
+                                    "consumer_seconds_since_previous_receive": (
+                                        request_at - previous_received_at if previous_received_at is not None else None
+                                    ),
+                                },
+                                sort_keys=True,
+                            ),
+                            flush=True,
+                        )
+                    break
+                received_at = time.monotonic()
+                if phase_telemetry:
+                    print(
+                        "NEMO_RETRIEVER_VDB_PULL "
+                        + json.dumps(
+                            {
+                                "block_index": block_index,
+                                "event": "block",
+                                "block_type": type(block).__name__,
+                                "rows": len(block),
+                                "requested_at_monotonic_s": request_at,
+                                "received_at_monotonic_s": received_at,
+                                "ray_wait_seconds": received_at - request_at,
+                                "consumer_seconds_since_previous_receive": (
+                                    request_at - previous_received_at if previous_received_at is not None else None
+                                ),
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                previous_received_at = received_at
+                block_index += 1
+                # The compatibility mode tees the public result while the sink
+                # consumes the one lazy upstream execution. Write-receipt mode
+                # leaves the producer block owned only by the sink.
+                if result_mode == "records":
+                    terminal_frames.append(arrow_table_to_pandas(block))
                 # Keep the sink side Arrow-native when Ray produced Arrow.
                 # The separate terminal frame preserves the pandas API result.
                 yield block
 
         try:
-            self.last_vdb_write_report = nodes[sink_index].operator.consume_batches(
-                sink_batches(),
-                operation_id=operation_id,
-                policy=policy,
+            consume = (
+                nodes[sink_index].operator.consume_canonical_stream
+                if canonical_stream
+                else nodes[sink_index].operator.consume_batches
             )
+            self.last_vdb_write_report = consume(sink_batches(), operation_id=operation_id, policy=policy)
+            if phase_telemetry:
+                print(
+                    "NEMO_RETRIEVER_VDB_WRITE_REPORT "
+                    + json.dumps(asdict(self.last_vdb_write_report), sort_keys=True),
+                    flush=True,
+                )
         except Exception as exc:
             exc.add_note(f"VDB operation_id: {operation_id}")
             raise
@@ -643,6 +847,12 @@ class RayDataExecutor(AbstractExecutor):
                 terminal_result_bytes=terminal_bytes,
             )
             return frame
+
+        if result_mode == "write_receipt":
+            from nemo_retriever.common.vdb.sink import VdbWriteReceipt
+
+            receipt = VdbWriteReceipt.from_report(self.last_vdb_write_report)
+            return record_terminal_result(pd.DataFrame([asdict(receipt)]))
 
         if has_downstream_nodes:
             import ray.data as rd
@@ -688,6 +898,8 @@ class RayDataExecutor(AbstractExecutor):
         stop_before_sink = bool(kwargs.pop("_stop_before_bounded_vdb_sink", False))
         start_after_sink = bool(kwargs.pop("_start_after_bounded_vdb_sink", False))
         input_preserves_pandas_output = bool(kwargs.pop("_input_preserves_pandas_output", False))
+        canonical_vdb_stream = kwargs.pop("_canonical_vdb_stream", None)
+        final_producer_telemetry = bool(kwargs.pop("_final_producer_telemetry", False))
         ray = ensure_local_ray_runtime(self._ray_address)
         import ray.data as rd
 
@@ -849,6 +1061,26 @@ class RayDataExecutor(AbstractExecutor):
                 constructor_kwargs = {
                     "operator_class": node.operator_class,
                     "operator_kwargs": node.operator_kwargs,
+                }
+
+            if canonical_vdb_stream is not None and node is nodes[-1]:
+                producer_operator_class = map_operator_class
+                producer_constructor_kwargs = constructor_kwargs
+                map_operator_class = _CanonicalVdbProducerAdapter
+                constructor_kwargs = {
+                    "operator_class": producer_operator_class,
+                    "operator_kwargs": producer_constructor_kwargs,
+                    "sink_operator_kwargs": canonical_vdb_stream["sink_operator_kwargs"],
+                    "max_batch_bytes": canonical_vdb_stream["max_batch_bytes"],
+                    "phase_telemetry": final_producer_telemetry,
+                }
+            elif final_producer_telemetry and node is nodes[-1]:
+                producer_operator_class = map_operator_class
+                producer_constructor_kwargs = constructor_kwargs
+                map_operator_class = _FinalProducerTelemetryAdapter
+                constructor_kwargs = {
+                    "operator_class": producer_operator_class,
+                    "operator_kwargs": producer_constructor_kwargs,
                 }
 
             ds = ds.map_batches(

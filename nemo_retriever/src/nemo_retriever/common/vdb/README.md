@@ -44,12 +44,31 @@ Flow (see `operators/vdb.py` and `common/vdb/records.py`):
 
 Graph ingestion with `run_mode=batch` uses **`RayDataExecutor`** (`nemo_retriever/graph/executor.py`), which walks the linear graph and, for each node, appends a Ray Data **`map_batches`** stage.
 
-`IngestVdbOperator` declares **`REQUIRES_GLOBAL_BATCH = True`**. When the executor sees that flag on a node’s operator class it:
+For a LanceDB backend, `IngestVdbOperator` exposes a bounded sink lifecycle.
+The executor stops the lazy graph before that sink and pulls native Ray blocks
+through one coordinator-owned iterator. The coordinator projects byte-bounded
+Arrow batches, performs one logical LanceDB mutation, validates the committed
+table, and then builds the configured indexes. It does not repartition the
+complete corpus into one Ray block.
 
-1. **Repartitions the dataset immediately before that stage** so the upstream `Dataset` is coalesced for this operator — by default **`ds.repartition(num_blocks=1)`**, i.e. a **single Ray Data block** holding **all rows** (the same pattern used for other global operators such as `AudioVisualFuser` and `VideoFrameTextDedup`). If the class instead defines **`GLOBAL_BATCH_GROUP_KEYS`** and **`concurrency > 1`**, the executor may repartition by those keys with multiple blocks; `IngestVdbOperator` does **not** use that path, so it always gets **one block**.
-2. Sets **`batch_size=None`** for that `map_batches` call so Ray passes the **entire block** as **one pandas batch** to the operator.
+The iterator uses `VdbSinkPolicy.prefetch_batches` only for consumer read-ahead.
+That setting does not impose a global byte limit on upstream Ray operators.
+`VdbSinkPolicy.max_batch_bytes` bounds each canonical Arrow batch that crosses
+into LanceDB.
 
-Together, repartition + full batch mean **`process()`** receives **every row at once**, **`to_client_vdb_records`** builds one combined batch list, and **`VDB.run(records)`** runs **once** over the full ingest output — matching the historical “post-graph, single upload” behavior while keeping upload **inside** the graph.
+The executor preserves full graph records as its return value by default. Set
+`vdb_result_mode="write_receipt"` when a terminal sink caller needs only
+operation identity, source, persisted, and rejected row counts, structured
+rejection diagnostics, the canonical digest, and LanceDB versions. This avoids
+the separate pandas result materialization.
+
+Set `vdb_transport_mode="canonical_stream"` together with write-receipt mode to
+project the stored schema inside the final producing actor. Ray then publishes
+the narrow canonical Arrow block instead of the producer's wide graph record.
+This mode requires an explicit `vector_dim`; every distributed producer must
+emit the same schema without inferring it from another actor's batch. The
+terminal stream owner validates schema markers and makes stream-global empty or
+invalid-input decisions.
 
 **In-process** execution (`InprocessExecutor`) does not use Ray Data; it already runs each operator on the **whole** `DataFrame`, so no repartition step is needed.
 

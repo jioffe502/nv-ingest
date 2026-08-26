@@ -21,7 +21,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -35,10 +35,15 @@ from nemo_retriever.common.vdb.sink_operation import (
 
 _CREATE_OPERATION_KEY = b"nemo_retriever.sink_create_operation_sha256"
 _CREATE_REQUEST_KEY = b"nemo_retriever.sink_create_request_sha256"
+_CANONICAL_BATCH_KEY = b"nemo_retriever.canonical_vdb_batch"
+_CANONICAL_BATCH_VERSION = b"1"
+_CANONICAL_CONVERSION_KEY = b"nemo_retriever.canonical_vdb_conversion"
 _MAX_PENDING_CANONICAL_ROWS = 256
 _TIMING_PHASES = (
     "prepare",
     "write",
+    "reader_production",
+    "lance_owned_write",
     "time_to_data_commit",
     "validate",
     "vector_index",
@@ -74,10 +79,19 @@ class VdbWriteReport:
     configured_prefetch_batches: int
     input_batches: int
     input_rows: int
+    source_rows: int
+    rejected_rows: int
+    upstream_error_count: int
+    upstream_error_fields: dict[str, int]
+    rejection_reasons: dict[str, int]
     input_bytes: int
+    input_logical_bytes: int
+    input_unique_buffer_bytes: int
+    input_unique_buffers: int
     max_input_batch_bytes: int
     output_batches: int
     rows_written: int
+    canonical_digest: str
     logical_bytes: int
     max_batch_bytes: int
     max_pending_rows: int
@@ -95,12 +109,66 @@ class VdbWriteReport:
     terminal_result_bytes: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class VdbWriteReceipt:
+    """Small, stable result for callers that do not need graph records."""
+
+    operation_id: str
+    outcome: str
+    source_rows: int
+    rows_written: int
+    rejected_rows: int
+    upstream_error_count: int
+    upstream_error_fields: dict[str, int]
+    rejection_reasons: dict[str, int]
+    canonical_digest: str
+    data_version: int | None
+    final_version: int | None
+
+    @classmethod
+    def from_report(cls, report: VdbWriteReport) -> VdbWriteReceipt:
+        """Select durable write identity and row coverage from a report."""
+
+        return cls(
+            operation_id=report.operation_id,
+            outcome=report.outcome,
+            source_rows=report.source_rows,
+            rows_written=report.rows_written,
+            rejected_rows=report.rejected_rows,
+            upstream_error_count=report.upstream_error_count,
+            upstream_error_fields=dict(report.upstream_error_fields),
+            rejection_reasons=dict(report.rejection_reasons),
+            canonical_digest=report.canonical_digest,
+            data_version=report.data_version,
+            final_version=report.final_version,
+        )
+
+
 class OversizedVdbRowError(ValueError):
     """One canonical stored row cannot fit in the configured Arrow budget."""
 
 
 class VdbWriteNotFinalized(RuntimeError):
     """A reader reached a table whose coordinated sink lifecycle is incomplete."""
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalVdbProjectionReport:
+    """Per-producing-call measurements for a canonical VDB stream."""
+
+    input_rows: int
+    input_logical_bytes: int
+    input_retained_bytes: int
+    input_unique_buffer_bytes: int
+    input_unique_buffers: int
+    input_unique_buffer_keys: tuple[tuple[int, int], ...]
+    output_rows: int
+    output_logical_bytes: int
+    output_retained_bytes: int
+    output_unique_buffer_bytes: int
+    output_unique_buffers: int
+    output_unique_buffer_keys: tuple[tuple[int, int], ...]
+    projection_seconds: float
 
 
 def assert_lancedb_table_ready(table: Any) -> None:
@@ -143,6 +211,9 @@ class _StreamStats:
     input_batches: int = 0
     input_rows: int = 0
     input_bytes: int = 0
+    input_logical_bytes: int = 0
+    input_unique_buffer_bytes: int = 0
+    input_unique_buffers: int = 0
     max_input_batch_bytes: int = 0
     client_records: int = 0
     output_batches: int = 0
@@ -153,6 +224,10 @@ class _StreamStats:
     canonical_hash_sum: int = 0
     canonical_hash_xor: int = 0
     vector_dim: int | None = None
+    conversion_input_rows: int = 0
+    conversion_upstream_error_count: int = 0
+    conversion_upstream_error_fields: Counter[str] = field(default_factory=Counter)
+    conversion_rejection_reasons: Counter[str] = field(default_factory=Counter)
 
     @property
     def digest(self) -> str:
@@ -412,16 +487,39 @@ def _iter_rows(batch: Any) -> Iterator[dict[str, Any]]:
             yield dict(row)
 
 
-def _input_batch_bytes(batch: Any) -> int:
-    """Measure the retained bytes of one incoming Ray-native batch."""
+def _arrow_buffer_keys(batch: pa.Table | pa.RecordBatch) -> tuple[tuple[int, int], ...]:
+    """Return sorted address-and-size identities for visible Arrow buffers."""
+
+    unique: set[tuple[int, int]] = set()
+    for column in batch.columns:
+        arrays = column.chunks if isinstance(column, pa.ChunkedArray) else (column,)
+        for array in arrays:
+            for buffer in array.buffers():
+                if buffer is None:
+                    continue
+                unique.add((int(buffer.address), int(buffer.size)))
+    return tuple(sorted(unique))
+
+
+def _arrow_unique_buffers(batch: pa.Table | pa.RecordBatch) -> tuple[int, int]:
+    """Return bytes and count after de-duplicating visible Arrow buffers."""
+
+    keys = _arrow_buffer_keys(batch)
+    return sum(size for _address, size in keys), len(keys)
+
+
+def _batch_memory_metrics(batch: Any) -> tuple[int, int, int, int]:
+    """Return retained, logical, unique-buffer bytes, and unique-buffer count."""
 
     if isinstance(batch, (pa.Table, pa.RecordBatch)):
-        return int(batch.get_total_buffer_size())
+        unique_bytes, unique_count = _arrow_unique_buffers(batch)
+        return int(batch.get_total_buffer_size()), int(batch.nbytes), unique_bytes, unique_count
     memory_usage = getattr(batch, "memory_usage", None)
     if callable(memory_usage):
         usage = memory_usage(index=True, deep=True)
-        return int(usage.sum())
-    return 0
+        logical_bytes = int(usage.sum())
+        return logical_bytes, logical_bytes, 0, 0
+    return 0, 0, 0, 0
 
 
 def _empty_conversion_error(
@@ -460,6 +558,7 @@ def _canonical_rows(
     sidecar_spec: dict[str, Any] | None,
     sidecar_lookup: dict[str, dict[str, Any]] | None,
     stats: _StreamStats,
+    reject_empty_operation: bool = True,
 ) -> Iterator[dict[str, Any]]:
     """Project graph batches to the exact rows used by the legacy backend."""
 
@@ -470,7 +569,6 @@ def _canonical_rows(
         _to_service_lancedb_rows,
     )
     from nemo_retriever.common.vdb.records import (
-        VdbUploadError,
         _client_record_from_graph_row,
         _row_has_uploadable_content_without_embedding,
         _stage_error_field,
@@ -479,14 +577,15 @@ def _canonical_rows(
         apply_sidecar_metadata_to_client_batches,
     )
 
-    deferred_error: VdbUploadError | None = None
     for batch in batches:
         stats.input_batches += 1
-        input_bytes = _input_batch_bytes(batch)
+        input_bytes, logical_bytes, unique_buffer_bytes, unique_buffers = _batch_memory_metrics(batch)
         stats.input_bytes += input_bytes
+        stats.input_logical_bytes += logical_bytes
+        stats.input_unique_buffer_bytes += unique_buffer_bytes
+        stats.input_unique_buffers += unique_buffers
         stats.max_input_batch_bytes = max(stats.max_input_batch_bytes, input_bytes)
         batch_rows = 0
-        batch_client_records = 0
         upstream_error_fields: Counter[str] = Counter()
         upstream_error_count = 0
         rejection_reasons: Counter[str] = Counter()
@@ -526,7 +625,6 @@ def _canonical_rows(
             record_iter = converted_records()
 
         for record in record_iter:
-            batch_client_records += 1
             stats.client_records += 1
             records = [[record]]
             if sidecar_spec is not None and sidecar_lookup is not None:
@@ -547,18 +645,20 @@ def _canonical_rows(
                     canonical = _to_service_lancedb_rows(canonical)
             yield from canonical
 
-        if batch_rows and batch_client_records == 0 and deferred_error is None:
-            deferred_error = _empty_conversion_error(
-                rows=batch_rows,
-                upstream_error_fields=upstream_error_fields,
-                upstream_error_count=upstream_error_count,
-                rejection_reasons=rejection_reasons,
-            )
+        stats.conversion_input_rows += batch_rows
+        stats.conversion_upstream_error_count += upstream_error_count
+        stats.conversion_upstream_error_fields.update(upstream_error_fields)
+        stats.conversion_rejection_reasons.update(rejection_reasons)
 
     # Preserve the global conversion invariant: invalid partitions do not
     # fail an operation that produced uploadable rows elsewhere.
-    if stats.client_records == 0 and deferred_error is not None:
-        raise deferred_error
+    if reject_empty_operation and stats.client_records == 0 and stats.conversion_input_rows:
+        raise _empty_conversion_error(
+            rows=stats.conversion_input_rows,
+            upstream_error_fields=stats.conversion_upstream_error_fields,
+            upstream_error_count=stats.conversion_upstream_error_count,
+            rejection_reasons=stats.conversion_rejection_reasons,
+        )
 
 
 def _infer_vector_dim_with_spooled_prefix(
@@ -685,17 +785,11 @@ def _apply_deferred_bad_vector_policy(
         if vdb.on_bad_vectors == "drop":
             continue
         if vdb.on_bad_vectors == "fill":
-            # The Python-row writer fills missing width element-by-element;
-            # preserve the valid prefix and only fill missing or NaN entries.
-            if vector_values is None:
-                repaired_vector = [float(vdb.fill_value)] * vector_dim
-            else:
-                repaired_vector = [
-                    (float(vdb.fill_value) if value is not None and math.isnan(value) else value)
-                    for value in normalized_vector
-                ]
-                repaired_vector.extend([float(vdb.fill_value)] * (vector_dim - len(repaired_vector)))
-            yield {**row, "vector": repaired_vector}
+            # LanceDB 0.34 replaces the complete vector when its width is
+            # wrong or any element is NaN. Preserve that supported runtime
+            # contract instead of retaining a prefix that legacy ingestion
+            # discards.
+            yield {**row, "vector": [float(vdb.fill_value)] * vector_dim}
             continue
         if vdb.on_bad_vectors == "null":
             yield {**row, "vector": None}
@@ -769,6 +863,175 @@ def _schema_for_stream(vdb: Any, *, vector_dim: int | None) -> pa.Schema:
         embedding_model_name=vdb.embedding_model_name,
         embedding_model_revision=vdb.embedding_model_revision,
     )
+
+
+def project_graph_batch_to_canonical_vdb(
+    batch: Any,
+    *,
+    vdb: Any,
+    max_batch_bytes: int,
+    sidecar_spec: dict[str, Any] | None = None,
+    sidecar_lookup: dict[str, dict[str, Any]] | None = None,
+) -> tuple[pa.Table, CanonicalVdbProjectionReport]:
+    """Project one producer result before Ray publishes its output block.
+
+    The stream reuses the bounded sink's graph-row conversion and bad-vector
+    policy so producer placement changes where conversion happens, not what is
+    stored.
+    """
+
+    started = time.perf_counter()
+    stats = _StreamStats(vector_dim=vdb.vector_dim)
+    canonical_rows = _canonical_rows(
+        [batch],
+        vdb=vdb,
+        sidecar_spec=sidecar_spec,
+        sidecar_lookup=sidecar_lookup,
+        stats=stats,
+        reject_empty_operation=False,
+    )
+    canonical_row_stream: Iterator[dict[str, Any]] = iter(canonical_rows)
+    if stats.vector_dim is None and not vdb.sparse:
+        stats.vector_dim, canonical_row_stream = _infer_vector_dim_with_spooled_prefix(
+            canonical_row_stream,
+            vdb=vdb,
+        )
+
+    policy_rows = _apply_deferred_bad_vector_policy(
+        canonical_row_stream,
+        vdb=vdb,
+        vector_dim=int(stats.vector_dim or 0),
+    )
+    schema = _schema_for_stream(vdb, vector_dim=stats.vector_dim)
+    projected_batches = list(
+        _checked_batches(
+            policy_rows,
+            schema=schema,
+            max_batch_bytes=int(max_batch_bytes),
+            stats=stats,
+        )
+    )
+    table = pa.Table.from_batches(projected_batches, schema=schema)
+    metadata = dict(table.schema.metadata or {})
+    metadata[_CANONICAL_BATCH_KEY] = _CANONICAL_BATCH_VERSION
+    metadata[_CANONICAL_CONVERSION_KEY] = json.dumps(
+        {
+            "input_rows": stats.conversion_input_rows,
+            "rejection_reasons": dict(stats.conversion_rejection_reasons),
+            "upstream_error_count": stats.conversion_upstream_error_count,
+            "upstream_error_fields": dict(stats.conversion_upstream_error_fields),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    table = table.replace_schema_metadata(metadata)
+
+    output_retained, output_logical, output_unique_bytes, output_unique_buffers = _batch_memory_metrics(table)
+    input_buffer_keys = _arrow_buffer_keys(batch) if isinstance(batch, (pa.Table, pa.RecordBatch)) else ()
+    output_buffer_keys = _arrow_buffer_keys(table)
+    return table, CanonicalVdbProjectionReport(
+        input_rows=stats.input_rows,
+        input_logical_bytes=stats.input_logical_bytes,
+        input_retained_bytes=stats.input_bytes,
+        input_unique_buffer_bytes=stats.input_unique_buffer_bytes,
+        input_unique_buffers=stats.input_unique_buffers,
+        input_unique_buffer_keys=input_buffer_keys,
+        output_rows=stats.rows_written,
+        output_logical_bytes=output_logical,
+        output_retained_bytes=output_retained,
+        output_unique_buffer_bytes=output_unique_bytes,
+        output_unique_buffers=output_unique_buffers,
+        output_unique_buffer_keys=output_buffer_keys,
+        projection_seconds=time.perf_counter() - started,
+    )
+
+
+def _iter_canonical_vdb_batches(
+    batches: Iterable[Any],
+    *,
+    vdb: Any,
+    max_batch_bytes: int,
+    stats: _StreamStats,
+) -> Iterator[pa.RecordBatch]:
+    """Validate and account producer-owned canonical batches without Python rows."""
+
+    expected_schema: pa.Schema | None = None
+    for block in batches:
+        if not isinstance(block, (pa.Table, pa.RecordBatch)):
+            raise TypeError(
+                "Canonical VDB stream input must remain Arrow-native; "
+                f"received {type(block).__name__}."
+            )
+        metadata = dict(block.schema.metadata or {})
+        if metadata.pop(_CANONICAL_BATCH_KEY, None) != _CANONICAL_BATCH_VERSION:
+            raise ValueError("Canonical VDB stream input is missing its schema marker.")
+        conversion_payload = metadata.pop(_CANONICAL_CONVERSION_KEY, None)
+        if conversion_payload is not None:
+            try:
+                conversion = json.loads(conversion_payload.decode("utf-8"))
+                stats.conversion_input_rows += int(conversion.get("input_rows", 0))
+                stats.conversion_upstream_error_count += int(conversion.get("upstream_error_count", 0))
+                stats.conversion_upstream_error_fields.update(conversion.get("upstream_error_fields") or {})
+                stats.conversion_rejection_reasons.update(conversion.get("rejection_reasons") or {})
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError("Canonical VDB stream input has invalid conversion diagnostics.") from exc
+        block_schema = block.schema.with_metadata(metadata or None)
+        try:
+            vector_field = block_schema.field("vector")
+        except KeyError as exc:
+            raise ValueError("Canonical VDB stream input has no vector column.") from exc
+        vector_dim = int(vector_field.type.list_size) if pa.types.is_fixed_size_list(vector_field.type) else None
+        if not vdb.sparse and vector_dim is None:
+            raise ValueError(f"Canonical VDB stream vector column must be fixed-size-list, got {vector_field.type}.")
+        if stats.vector_dim is None:
+            stats.vector_dim = vector_dim
+        elif vector_dim is not None and int(stats.vector_dim) != vector_dim:
+            raise ValueError(
+                f"Canonical VDB stream vector dimensions changed from {stats.vector_dim} to {vector_dim}."
+            )
+        product_schema = _schema_for_stream(vdb, vector_dim=stats.vector_dim)
+        if not block_schema.equals(product_schema, check_metadata=True):
+            raise ValueError(
+                "Canonical VDB stream schema does not match the configured LanceDB product schema: "
+                f"actual={block_schema}, expected={product_schema}."
+            )
+        if expected_schema is None:
+            expected_schema = block_schema
+        elif not block_schema.equals(expected_schema, check_metadata=True):
+            raise ValueError("Canonical VDB stream schema changed between producer batches.")
+
+        retained_bytes, logical_bytes, unique_buffer_bytes, unique_buffers = _batch_memory_metrics(block)
+        stats.input_batches += 1
+        stats.input_rows += int(block.num_rows)
+        stats.input_bytes += retained_bytes
+        stats.input_logical_bytes += logical_bytes
+        stats.input_unique_buffer_bytes += unique_buffer_bytes
+        stats.input_unique_buffers += unique_buffers
+        stats.max_input_batch_bytes = max(stats.max_input_batch_bytes, retained_bytes)
+        stats.client_records += int(block.num_rows)
+
+        record_batches = block.to_batches() if isinstance(block, pa.Table) else [block]
+        for record_batch in record_batches:
+            clean_batch = pa.RecordBatch.from_arrays(record_batch.columns, schema=block_schema)
+            batch_bytes = int(clean_batch.get_total_buffer_size())
+            if batch_bytes > int(max_batch_bytes):
+                raise OversizedVdbRowError(
+                    "A canonical VDB producer batch retains "
+                    f"{batch_bytes} Arrow buffer bytes, exceeding max_batch_bytes={max_batch_bytes}."
+                )
+            stats.logical_bytes += batch_bytes
+            _record_canonical_batch(stats, clean_batch)
+            stats.max_batch_bytes = max(stats.max_batch_bytes, batch_bytes)
+            stats.output_batches += 1
+            yield clean_batch
+
+    if stats.client_records == 0 and stats.conversion_input_rows:
+        raise _empty_conversion_error(
+            rows=stats.conversion_input_rows,
+            upstream_error_fields=stats.conversion_upstream_error_fields,
+            upstream_error_count=stats.conversion_upstream_error_count,
+            rejection_reasons=stats.conversion_rejection_reasons,
+        )
 
 
 def _identity_token(value: str) -> bytes:
@@ -890,6 +1153,7 @@ def _write_report(
     normalized_timings = {phase: float(timings.get(phase, 0.0)) for phase in _TIMING_PHASES}
     normalized_timings.update(timings)
     write_seconds = normalized_timings["write"]
+    source_rows = int(stats.conversion_input_rows or stats.input_rows or stats.client_records)
     return VdbWriteReport(
         operation_id=operation_id,
         outcome=outcome,
@@ -897,10 +1161,19 @@ def _write_report(
         configured_prefetch_batches=int(policy.prefetch_batches),
         input_batches=stats.input_batches,
         input_rows=stats.input_rows,
+        source_rows=source_rows,
+        rejected_rows=max(0, source_rows - stats.rows_written),
+        upstream_error_count=stats.conversion_upstream_error_count,
+        upstream_error_fields=dict(stats.conversion_upstream_error_fields),
+        rejection_reasons=dict(stats.conversion_rejection_reasons),
         input_bytes=stats.input_bytes,
+        input_logical_bytes=stats.input_logical_bytes,
+        input_unique_buffer_bytes=stats.input_unique_buffer_bytes,
+        input_unique_buffers=stats.input_unique_buffers,
         max_input_batch_bytes=stats.max_input_batch_bytes,
         output_batches=stats.output_batches,
         rows_written=stats.rows_written,
+        canonical_digest=stats.digest,
         logical_bytes=stats.logical_bytes,
         max_batch_bytes=stats.max_batch_bytes,
         max_pending_rows=stats.max_pending_rows,
@@ -942,6 +1215,7 @@ def write_lancedb_batches(
     policy: VdbSinkPolicy,
     sidecar_spec: dict[str, Any] | None = None,
     sidecar_lookup: dict[str, dict[str, Any]] | None = None,
+    input_is_canonical: bool = False,
 ) -> VdbWriteReport:
     """Consume many graph batches through one coordinated LanceDB mutation."""
 
@@ -979,57 +1253,82 @@ def write_lancedb_batches(
         if stats.vector_dim is None and existing_table is not None and not vdb.overwrite and not vdb.sparse:
             stats.vector_dim = _schema_vector_dim(_table_schema(existing_table))
 
-        canonical_rows = _canonical_rows(
-            batches,
-            vdb=vdb,
-            sidecar_spec=sidecar_spec,
-            sidecar_lookup=sidecar_lookup,
-            stats=stats,
-        )
-        try:
-            first_canonical_row = next(canonical_rows)
-        except StopIteration:
-            first_canonical_row = None
-            if stats.client_records == 0:
-                _reject_empty_operation_bypass(existing_table, operation_id=operation_id)
-                empty_version = int(existing_table.version) if existing_table is not None else None
-                timings["prepare"] = time.perf_counter() - prepare_started
-                timings["total"] = time.perf_counter() - started
-                return _write_report(
-                    operation_id=operation_id,
-                    outcome="empty_noop",
-                    policy=policy,
-                    stats=stats,
-                    before=inventory_before,
-                    after=inventory_before,
-                    data_version=empty_version,
-                    final_version=empty_version,
-                    timings=timings,
-                )
-
-        def all_canonical_rows() -> Iterator[dict[str, Any]]:
-            if first_canonical_row is not None:
-                yield first_canonical_row
-            yield from canonical_rows
-
-        canonical_row_stream = all_canonical_rows()
-        if stats.vector_dim is None and not vdb.sparse:
-            stats.vector_dim, canonical_row_stream = _infer_vector_dim_with_spooled_prefix(
-                canonical_row_stream,
+        first_canonical_batch: pa.RecordBatch | None = None
+        canonical_batches: Iterator[pa.RecordBatch] | None = None
+        policy_rows: Iterator[dict[str, Any]] | None = None
+        first_row: dict[str, Any] | None = None
+        if input_is_canonical:
+            if sidecar_spec is not None or sidecar_lookup is not None:
+                raise ValueError("Canonical VDB stream input must apply sidecar metadata at the producer.")
+            canonical_batches = _iter_canonical_vdb_batches(
+                batches,
                 vdb=vdb,
+                max_batch_bytes=int(policy.max_batch_bytes),
+                stats=stats,
             )
+            try:
+                first_canonical_batch = next(canonical_batches)
+            except StopIteration:
+                first_canonical_batch = None
+            base_schema = first_canonical_batch.schema if first_canonical_batch is not None else None
+        else:
+            canonical_rows = _canonical_rows(
+                batches,
+                vdb=vdb,
+                sidecar_spec=sidecar_spec,
+                sidecar_lookup=sidecar_lookup,
+                stats=stats,
+            )
+            try:
+                first_canonical_row = next(canonical_rows)
+            except StopIteration:
+                first_canonical_row = None
 
-        policy_rows = _apply_deferred_bad_vector_policy(
-            canonical_row_stream,
-            vdb=vdb,
-            vector_dim=int(stats.vector_dim or 0),
-        )
-        try:
-            first_row = next(policy_rows)
-        except StopIteration:
-            first_row = None
+            if first_canonical_row is None and stats.client_records == 0:
+                base_schema = None
+            else:
 
-        base_schema = _schema_for_stream(vdb, vector_dim=stats.vector_dim)
+                def all_canonical_rows() -> Iterator[dict[str, Any]]:
+                    if first_canonical_row is not None:
+                        yield first_canonical_row
+                    yield from canonical_rows
+
+                canonical_row_stream = all_canonical_rows()
+                if stats.vector_dim is None and not vdb.sparse:
+                    stats.vector_dim, canonical_row_stream = _infer_vector_dim_with_spooled_prefix(
+                        canonical_row_stream,
+                        vdb=vdb,
+                    )
+
+                policy_rows = _apply_deferred_bad_vector_policy(
+                    canonical_row_stream,
+                    vdb=vdb,
+                    vector_dim=int(stats.vector_dim or 0),
+                )
+                try:
+                    first_row = next(policy_rows)
+                except StopIteration:
+                    first_row = None
+                base_schema = _schema_for_stream(vdb, vector_dim=stats.vector_dim)
+
+        if base_schema is None and stats.client_records == 0:
+            _reject_empty_operation_bypass(existing_table, operation_id=operation_id)
+            empty_version = int(existing_table.version) if existing_table is not None else None
+            timings["prepare"] = time.perf_counter() - prepare_started
+            timings["total"] = time.perf_counter() - started
+            return _write_report(
+                operation_id=operation_id,
+                outcome="empty_noop",
+                policy=policy,
+                stats=stats,
+                before=inventory_before,
+                after=inventory_before,
+                data_version=empty_version,
+                final_version=empty_version,
+                timings=timings,
+            )
+        if base_schema is None:
+            base_schema = _schema_for_stream(vdb, vector_dim=stats.vector_dim)
         mode = "overwrite" if vdb.overwrite else "append"
         request_fingerprint = json.dumps(
             {
@@ -1093,17 +1392,30 @@ def write_lancedb_batches(
         )
         timings["prepare"] = time.perf_counter() - prepare_started
 
-        def all_rows() -> Iterator[dict[str, Any]]:
-            if first_row is not None:
-                yield first_row
-            yield from policy_rows
+        if input_is_canonical:
+            assert canonical_batches is not None
 
-        arrow_batches = _checked_batches(
-            all_rows(),
-            schema=schema,
-            max_batch_bytes=int(policy.max_batch_bytes),
-            stats=stats,
-        )
+            def canonical_batches_with_write_schema() -> Iterator[pa.RecordBatch]:
+                if first_canonical_batch is not None:
+                    yield pa.RecordBatch.from_arrays(first_canonical_batch.columns, schema=schema)
+                for batch in canonical_batches:
+                    yield pa.RecordBatch.from_arrays(batch.columns, schema=schema)
+
+            arrow_batches = canonical_batches_with_write_schema()
+        else:
+            assert policy_rows is not None
+
+            def all_rows() -> Iterator[dict[str, Any]]:
+                if first_row is not None:
+                    yield first_row
+                yield from policy_rows
+
+            arrow_batches = _checked_batches(
+                all_rows(),
+                schema=schema,
+                max_batch_bytes=int(policy.max_batch_bytes),
+                stats=stats,
+            )
         try:
             first_batch = next(arrow_batches)
         except StopIteration:
@@ -1167,6 +1479,8 @@ def write_lancedb_batches(
             table.checkout_latest()
             data_version = int(markers.recorded_version)
             timings["write"] = 0.0
+            timings["reader_production"] = 0.0
+            timings["lance_owned_write"] = 0.0
             timings["time_to_data_commit"] = 0.0
         elif existing_table is not None and mode == "append" and stats.rows_written == 0:
             # Legacy append does not create a table version when every client
@@ -1175,6 +1489,8 @@ def write_lancedb_batches(
             table.checkout_latest()
             data_version = int(table.version)
             timings["write"] = 0.0
+            timings["reader_production"] = 0.0
+            timings["lance_owned_write"] = 0.0
             timings["time_to_data_commit"] = time.perf_counter() - started
             markers.mark_data(
                 table,
@@ -1183,7 +1499,24 @@ def write_lancedb_batches(
                 digest=stats.digest,
             )
         else:
-            reader = pa.RecordBatchReader.from_batches(schema, all_batches())
+            source_batches = iter(all_batches())
+
+            def timed_batches() -> Iterator[pa.RecordBatch]:
+                while True:
+                    production_started = time.perf_counter()
+                    try:
+                        batch = next(source_batches)
+                    except StopIteration:
+                        timings["reader_production"] = timings.get("reader_production", 0.0) + (
+                            time.perf_counter() - production_started
+                        )
+                        return
+                    timings["reader_production"] = timings.get("reader_production", 0.0) + (
+                        time.perf_counter() - production_started
+                    )
+                    yield batch
+
+            reader = pa.RecordBatchReader.from_batches(schema, timed_batches())
             write_started = time.perf_counter()
             try:
                 if existing_table is None:
@@ -1213,6 +1546,10 @@ def write_lancedb_batches(
                         ) from exc
                 raise
             timings["write"] = time.perf_counter() - write_started
+            timings["lance_owned_write"] = max(
+                0.0,
+                timings["write"] - timings.get("reader_production", 0.0),
+            )
             timings["time_to_data_commit"] = time.perf_counter() - started
             # This tag is deliberately after the data mutation. If it fails,
             # the retained base marker makes a later append retry fail closed.

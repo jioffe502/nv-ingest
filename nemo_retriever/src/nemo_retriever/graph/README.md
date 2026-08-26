@@ -218,6 +218,37 @@ executor = RayDataExecutor(graph, batch_size=8)
 result_ds = executor.ingest(["/path/to/*.pdf"])
 ```
 
+When a bounded LanceDB sink is the final graph node, the executor returns the
+full upstream records by default. If the caller only needs write confirmation,
+set `vdb_result_mode="write_receipt"`. This mode does not materialize the
+upstream corpus as a pandas result. It returns one row with the operation ID,
+source, written, and rejected row counts, structured rejection diagnostics,
+the canonical content digest, and LanceDB versions.
+
+```python
+receipt = executor.ingest(
+    ["/path/to/*.pdf"],
+    vdb_result_mode="write_receipt",
+)
+```
+
+For a terminal LanceDB graph, you can also move canonical projection into the
+final producer. This prevents Ray from publishing a wide post-producer block:
+
+```python
+receipt = executor.ingest(
+    ["/path/to/*.pdf"],
+    vdb_result_mode="write_receipt",
+    vdb_transport_mode="canonical_stream",
+)
+```
+
+The canonical stream requires an explicit LanceDB `vector_dim`, a terminal
+bounded sink, and write-receipt results. Its schema marker and conversion
+diagnostics are validated by the stream owner before the write is finalized.
+Use receipt row counts and the canonical digest as correctness signals when
+comparing transport implementations.
+
 ## Notes About Graph Shape
 
 The base `Graph` type supports multiple roots and fan-out.

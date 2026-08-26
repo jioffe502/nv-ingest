@@ -15,6 +15,7 @@ import pytest
 lancedb = pytest.importorskip("lancedb", minversion="0.34.0")
 
 from nemo_retriever.common.vdb.sink import OversizedVdbRowError, VdbSinkPolicy
+from nemo_retriever.common.vdb.records import VdbUploadError
 from nemo_retriever.operators.vdb import IngestVdbOperator
 
 _POLICY = VdbSinkPolicy(max_batch_bytes=1024, prefetch_batches=1)
@@ -183,6 +184,138 @@ def test_large_wide_block_is_projected_incrementally_into_bounded_arrow_batches(
     assert table.schema.names == ["vector", "text", "metadata", "source", "id"]
 
 
+def test_canonical_stream_matches_compatibility_sink_without_wide_columns(tmp_path: Path) -> None:
+    frame = _frame(0, 4, wide=True)
+    policy = VdbSinkPolicy(max_batch_bytes=4096, prefetch_batches=0)
+    compatibility = _operator(tmp_path / "compatibility", vector_dim=None)
+    canonical_stream = _operator(tmp_path / "canonical-stream")
+
+    compatibility_report = compatibility.consume_batches(
+        iter([frame.iloc[:2], frame.iloc[2:]]),
+        operation_id="compatibility",
+        policy=policy,
+    )
+    canonical_tables = []
+    projection_reports = []
+    for producer_batch in (frame.iloc[:2], frame.iloc[2:]):
+        canonical, projection_report = canonical_stream.project_canonical_stream_batch(
+            producer_batch,
+            max_batch_bytes=policy.max_batch_bytes,
+        )
+        canonical_tables.append(canonical)
+        projection_reports.append(projection_report)
+
+    stream_report = canonical_stream.consume_canonical_stream(
+        iter(canonical_tables),
+        operation_id="canonical-stream",
+        policy=policy,
+    )
+
+    compatibility_rows = (
+        lancedb.connect(str(tmp_path / "compatibility")).open_table("chunks").to_arrow().sort_by("id").to_pylist()
+    )
+    stream_rows = (
+        lancedb.connect(str(tmp_path / "canonical-stream")).open_table("chunks").to_arrow().sort_by("id").to_pylist()
+    )
+    assert stream_rows == compatibility_rows
+    assert stream_report.rows_written == compatibility_report.rows_written == 4
+    assert stream_report.input_rows == 4
+    assert stream_report.input_bytes < compatibility_report.input_bytes
+    assert stream_report.input_logical_bytes < compatibility_report.input_logical_bytes
+    assert stream_report.input_unique_buffers > 0
+    assert stream_report.timings["reader_production"] >= 0
+    assert stream_report.timings["lance_owned_write"] >= 0
+    assert all(table.schema.names == ["vector", "text", "metadata", "source", "id"] for table in canonical_tables)
+    assert all(report.output_rows == 2 for report in projection_reports)
+    assert all(report.output_retained_bytes < report.input_retained_bytes for report in projection_reports)
+
+
+def test_canonical_stream_requires_explicit_distributed_vector_schema(tmp_path: Path) -> None:
+    operator = _operator(tmp_path, vector_dim=None, on_bad_vectors="drop")
+
+    with pytest.raises(ValueError, match="require an explicit vector_dim"):
+        operator.project_canonical_stream_batch(_frame(0, 1), max_batch_bytes=_POLICY.max_batch_bytes)
+
+
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_canonical_stream_defers_invalid_only_partition_to_global_sink(
+    tmp_path: Path,
+    invalid_first: bool,
+) -> None:
+    operator = _operator(tmp_path)
+    valid = _frame(0, 1)
+    invalid = _frame(1, 2)
+    invalid.at[0, "text"] = ""
+
+    valid_batch, valid_report = operator.project_canonical_stream_batch(
+        valid, max_batch_bytes=_POLICY.max_batch_bytes
+    )
+    invalid_batch, invalid_report = operator.project_canonical_stream_batch(
+        invalid,
+        max_batch_bytes=_POLICY.max_batch_bytes,
+    )
+    report = operator.consume_canonical_stream(
+        iter([invalid_batch, valid_batch] if invalid_first else [valid_batch, invalid_batch]),
+        operation_id="mixed-validity",
+        policy=_POLICY,
+    )
+
+    assert valid_report.output_rows == 1
+    assert invalid_report.input_rows == 1
+    assert invalid_report.output_rows == 0
+    assert report.source_rows == 2
+    assert report.rows_written == 1
+    assert report.rejected_rows == 1
+    assert report.rejection_reasons == {"missing searchable text or image backing": 1}
+    assert lancedb.connect(str(tmp_path)).open_table("chunks").count_rows() == 1
+
+
+def test_canonical_stream_rejects_globally_invalid_partitions(tmp_path: Path) -> None:
+    operator = _operator(tmp_path)
+    invalid = _frame(0, 1)
+    invalid.at[0, "text"] = ""
+
+    invalid_batch, projection_report = operator.project_canonical_stream_batch(
+        invalid,
+        max_batch_bytes=_POLICY.max_batch_bytes,
+    )
+
+    assert projection_report.input_rows == 1
+    assert projection_report.output_rows == 0
+    with pytest.raises(
+        VdbUploadError,
+        match=r"received 1 row\(s\), but none were uploadable; .*missing searchable text or image backing=1",
+    ):
+        operator.consume_canonical_stream(
+            iter([invalid_batch]),
+            operation_id="globally-invalid",
+            policy=_POLICY,
+        )
+    assert "chunks" not in lancedb.connect(str(tmp_path)).list_tables().tables
+
+
+def test_canonical_fast_path_rejects_unmarked_arrow_input(tmp_path: Path) -> None:
+    operator = _operator(tmp_path)
+    unmarked = pa.Table.from_pylist(
+        [
+            {
+                "vector": [1.0, 2.0],
+                "text": "chunk",
+                "metadata": "{}",
+                "source": "{}",
+                "id": "row-0",
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="missing its schema marker"):
+        operator.consume_canonical_stream(
+            iter([unmarked]),
+            operation_id="unmarked",
+            policy=_POLICY,
+        )
+
+
 def test_empty_input_is_a_noop(tmp_path: Path) -> None:
     report = _operator(tmp_path).consume_batches(iter(()), operation_id="empty", policy=_POLICY)
 
@@ -217,7 +350,7 @@ def test_oversized_row_fails_before_arrow_allocation_or_table_mutation(
 
 @pytest.mark.parametrize(
     ("bad_vector_policy", "expected_vectors"),
-    [("drop", []), ("fill", [[1.0, -3.5]]), ("null", [None])],
+    [("drop", []), ("fill", [[-3.5, -3.5]]), ("null", [None])],
 )
 def test_bad_vector_policies_match_legacy(
     tmp_path: Path,
@@ -245,6 +378,25 @@ def test_bad_vector_policies_match_legacy(
     bounded_vectors = lancedb.connect(str(tmp_path / "bounded")).open_table("chunks").to_arrow()["vector"].to_pylist()
     assert bounded_vectors == legacy_vectors == expected_vectors
     assert report.rows_written == len(expected_vectors)
+
+
+def test_nan_fill_matches_legacy_complete_vector_replacement(tmp_path: Path) -> None:
+    frame = _frame(0, 1)
+    frame.at[0, "text_embeddings_1b_v2"] = {"embedding": [1.0, float("nan")]}
+    common = {
+        "validate_vector_length": False,
+        "on_bad_vectors": "fill",
+        "fill_value": -3.5,
+    }
+    legacy = _operator(tmp_path / "legacy", **common)
+    bounded = _operator(tmp_path / "bounded", **common)
+
+    legacy.process(frame)
+    bounded.consume_batches(iter([frame]), operation_id="nan-fill", policy=_POLICY)
+
+    legacy_vectors = lancedb.connect(str(tmp_path / "legacy")).open_table("chunks").to_arrow()["vector"].to_pylist()
+    bounded_vectors = lancedb.connect(str(tmp_path / "bounded")).open_table("chunks").to_arrow()["vector"].to_pylist()
+    assert bounded_vectors == legacy_vectors == [[-3.5, -3.5]]
 
 
 def test_nan_drop_and_deferred_dimension_inference_match_legacy(tmp_path: Path) -> None:

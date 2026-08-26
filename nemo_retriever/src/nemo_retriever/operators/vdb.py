@@ -211,6 +211,48 @@ class IngestVdbOperator(AbstractOperator):
             sidecar_lookup=self._sidecar_lookup,
         )
 
+    def validate_canonical_stream(self) -> None:
+        """Require a schema that every distributed producer can know upfront."""
+
+        if not self._vdb.sparse and self._vdb.vector_dim is None:
+            raise ValueError(
+                "Producer-owned canonical VDB streams require an explicit vector_dim; "
+                "distributed producers cannot infer one shared schema from independent batches."
+            )
+
+    def project_canonical_stream_batch(self, batch: Any, *, max_batch_bytes: int) -> Any:
+        """Project one producer result into the versioned canonical stream."""
+
+        from nemo_retriever.common.vdb.sink import project_graph_batch_to_canonical_vdb
+
+        self.validate_canonical_stream()
+        return project_graph_batch_to_canonical_vdb(
+            batch,
+            vdb=self._vdb,
+            max_batch_bytes=max_batch_bytes,
+            sidecar_spec=self._sidecar_spec,
+            sidecar_lookup=self._sidecar_lookup,
+        )
+
+    def consume_canonical_stream(
+        self,
+        batches: Iterable[Any],
+        *,
+        operation_id: str,
+        policy: VdbSinkPolicy,
+    ) -> Any:
+        """Consume producer-owned canonical Arrow without graph-row conversion."""
+
+        from nemo_retriever.common.vdb.sink import write_lancedb_batches
+
+        return write_lancedb_batches(
+            self._vdb,
+            batches,
+            operation_id=operation_id,
+            policy=policy,
+            input_is_canonical=True,
+        )
+
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data
 

@@ -4,6 +4,7 @@
 
 """Regression tests for Ray's Arrow-to-pandas operator boundary."""
 
+import json
 from functools import partial
 from typing import Any
 
@@ -17,6 +18,7 @@ from ray.data.extensions import TensorArray
 
 from nemo_retriever.graph.executor import (
     _ArrowPandasOperatorAdapter,
+    _FinalProducerTelemetryAdapter,
     _preserves_pandas_output,
     _requires_stable_pandas_blocks,
     ray_dataset_to_pandas,
@@ -37,6 +39,22 @@ class _PassthroughOperator(AbstractOperator):
 
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data
+
+
+def test_final_producer_telemetry_adapter_preserves_output_and_reports_phase(capsys) -> None:
+    batch = pd.DataFrame({"value": [1, 2]})
+
+    result = _FinalProducerTelemetryAdapter(operator_class=_PassthroughOperator, operator_kwargs={})(batch)
+
+    assert result is batch
+    line = capsys.readouterr().out.strip()
+    prefix = "NEMO_RETRIEVER_FINAL_PRODUCER "
+    assert line.startswith(prefix)
+    report = json.loads(line.removeprefix(prefix))
+    assert report["producer"] == "_PassthroughOperator"
+    assert report["input_rows"] == report["output_rows"] == 2
+    assert report["producer_seconds"] >= 0
+    assert report["finished_at_monotonic_s"] >= report["started_at_monotonic_s"]
 
 
 def _stored_image_table(page_count: int = 3) -> pa.Table:

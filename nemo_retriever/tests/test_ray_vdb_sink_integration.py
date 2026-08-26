@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections import Counter
 from collections.abc import Iterable
@@ -332,5 +333,120 @@ def test_terminal_vdb_sink_streams_ray_blocks_and_preserves_full_result(tmp_path
         with pytest.raises(TypeError, match="vdb_sink_policy must be a VdbSinkPolicy"):
             executor.ingest(dataset, vdb_sink_policy=object())
         assert executor.last_vdb_write_report is None
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.integration
+def test_final_producer_emits_canonical_stream_and_returns_write_receipt(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(num_cpus=2, num_gpus=0, include_dashboard=False, log_to_driver=False)
+
+    try:
+        class _WideFinalProducer(AbstractOperator):
+            PRESERVE_PANDAS_OUTPUT = True
+
+            def preprocess(self, data, **kwargs):
+                return data
+
+            def process(self, data, **kwargs):
+                result = data.copy()
+                result["producer_only_payload"] = ["x" * (32 << 10) for _ in range(len(result))]
+                return result
+
+            def postprocess(self, data, **kwargs):
+                return data
+
+        graph = (
+            Graph()
+            >> _WideFinalProducer()
+            >> IngestVdbOperator(
+                vdb_op="lancedb",
+                vdb_kwargs={
+                    "uri": str(tmp_path),
+                    "table_name": "chunks",
+                    "vector_dim": 2,
+                    "overwrite": True,
+                    "build_index": False,
+                },
+            )
+        )
+        dataset = ray.data.from_arrow([_source_table(0), _source_table(1)], override_num_blocks=2)
+        executor = RayDataExecutor(graph, batch_size=None)
+        receipt = executor.ingest(
+            dataset,
+            vdb_result_mode="write_receipt",
+            vdb_transport_mode="canonical_stream",
+            vdb_phase_telemetry=True,
+            vdb_sink_policy=VdbSinkPolicy(max_batch_bytes=4096, prefetch_batches=0),
+        )
+
+        assert receipt.to_dict(orient="records") == [
+            {
+                "operation_id": executor.last_vdb_operation_id,
+                "outcome": "success",
+                "source_rows": 4,
+                "rows_written": 4,
+                "rejected_rows": 0,
+                "upstream_error_count": 0,
+                "upstream_error_fields": {},
+                "rejection_reasons": {},
+                "canonical_digest": executor.last_vdb_write_report.canonical_digest,
+                "data_version": executor.last_vdb_write_report.data_version,
+                "final_version": executor.last_vdb_write_report.final_version,
+            }
+        ]
+        report = executor.last_vdb_write_report
+        assert report.rows_written == report.input_rows == 4
+        assert report.input_batches == 2
+        assert report.input_unique_buffers > 0
+        assert report.terminal_result_bytes == int(receipt.memory_usage(index=True, deep=True).sum())
+        stored = lancedb.connect(str(tmp_path)).open_table("chunks").to_arrow().sort_by("id")
+        assert stored.column_names == ["vector", "text", "metadata", "source", "id"]
+        assert stored.column("id").to_pylist() == ["row-0", "row-1", "row-2", "row-3"]
+
+        compatibility_uri = tmp_path / "compatibility"
+        compatibility_graph = (
+            Graph()
+            >> _WideFinalProducer()
+            >> IngestVdbOperator(
+                vdb_op="lancedb",
+                vdb_kwargs={
+                    "uri": str(compatibility_uri),
+                    "table_name": "chunks",
+                    "vector_dim": 2,
+                    "overwrite": True,
+                    "build_index": False,
+                },
+            )
+        )
+        compatibility = RayDataExecutor(compatibility_graph, batch_size=None)
+        compatibility_receipt = compatibility.ingest(
+            dataset,
+            vdb_result_mode="write_receipt",
+            vdb_phase_telemetry=True,
+            vdb_sink_policy=VdbSinkPolicy(max_batch_bytes=4096, prefetch_batches=0),
+        )
+        compatibility_stored = (
+            lancedb.connect(str(compatibility_uri)).open_table("chunks").to_arrow().sort_by("id")
+        )
+        assert int(compatibility_receipt.at[0, "rows_written"]) == 4
+        assert compatibility_stored.to_pylist() == stored.to_pylist()
+        assert compatibility.last_vdb_write_report.canonical_digest == report.canonical_digest
+        prefix = "NEMO_RETRIEVER_VDB_PULL "
+        pull_reports = [
+            json.loads(line.removeprefix(prefix))
+            for line in capsys.readouterr().out.splitlines()
+            if line.startswith(prefix)
+        ]
+        block_reports = [item for item in pull_reports if item["event"] == "block"]
+        assert len(block_reports) == 4
+        assert len([item for item in pull_reports if item["event"] == "end_of_stream"]) == 2
+        assert [item["block_index"] for item in block_reports] == [0, 1, 0, 1]
+        assert all(item["rows"] == 2 for item in block_reports)
+        assert all(item["ray_wait_seconds"] >= 0 for item in pull_reports)
     finally:
         ray.shutdown()
