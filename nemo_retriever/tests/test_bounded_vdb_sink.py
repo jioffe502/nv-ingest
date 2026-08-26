@@ -14,7 +14,7 @@ import pytest
 
 lancedb = pytest.importorskip("lancedb", minversion="0.34.0")
 
-from nemo_retriever.common.vdb.sink import OversizedVdbRowError, VdbSinkPolicy
+from nemo_retriever.common.vdb.sink import OversizedVdbRowError, VdbSinkPolicy, VdbWriteReceipt
 from nemo_retriever.operators.vdb import IngestVdbOperator
 
 _POLICY = VdbSinkPolicy(max_batch_bytes=1024, prefetch_batches=1)
@@ -122,10 +122,16 @@ def test_streams_batches_into_one_indexed_lance_lifecycle(tmp_path: Path, monkey
     assert report.input_batches == 2
     assert report.rows_written == 4
     assert report.output_batches >= 2
+    assert len(report.canonical_digest) == 64
     assert report.max_batch_bytes <= report.configured_max_batch_bytes == 1024
     assert report.fragments_after == report.data_files_after == 1
     assert report.timings["write"] > 0
     assert report.timings["index"] >= 0
+
+    receipt = VdbWriteReceipt.from_report(report)
+    assert receipt.operation_id == "indexed-overwrite"
+    assert receipt.input_rows == receipt.rows_written == 4
+    assert receipt.canonical_digest == report.canonical_digest
 
 
 def test_large_wide_block_is_projected_incrementally_into_bounded_arrow_batches(

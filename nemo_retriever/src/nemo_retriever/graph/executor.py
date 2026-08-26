@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import replace
+from dataclasses import asdict, replace
 import math
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
@@ -595,6 +595,11 @@ class RayDataExecutor(AbstractExecutor):
         operation_id = str(kwargs.pop("vdb_operation_id", "") or sink_operator.operation_id or uuid.uuid4())
         self.last_vdb_operation_id = operation_id
         has_downstream_nodes = sink_index + 1 < len(nodes)
+        result_mode = str(kwargs.pop("vdb_result_mode", "records")).strip().lower()
+        if result_mode not in {"records", "write_receipt"}:
+            raise ValueError("vdb_result_mode must be 'records' or 'write_receipt'")
+        if result_mode == "write_receipt" and has_downstream_nodes:
+            raise ValueError("vdb_result_mode='write_receipt' requires the bounded VDB sink to be terminal")
 
         dataset = self.build_dataset(
             data,
@@ -617,7 +622,8 @@ class RayDataExecutor(AbstractExecutor):
                 # upstream execution. Post-sink effects are rebuilt from this
                 # required result only after the sink finalizes; they must not
                 # force a corpus-wide Ray materialization before the sink.
-                terminal_frames.append(arrow_table_to_pandas(block))
+                if result_mode == "records":
+                    terminal_frames.append(arrow_table_to_pandas(block))
                 # Keep the sink side Arrow-native when Ray produced Arrow.
                 # The separate terminal frame preserves the pandas API result.
                 yield block
@@ -643,6 +649,12 @@ class RayDataExecutor(AbstractExecutor):
                 terminal_result_bytes=terminal_bytes,
             )
             return frame
+
+        if result_mode == "write_receipt":
+            from nemo_retriever.common.vdb.sink import VdbWriteReceipt
+
+            receipt = VdbWriteReceipt.from_report(self.last_vdb_write_report)
+            return record_terminal_result(pd.DataFrame([asdict(receipt)]))
 
         if has_downstream_nodes:
             import ray.data as rd

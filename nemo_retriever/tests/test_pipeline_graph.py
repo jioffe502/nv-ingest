@@ -1327,6 +1327,117 @@ class TestRayDataExecutor:
         assert executor.last_vdb_operation_id
         assert any(executor.last_vdb_operation_id in note for note in getattr(exc_info.value, "__notes__", ()))
 
+    def test_bounded_sink_write_receipt_does_not_materialize_graph_records(self, tmp_path, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        import lancedb
+
+        from nemo_retriever.common.ray_resource_hueristics import ClusterResources
+        from nemo_retriever.common.vdb.sink import VdbSinkPolicy
+        from nemo_retriever.operators.vdb import IngestVdbOperator
+
+        batch = pd.DataFrame(
+            [
+                {
+                    "text": "chunk",
+                    "text_embeddings_1b_v2": {"embedding": [1.0, 2.0]},
+                    "source_id": "/tmp/doc.pdf",
+                    "page_number": 0,
+                    "metadata": {"content_metadata": {"type": "text", "id": "row-0"}},
+                    "wide_result_only": "not returned",
+                }
+            ]
+        )
+
+        class _FakeDataContext:
+            enable_rich_progress_bars = False
+            use_ray_tqdm = True
+
+            @classmethod
+            def get_current(cls):
+                return cls()
+
+        class _FakeDataset:
+            def iter_batches(self, **_kwargs):
+                return iter([batch])
+
+        fake_ray_data = SimpleNamespace(Dataset=_FakeDataset, DataContext=_FakeDataContext)
+        fake_ray = SimpleNamespace(data=fake_ray_data)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setitem(sys.modules, "ray.data", fake_ray_data)
+        monkeypatch.setattr(
+            "nemo_retriever.graph.executor.ensure_local_ray_runtime",
+            lambda _address: fake_ray,
+        )
+        resources = Resources(cpu_count=1, gpu_count=0)
+        monkeypatch.setattr(
+            "nemo_retriever.graph.executor.gather_cluster_resources",
+            lambda _ray: ClusterResources(total_resources=resources, available_resources=resources),
+        )
+        monkeypatch.setattr("nemo_retriever.graph.executor.resolve_graph", lambda graph, _cluster: graph)
+        monkeypatch.setattr(
+            "nemo_retriever.graph.executor.arrow_table_to_pandas",
+            lambda _batch: pytest.fail("write receipt mode materialized graph records"),
+        )
+
+        graph = Graph() >> IngestVdbOperator(
+            vdb_op="lancedb",
+            vdb_kwargs={
+                "uri": str(tmp_path),
+                "table_name": "chunks",
+                "vector_dim": 2,
+                "overwrite": True,
+                "build_index": False,
+            },
+        )
+        executor = RayDataExecutor(graph)
+        receipt = executor.ingest(
+            _FakeDataset(),
+            vdb_result_mode="write_receipt",
+            vdb_operation_id="receipt-operation",
+            vdb_sink_policy=VdbSinkPolicy(prefetch_batches=0),
+        )
+
+        assert receipt.to_dict(orient="records") == [
+            {
+                "operation_id": "receipt-operation",
+                "outcome": "success",
+                "input_rows": 1,
+                "rows_written": 1,
+                "canonical_digest": executor.last_vdb_write_report.canonical_digest,
+                "data_version": executor.last_vdb_write_report.data_version,
+                "final_version": executor.last_vdb_write_report.final_version,
+            }
+        ]
+        assert executor.last_vdb_write_report.terminal_result_bytes == int(
+            receipt.memory_usage(index=True, deep=True).sum()
+        )
+        stored = lancedb.connect(str(tmp_path)).open_table("chunks").to_arrow()
+        assert stored.column("id").to_pylist() == ["row-0"]
+
+    def test_bounded_sink_validates_write_receipt_mode_before_execution(self, tmp_path):
+        from nemo_retriever.operators.vdb import IngestVdbOperator
+
+        sink = IngestVdbOperator(
+            vdb_op="lancedb",
+            vdb_kwargs={
+                "uri": str(tmp_path),
+                "table_name": "chunks",
+                "vector_dim": 2,
+                "build_index": False,
+            },
+        )
+
+        with pytest.raises(ValueError, match="vdb_result_mode must be 'records' or 'write_receipt'"):
+            RayDataExecutor(Graph() >> sink).ingest(object(), vdb_result_mode="summary")
+
+        with pytest.raises(ValueError, match="requires the bounded VDB sink to be terminal"):
+            RayDataExecutor(Graph() >> sink >> CPUAdaptiveAddOperator()).ingest(
+                object(),
+                vdb_result_mode="write_receipt",
+            )
+
     def test_preflight_counts_implicit_gpu_operator_reservation(self):
         graph = Graph()
         graph.add_root(GPUAdaptiveAddOperator())

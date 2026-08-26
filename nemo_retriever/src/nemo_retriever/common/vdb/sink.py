@@ -78,6 +78,7 @@ class VdbWriteReport:
     max_input_batch_bytes: int
     output_batches: int
     rows_written: int
+    canonical_digest: str
     logical_bytes: int
     max_batch_bytes: int
     max_pending_rows: int
@@ -93,6 +94,33 @@ class VdbWriteReport:
     final_version: int | None
     timings: dict[str, float]
     terminal_result_bytes: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VdbWriteReceipt:
+    """Small, stable result for callers that do not need graph records."""
+
+    operation_id: str
+    outcome: str
+    input_rows: int
+    rows_written: int
+    canonical_digest: str
+    data_version: int | None
+    final_version: int | None
+
+    @classmethod
+    def from_report(cls, report: VdbWriteReport) -> VdbWriteReceipt:
+        """Select durable write identity and row coverage from a report."""
+
+        return cls(
+            operation_id=report.operation_id,
+            outcome=report.outcome,
+            input_rows=report.input_rows,
+            rows_written=report.rows_written,
+            canonical_digest=report.canonical_digest,
+            data_version=report.data_version,
+            final_version=report.final_version,
+        )
 
 
 class OversizedVdbRowError(ValueError):
@@ -895,6 +923,7 @@ def _write_report(
         max_input_batch_bytes=stats.max_input_batch_bytes,
         output_batches=stats.output_batches,
         rows_written=stats.rows_written,
+        canonical_digest=stats.digest,
         logical_bytes=stats.logical_bytes,
         max_batch_bytes=stats.max_batch_bytes,
         max_pending_rows=stats.max_pending_rows,
