@@ -44,8 +44,8 @@ the checkpoint limit takes precedence.
 For a registered revision-pinned model, an explicitly revision-pinned model,
 or a local checkpoint, the library loads the tokenizer and prompt configuration
 for that exact model version. If the text does not fit, the library splits it
-into the largest contiguous token ranges that fit. This split is deterministic,
-does not truncate text, and occurs before either local or remote embedding.
+into deterministic contiguous token ranges that fit. This split does not
+truncate text and occurs before either local or remote embedding.
 If the exact tokenizer is unavailable, embedding stage setup fails before inference.
 
 Each split row preserves the source, page, element, bounding box, and existing
@@ -64,10 +64,11 @@ number keep their original meaning.
 
 Local and remote embedding use the same prepared rows. When this client-side
 policy is active for a remote endpoint, the request uses `truncate="NONE"` so
-the endpoint cannot silently replace the client decision. If a local model or
-remote endpoint still reports an input-specific rejection, the library records
-a structured error for that row and preserves embeddings for valid rows in the
-same batch.
+the endpoint cannot silently replace the client decision. If a backend still
+rejects a prepared batch, the library reports a batch failure rather than
+guessing from an HTTP status or exception that one document is invalid. The VDB
+boundary refuses a mixed partial write when searchable rows are missing
+embeddings.
 
 For an unpinned custom remote model, the library does not guess its tokenizer
 or input limit. Embedding stage setup fails with an actionable error. Use a

@@ -40,9 +40,9 @@ class EmbedModelSpec:
     output_dimension: int
     query_prefix: str
     document_prefix: str
-    max_input_tokens: int | None = None
     quantization: str | None = None
     requires_vllm: bool = False
+    max_input_tokens: int | None = None
 
 
 def _read_config(path: Path, *, model_id: str) -> dict[str, Any]:

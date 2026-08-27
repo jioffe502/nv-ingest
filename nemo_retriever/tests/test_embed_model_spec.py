@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import huggingface_hub
 import pytest
 from nemo_retriever.models.embed_model_spec import (
+    EmbedModelSpec,
     resolve_embed_model_revision,
     resolve_embed_model_spec,
 )
@@ -66,6 +67,14 @@ def _vl_config(**overrides):
     }
     config.update(overrides)
     return config
+
+
+def test_input_limit_field_preserves_existing_positional_constructor_order():
+    spec = EmbedModelSpec("model", "revision", "text", 2048, "query: ", "passage: ", "FP8", True)
+
+    assert spec.quantization == "FP8"
+    assert spec.requires_vllm is True
+    assert spec.max_input_tokens is None
 
 
 def test_local_text_checkpoint_is_resolved_from_model_type(tmp_path):

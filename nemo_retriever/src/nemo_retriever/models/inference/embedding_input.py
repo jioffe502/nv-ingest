@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -37,6 +37,19 @@ def _deep_copy_row(row: pd.Series) -> dict[str, Any]:
     return {
         key: copy.deepcopy(value) if isinstance(value, (dict, list)) else value for key, value in row.to_dict().items()
     }
+
+
+def _set_accounting(
+    row: dict[str, Any],
+    *,
+    overlength: bool = False,
+    split_parent: bool = False,
+    split_child: bool = False,
+) -> dict[str, Any]:
+    row[_OVERLENGTH_COLUMN] = overlength
+    row[_SPLIT_PARENT_COLUMN] = split_parent
+    row[_SPLIT_CHILD_COLUMN] = split_child
+    return row
 
 
 def _embedding_text(row: pd.Series, text_column: str) -> tuple[str, str] | None:
@@ -122,13 +135,10 @@ class EmbeddingInputPolicy:
     tokenizer: ChunkTokenizer
     max_tokens: int
     prefix: str
-    overlap_tokens: int = 0
 
     def __post_init__(self) -> None:
         if self.max_tokens <= 0:
             raise ValueError("Embedding input max_tokens must be positive")
-        if self.overlap_tokens < 0:
-            raise ValueError("Embedding input overlap_tokens must be nonnegative")
 
     def _formatted_token_count(self, text: str) -> int:
         return len(self.tokenizer.encode(f"{self.prefix}{text}", add_special_tokens=True))
@@ -163,20 +173,71 @@ class EmbeddingInputPolicy:
             )
         return best
 
-    def _split(self, text: str) -> list[tuple[str, int, int, int]]:
+    def _split(self, text: str) -> list[tuple[str, int, int]]:
         token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-        chunks: list[tuple[str, int, int, int]] = []
+        chunks: list[tuple[str, int, int]] = []
         start = 0
         while start < len(token_ids):
             end = self._largest_fitting_end(token_ids, start)
             chunk = self.tokenizer.decode(token_ids[start:end], skip_special_tokens=False)
-            formatted_tokens = self._formatted_token_count(chunk)
-            chunks.append((chunk, start, end, formatted_tokens))
-            if end >= len(token_ids):
-                break
-            next_start = end - self.overlap_tokens
-            start = next_start if next_start > start else end
+            if self.tokenizer.encode(chunk, add_special_tokens=False) != token_ids[start:end]:
+                raise ValueError(
+                    "Embedding input cannot be split without changing its token sequence; "
+                    "use the exact reversible tokenizer for this embedding model."
+                )
+            chunks.append((chunk, start, end))
+            start = end
+        if "".join(chunk for chunk, _, _ in chunks) != text:
+            raise ValueError(
+                "Embedding input cannot be split without changing its source text; "
+                "use the exact reversible tokenizer for this embedding model."
+            )
         return chunks
+
+    def _expand_row(
+        self,
+        row: pd.Series,
+        selected: tuple[str, str] | None,
+        parent_tokens: int | None,
+    ) -> list[dict[str, Any]]:
+        row_copy = _deep_copy_row(row)
+        if selected is None or parent_tokens is None or parent_tokens <= self.max_tokens:
+            return [_set_accounting(row_copy)]
+
+        selected_column, text = selected
+        chunks = self._split(text)
+        parent_id = _parent_id(row_copy, text)
+        expanded: list[dict[str, Any]] = []
+        for chunk_index, (chunk, start, end) in enumerate(chunks):
+            child = copy.deepcopy(row_copy)
+            child[selected_column] = chunk
+            if selected_column == "text" and "content" in child:
+                child["content"] = chunk
+            metadata = child.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                child["metadata"] = metadata
+            chunk_id = hashlib.sha256(f"{parent_id}\0{start}\0{end}".encode("utf-8")).hexdigest()
+            metadata.update(
+                {
+                    "content": chunk,
+                    "embedding_parent_id": parent_id,
+                    "embedding_chunk_id": chunk_id,
+                    "embedding_chunk_index": chunk_index,
+                    "embedding_chunk_count": len(chunks),
+                    "embedding_chunk_start_token": start,
+                    "embedding_chunk_end_token": end,
+                }
+            )
+            expanded.append(
+                _set_accounting(
+                    child,
+                    overlength=chunk_index == 0,
+                    split_parent=chunk_index == 0,
+                    split_child=True,
+                )
+            )
+        return expanded
 
     def prepare(
         self,
@@ -228,57 +289,7 @@ class EmbeddingInputPolicy:
 
         prepared: list[dict[str, Any]] = []
         for row, selected, parent_tokens in zip(rows, selected_inputs, parent_token_counts):
-            row_copy = _deep_copy_row(row)
-            if selected is None:
-                row_copy["embedding_input_action"] = "not_applicable"
-                row_copy[_OVERLENGTH_COLUMN] = False
-                row_copy[_SPLIT_PARENT_COLUMN] = False
-                row_copy[_SPLIT_CHILD_COLUMN] = False
-                prepared.append(row_copy)
-                continue
-
-            selected_column, text = selected
-            assert parent_tokens is not None
-            if parent_tokens <= self.max_tokens:
-                row_copy["embedding_input_action"] = "none"
-                row_copy["embedding_input_token_count"] = parent_tokens
-                row_copy["embedding_input_parent_token_count"] = parent_tokens
-                row_copy[_OVERLENGTH_COLUMN] = False
-                row_copy[_SPLIT_PARENT_COLUMN] = False
-                row_copy[_SPLIT_CHILD_COLUMN] = False
-                prepared.append(row_copy)
-                continue
-
-            chunks = self._split(text)
-            parent_id = _parent_id(row_copy, text)
-            for chunk_index, (chunk, start, end, formatted_tokens) in enumerate(chunks):
-                child = copy.deepcopy(row_copy)
-                child[selected_column] = chunk
-                if selected_column == "text" and "content" in child:
-                    child["content"] = chunk
-                metadata = child.get("metadata")
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                    child["metadata"] = metadata
-                chunk_id = hashlib.sha256(f"{parent_id}\0{start}\0{end}".encode("utf-8")).hexdigest()
-                metadata.update(
-                    {
-                        "content": chunk,
-                        "embedding_parent_id": parent_id,
-                        "embedding_chunk_id": chunk_id,
-                        "embedding_chunk_index": chunk_index,
-                        "embedding_chunk_count": len(chunks),
-                        "embedding_chunk_start_token": start,
-                        "embedding_chunk_end_token": end,
-                    }
-                )
-                child["embedding_input_action"] = "split"
-                child["embedding_input_token_count"] = formatted_tokens
-                child["embedding_input_parent_token_count"] = parent_tokens
-                child[_OVERLENGTH_COLUMN] = chunk_index == 0
-                child[_SPLIT_PARENT_COLUMN] = chunk_index == 0
-                child[_SPLIT_CHILD_COLUMN] = True
-                prepared.append(child)
+            prepared.extend(self._expand_row(row, selected, parent_tokens))
 
         return pd.DataFrame(prepared).reset_index(drop=True)
 

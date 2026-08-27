@@ -284,6 +284,24 @@ def test_dense_record_conversion_rejects_partial_embedding_coverage() -> None:
         to_client_vdb_records(rows)
 
 
+def test_dense_record_conversion_ignores_inherited_page_uri_without_searchable_content() -> None:
+    rows = [
+        {"text": "embedded", "metadata": {"embedding": [0.1, 0.2]}},
+        {
+            "_content_type": "table_caption",
+            "_stored_image_uri": "s3://artifacts/page.png",
+            "page_image": {"stored_image_uri": "s3://artifacts/page.png"},
+            "metadata": {},
+        },
+    ]
+
+    records = to_client_vdb_records(rows)
+
+    assert len(records) == 1
+    assert len(records[0]) == 1
+    assert records[0][0]["metadata"]["content"] == "embedded"
+
+
 def test_narrow_lancedb_hit_promotes_canonical_multimodal_metadata() -> None:
     hit = _normalize_one(
         {

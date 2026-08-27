@@ -10,12 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from nemo_retriever.common.vdb.records import (
-    CONTENT_PROVENANCE_METADATA_KEYS,
-    VdbUploadError,
-    normalize_content_type,
-    row_has_uploadable_content_without_embedding,
-)
+from nemo_retriever.common.vdb.records import normalize_content_type
 
 
 def extract_embedding_from_row(
@@ -162,7 +157,7 @@ def build_lancedb_row(
 
     orig_meta = getattr(row, "metadata", None)
     if isinstance(orig_meta, dict):
-        for key in CONTENT_PROVENANCE_METADATA_KEYS:
+        for key in ("chunk_index", "chunk_count"):
             if key in orig_meta:
                 metadata_obj[key] = orig_meta[key]
 
@@ -212,13 +207,6 @@ def build_lancedb_rows(
     # underscore-prefixed column names into positional _0, _1, etc.
     has_provenance = isinstance(df, pd.DataFrame) and "_page_number" in df.columns
     provenance_pages = df["_page_number"].tolist() if has_provenance else None
-    graph_rows = df.to_dict("records") if isinstance(df, pd.DataFrame) else []
-    missing_embeddings = sum(row_has_uploadable_content_without_embedding(row) for row in graph_rows)
-    if missing_embeddings:
-        raise VdbUploadError(
-            "LanceDB is refusing a partial write because searchable rows are missing embeddings: "
-            f"input rows={len(graph_rows)}, missing embedding={missing_embeddings}."
-        )
 
     rows: List[Dict[str, Any]] = []
     for i, row in enumerate(df.itertuples(index=False)):

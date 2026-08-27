@@ -202,7 +202,8 @@ def embed_text_main_text_embed(
         logger.error("Embedding failed: %s: %s", type(exc).__name__, exc, exc_info=True)
         report_error("embed", exc)
         out_df = prepared_df.copy()
-        out_df[output_column] = [{"embedding": [], "error": str(exc)}] * len(out_df)
+        public_error = f"{type(exc).__name__}: embedding batch failed; inspect embed-stage logs for the cause"
+        out_df[output_column] = [{"embedding": [], "error": public_error} for _ in out_df.index]
         out_df[embedding_dim_column] = 0
         out_df[has_embedding_column] = False
         if "_embed_modality" in out_df.columns:

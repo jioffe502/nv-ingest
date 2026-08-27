@@ -25,7 +25,7 @@ _CONTENT_TYPE_ALIASES: dict[str, str] = {
     "table_caption": "table",
 }
 
-CONTENT_PROVENANCE_METADATA_KEYS = (
+_CONTENT_PROVENANCE_METADATA_KEYS = (
     "chunk_index",
     "chunk_count",
     "embedding_parent_id",
@@ -326,7 +326,7 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
     if bbox is not None:
         content_metadata.setdefault("bbox_xyxy_norm", bbox)
 
-    for key in CONTENT_PROVENANCE_METADATA_KEYS:
+    for key in _CONTENT_PROVENANCE_METADATA_KEYS:
         if key in metadata:
             content_metadata.setdefault(key, metadata[key])
 
@@ -355,12 +355,22 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
     return {"document_type": str(document_type), "metadata": record_metadata}
 
 
-def row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
+def _row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
     """Return whether a searchable graph row is missing its dense embedding."""
     metadata = _dict_or_empty(row.get("metadata"))
     if _embedding_from_graph_row(row, metadata) is not None:
         return False
-    return bool(_text_from_graph_row(row, metadata)) or _is_image_backed_row(row)
+    if _text_from_graph_row(row, metadata):
+        return True
+    if _first_str(row.get("_image_b64")):
+        return True
+
+    stored_image_uri = _first_str(row.get("_stored_image_uri"), row.get("stored_image_uri"))
+    content_metadata = _dict_or_empty(metadata.get("content_metadata"))
+    content_type = normalize_content_type(
+        row.get("_content_type") or row.get("content_type") or content_metadata.get("type")
+    )
+    return bool(stored_image_uri and not _is_inherited_page_uri(row, stored_image_uri, content_type))
 
 
 def _stage_error_field(path: Any) -> str:
@@ -385,7 +395,7 @@ def _raise_for_empty_vdb_conversion(graph_rows: list[dict[str, Any]]) -> None:
     reasons = Counter(
         (
             "missing embedding"
-            if row_has_uploadable_content_without_embedding(row)
+            if _row_has_uploadable_content_without_embedding(row)
             else "missing searchable text or image backing"
         )
         for row in graph_rows
@@ -427,7 +437,7 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
     # would call _client_record_from_graph_row twice per row on large datasets.
     # isinstance(row, dict): plain lists are not normalized like DataFrame rows; skip None/Series/etc.
     inner = [record for row in graph_rows if (record := _client_record_from_graph_row(row)) is not None]
-    missing_embeddings = sum(row_has_uploadable_content_without_embedding(row) for row in graph_rows)
+    missing_embeddings = sum(_row_has_uploadable_content_without_embedding(row) for row in graph_rows)
     if inner and missing_embeddings:
         raise VdbUploadError(
             "vdb_upload is refusing a partial write because searchable rows are missing embeddings: "

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Sequence
 from unittest.mock import Mock, patch
 
@@ -30,15 +31,12 @@ class _RejectOneInputEmbedder:
 
 
 class _AlwaysFailsEmbedder:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
     def embed(self, texts: Sequence[str], *, batch_size: int):
+        self.calls.append(list(texts))
         raise RuntimeError("embedding service unavailable")
-
-
-class _RejectOneRuntimeEmbedder:
-    def embed(self, texts: Sequence[str], *, batch_size: int):
-        if any("runtime rejected" in text for text in texts):
-            raise RuntimeError("row-specific runtime rejection")
-        return [[float(len(text))] for text in texts]
 
 
 class _WhitespaceTokenizer:
@@ -48,7 +46,7 @@ class _WhitespaceTokenizer:
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
         ids = []
-        for token in text.split():
+        for token in re.findall(r"\S+\s*|\s+", text):
             if token not in self._tokens:
                 token_id = len(self._tokens) + 1
                 self._tokens[token] = token_id
@@ -57,7 +55,12 @@ class _WhitespaceTokenizer:
         return ([-1] + ids) if add_special_tokens else ids
 
     def decode(self, token_ids: list[int], *, skip_special_tokens: bool = True) -> str:
-        return " ".join(self._ids[token_id] for token_id in token_ids if token_id != -1)
+        return "".join(self._ids[token_id] for token_id in token_ids if token_id != -1)
+
+
+class _NormalizingWhitespaceTokenizer(_WhitespaceTokenizer):
+    def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
+        return super().encode(" ".join(text.split()), add_special_tokens=add_special_tokens)
 
 
 class _BatchWhitespaceTokenizer(_WhitespaceTokenizer):
@@ -113,51 +116,16 @@ class _LiteralSpecialTokenizer:
         return "".join(parts)
 
 
-def test_invalid_embedding_input_does_not_erase_valid_neighbors() -> None:
-    source = pd.DataFrame(
-        {
-            "text": ["valid before", "rejected input", "valid after"],
-            "metadata": [
-                {"source_path": "before.pdf"},
-                {"source_path": "bad.pdf"},
-                {"source_path": "after.pdf"},
-            ],
-        }
-    )
-
-    result = embed_text_main_text_embed(
-        source,
-        model=_RejectOneInputEmbedder(),
-        inference_batch_size=3,
-    )
-
-    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, False, True]
-    assert result.loc[0, "metadata"]["embedding"]
-    assert result.loc[2, "metadata"]["embedding"]
-    assert result.loc[1, "text_embeddings_1b_v2"]["error"]["message"] == "input exceeds the model limit"
-
-
-def test_runtime_row_failure_does_not_erase_valid_neighbors() -> None:
-    source = pd.DataFrame({"text": ["valid before", "runtime rejected", "valid after"]})
-
-    result = embed_text_main_text_embed(
-        source,
-        model=_RejectOneRuntimeEmbedder(),
-        inference_batch_size=3,
-    )
-
-    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, False, True]
-    assert result.loc[1, "text_embeddings_1b_v2"]["error"]["message"] == "row-specific runtime rejection"
-
-
-def test_batch_failure_is_counted_as_failed_and_unembedded(caplog) -> None:
+def test_systemic_local_failure_is_not_replayed_as_row_rejections(caplog) -> None:
     caplog.set_level(logging.WARNING, logger="nemo_retriever.models.inference.runtime")
+    embedder = _AlwaysFailsEmbedder()
 
     result = embed_text_main_text_embed(
         pd.DataFrame({"text": ["one", "two"]}),
-        model=_AlwaysFailsEmbedder(),
+        model=embedder,
     )
 
+    assert embedder.calls == [["passage: one", "passage: two"]]
     assert result["embedding_v1_counts_by_label"].tolist() == [
         {"unembedded": 1, "failed": 1},
         {"unembedded": 1, "failed": 1},
@@ -195,8 +163,8 @@ def test_oversized_middle_row_is_split_below_the_formatted_model_limit(caplog) -
 
     assert result["text"].tolist() == [
         "before",
-        "one two",
-        "three four",
+        "one two ",
+        "three four ",
         "five",
         "after",
     ]
@@ -244,7 +212,17 @@ def test_policy_measures_and_preserves_leading_and_trailing_whitespace() -> None
 
     assert result["text"].tolist() == [" ab", " "]
     assert "".join(result["text"]) == " ab "
-    assert result["embedding_input_token_count"].tolist() == [5, 3]
+    assert [
+        (metadata["embedding_chunk_start_token"], metadata["embedding_chunk_end_token"])
+        for metadata in result["metadata"]
+    ] == [(0, 3), (3, 4)]
+
+
+def test_policy_fails_closed_when_tokenizer_decode_changes_source_text() -> None:
+    policy = EmbeddingInputPolicy(tokenizer=_NormalizingWhitespaceTokenizer(), max_tokens=4, prefix="passage: ")
+
+    with pytest.raises(ValueError, match="without changing its (token sequence|source text)"):
+        policy.prepare(pd.DataFrame({"text": ["one  two three four five"]}))
 
 
 def test_policy_batches_admission_and_preserves_non_overlength_rows_exactly() -> None:
@@ -354,7 +332,7 @@ def test_remote_actor_passes_the_resolved_input_policy_to_embedding(
     from nemo_retriever.operators.embed import cpu_operator
 
     policy = object()
-    embed = Mock(return_value=pd.DataFrame({"text": ["prepared"]}))
+    embed = Mock(spec=cpu_operator.embed_text_main_text_embed, return_value=pd.DataFrame({"text": ["prepared"]}))
 
     def configure(kwargs):
         kwargs["embedding_input_policy"] = policy
@@ -362,7 +340,7 @@ def test_remote_actor_passes_the_resolved_input_policy_to_embedding(
 
     monkeypatch.setattr(cpu_operator, "configure_embedding_input_policy", configure)
     monkeypatch.setattr(cpu_operator, "embed_text_main_text_embed", embed)
-    monkeypatch.setattr(cpu_operator, "probe_endpoint", Mock())
+    monkeypatch.setattr(cpu_operator, "probe_endpoint", Mock(spec=cpu_operator.probe_endpoint))
 
     actor = cpu_operator._BatchEmbedCPUActor(
         params=EmbedParams(
@@ -381,7 +359,7 @@ def test_query_actor_resolves_the_shared_policy_at_query_max_length(
     from nemo_retriever.models.inference import embedding_input
 
     policy = object()
-    resolver = Mock(return_value=policy)
+    resolver = Mock(spec=embedding_input.resolve_known_embedding_input_policy, return_value=policy)
     monkeypatch.setattr(embedding_input, "resolve_known_embedding_input_policy", resolver)
 
     kwargs = {
@@ -399,10 +377,11 @@ def test_query_actor_resolves_the_shared_policy_at_query_max_length(
 
 
 def test_local_actor_does_not_raise_vllm_above_checkpoint_support(monkeypatch) -> None:
+    from nemo_retriever.models import create_local_embedder as create_local_embedder_factory
     from nemo_retriever.operators.embed import gpu_operator
 
     policy = EmbeddingInputPolicy(tokenizer=_WhitespaceTokenizer(), max_tokens=8192, prefix="passage: ")
-    create_local_embedder = Mock(return_value=object())
+    create_local_embedder = Mock(spec=create_local_embedder_factory, return_value=object())
     monkeypatch.setattr(gpu_operator, "configure_embedding_input_policy", lambda kwargs: policy)
     monkeypatch.setattr("nemo_retriever.models.create_local_embedder", create_local_embedder)
     monkeypatch.setattr("nemo_retriever.models.warmup_registry.get_warmed_model", lambda name: None)
@@ -417,18 +396,13 @@ def test_local_actor_does_not_raise_vllm_above_checkpoint_support(monkeypatch) -
     assert create_local_embedder.call_args.kwargs["max_length"] == 8192
 
 
-def test_remote_input_rejection_does_not_erase_valid_neighbors() -> None:
+def test_remote_request_failure_is_not_replayed_or_persisted_with_response_body() -> None:
     calls: list[list[str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         prompts = json.loads(request.content)["input"]
         calls.append(prompts)
-        if "rejected input" in prompts:
-            return httpx.Response(400, text="input exceeds the model limit")
-        return httpx.Response(
-            200,
-            json={"data": [{"index": index, "embedding": [float(len(text))]} for index, text in enumerate(prompts)]},
-        )
+        return httpx.Response(400, text="echoed document: rejected input")
 
     client_factory = httpx.Client
     source = pd.DataFrame({"text": ["valid before", "rejected input", "valid after"]})
@@ -443,17 +417,12 @@ def test_remote_input_rejection_does_not_erase_valid_neighbors() -> None:
             inference_batch_size=3,
         )
 
-    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, False, True]
-    assert result.loc[1, "text_embeddings_1b_v2"]["error"]["message"] == (
-        "Embedding endpoint returned HTTP 400; response body: input exceeds the model limit"
+    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [False, False, False]
+    assert "echoed document" not in result.loc[1, "text_embeddings_1b_v2"]["error"]
+    assert result.loc[1, "text_embeddings_1b_v2"]["error"] == (
+        "RuntimeError: embedding batch failed; inspect embed-stage logs for the cause"
     )
-    assert calls == [
-        ["valid before", "rejected input", "valid after"],
-        ["valid before"],
-        ["rejected input", "valid after"],
-        ["rejected input"],
-        ["valid after"],
-    ]
+    assert calls == [["valid before", "rejected input", "valid after"]]
 
 
 def test_client_side_policy_disables_remote_silent_truncation() -> None:
@@ -529,13 +498,14 @@ def test_local_and_remote_adapters_apply_the_same_split_policy() -> None:
         == remote["text"].tolist()
         == [
             "before",
-            "one two",
-            "three four",
+            "one two ",
+            "three four ",
             "five",
             "after",
         ]
     )
-    assert local["embedding_input_action"].tolist() == remote["embedding_input_action"].tolist()
+    assert not any(column.startswith("_embedding_input_") for column in local.columns)
+    assert not any(column.startswith("_embedding_input_") for column in remote.columns)
     assert local["text_embeddings_1b_v2_has_embedding"].tolist() == [True] * 5
     assert remote["text_embeddings_1b_v2_has_embedding"].tolist() == [True] * 5
 
