@@ -14,8 +14,8 @@ import pytest
 
 lancedb = pytest.importorskip("lancedb", minversion="0.34.0")
 
-from nemo_retriever.common.vdb.sink import OversizedVdbRowError, VdbSinkPolicy
 from nemo_retriever.common.vdb.records import VdbUploadError
+from nemo_retriever.common.vdb.sink import OversizedVdbRowError, VdbSinkPolicy
 from nemo_retriever.operators.vdb import IngestVdbOperator
 
 _POLICY = VdbSinkPolicy(max_batch_bytes=1024, prefetch_batches=1)
@@ -225,7 +225,8 @@ def test_canonical_stream_matches_compatibility_sink_without_wide_columns(tmp_pa
     assert stream_report.input_unique_buffers > 0
     assert stream_report.timings["reader_production"] >= 0
     assert stream_report.timings["lance_owned_write"] >= 0
-    assert all(table.schema.names == ["vector", "text", "metadata", "source", "id"] for table in canonical_tables)
+    assert all(table.schema.names[:5] == ["vector", "text", "metadata", "source", "id"] for table in canonical_tables)
+    assert all(len(table.schema.names) == 6 for table in canonical_tables)
     assert all(report.output_rows == 2 for report in projection_reports)
     assert all(report.output_retained_bytes < report.input_retained_bytes for report in projection_reports)
 
@@ -247,9 +248,7 @@ def test_canonical_stream_defers_invalid_only_partition_to_global_sink(
     invalid = _frame(1, 2)
     invalid.at[0, "text"] = ""
 
-    valid_batch, valid_report = operator.project_canonical_stream_batch(
-        valid, max_batch_bytes=_POLICY.max_batch_bytes
-    )
+    valid_batch, valid_report = operator.project_canonical_stream_batch(valid, max_batch_bytes=_POLICY.max_batch_bytes)
     invalid_batch, invalid_report = operator.project_canonical_stream_batch(
         invalid,
         max_batch_bytes=_POLICY.max_batch_bytes,
@@ -268,6 +267,28 @@ def test_canonical_stream_defers_invalid_only_partition_to_global_sink(
     assert report.rejected_rows == 1
     assert report.rejection_reasons == {"missing searchable text or image backing": 1}
     assert lancedb.connect(str(tmp_path)).open_table("chunks").count_rows() == 1
+
+
+def test_canonical_stream_preserves_conversion_receipt_when_ray_coalesces_blocks(tmp_path: Path) -> None:
+    operator = _operator(tmp_path)
+    first = _frame(0, 3)
+    second = _frame(3, 7)
+    first.at[0, "text"] = ""
+    second.loc[[0, 1], "text"] = ""
+
+    first_batch, _ = operator.project_canonical_stream_batch(first, max_batch_bytes=_POLICY.max_batch_bytes)
+    second_batch, _ = operator.project_canonical_stream_batch(second, max_batch_bytes=_POLICY.max_batch_bytes)
+    coalesced = pa.concat_tables([first_batch, second_batch])
+    report = operator.consume_canonical_stream(
+        iter([coalesced]),
+        operation_id="coalesced-conversion-receipt",
+        policy=_POLICY,
+    )
+
+    assert report.source_rows == 7
+    assert report.rows_written == 4
+    assert report.rejected_rows == 3
+    assert report.rejection_reasons == {"missing searchable text or image backing": 3}
 
 
 def test_canonical_stream_rejects_globally_invalid_partitions(tmp_path: Path) -> None:
