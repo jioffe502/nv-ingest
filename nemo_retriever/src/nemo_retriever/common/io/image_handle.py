@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import math
+import os
 from typing import Any, Iterable, Mapping, Sequence
 
 import fsspec
@@ -21,12 +22,19 @@ import fsspec
 EMBEDDING_IMAGE_HANDLE_FIELD = "_embedding_image_handle"
 IMAGE_HANDLE_CONTAINER_FIELD = "image_handle"
 IMAGE_HANDLE_VERSION = 1
+IMAGE_HANDLE_AUDIT_ENV = "NEMO_RETRIEVER_IMAGE_HANDLE_AUDIT"
 
 _SUPPORTED_MEDIA_TYPES = frozenset({"image/png", "image/jpeg"})
 
 
 class ImageHandleError(ValueError):
     """Raised when an embedding image reference cannot be trusted."""
+
+
+def image_transport_audit_enabled() -> bool:
+    """Return whether qualification-grade handle accounting should be retained."""
+
+    return os.environ.get(IMAGE_HANDLE_AUDIT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def build_image_handle(
