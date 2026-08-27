@@ -11,12 +11,13 @@ from typing import Any, List, Optional, Sequence
 
 import pandas as pd
 
-logger = logging.getLogger(__name__)
-
-from nemo_retriever.models.nim.error_reporter import report_error
-from nemo_retriever.models import VL_EMBED_MODEL, resolve_embed_model
 from nemo_retriever.common.params.models import IMAGE_MODALITIES
+from nemo_retriever.models import VL_EMBED_MODEL, resolve_embed_model
+from nemo_retriever.models.inference.embedding_input import _INTERNAL_ACCOUNTING_COLUMNS, EmbeddingInputPolicy
 from nemo_retriever.models.inference.main_text_embed import TextEmbeddingConfig, create_text_embeddings_for_df
+from nemo_retriever.models.nim.error_reporter import report_error
+
+logger = logging.getLogger(__name__)
 
 
 def _embed_group(
@@ -34,6 +35,7 @@ def _embed_group(
     nim_http_max_concurrent: int = 32,
     input_type: str = "passage",
     request_timeout_s: float = 600.0,
+    truncate: str = "END",
 ) -> pd.DataFrame:
     """Embed a single modality group via ``create_text_embeddings_for_df``."""
     embedder = None
@@ -73,7 +75,7 @@ def _embed_group(
         batch_size=int(effective_batch_size),
         encoding_format="float",
         input_type=str(input_type),
-        truncate="END",
+        truncate=str(truncate),
         dimensions=None,
         embedding_nim_endpoint=endpoint or "http://localhost:8012/v1",
         embedding_model=resolved_model_name or VL_EMBED_MODEL,
@@ -117,6 +119,7 @@ def embed_text_main_text_embed(
     nim_http_max_concurrent: int = 32,
     input_type: str = "passage",
     request_timeout_s: float | None = None,
+    embedding_input_policy: EmbeddingInputPolicy | None = None,
     **_extras: Any,
 ) -> Any:
     """Embed graph batches while preserving the legacy output columns."""
@@ -134,16 +137,22 @@ def embed_text_main_text_embed(
 
     resolved_model_name = resolve_embed_model(model_name)
 
-    has_per_row_modality = "_embed_modality" in batch_df.columns
+    prepared_df = (
+        embedding_input_policy.prepare(batch_df, text_column=text_column, default_modality=embed_modality)
+        if embedding_input_policy is not None
+        else batch_df
+    )
+
+    has_per_row_modality = "_embed_modality" in prepared_df.columns
     if has_per_row_modality:
-        modalities = batch_df["_embed_modality"].fillna(embed_modality).unique().tolist()
+        modalities = prepared_df["_embed_modality"].fillna(embed_modality).unique().tolist()
     else:
         modalities = [embed_modality]
 
     try:
         if len(modalities) == 1:
             out_df = _embed_group(
-                batch_df,
+                prepared_df,
                 group_modality=modalities[0],
                 model=model,
                 endpoint=endpoint,
@@ -156,12 +165,13 @@ def embed_text_main_text_embed(
                 nim_http_max_concurrent=nim_http_max_concurrent,
                 input_type=input_type,
                 request_timeout_s=float(request_timeout_s),
+                truncate="NONE" if endpoint is not None and embedding_input_policy is not None else "END",
             )
         else:
             parts: List[pd.DataFrame] = []
             for modality in modalities:
-                mask = batch_df["_embed_modality"] == modality
-                group_df = batch_df.loc[mask]
+                mask = prepared_df["_embed_modality"] == modality
+                group_df = prepared_df.loc[mask]
                 if group_df.empty:
                     continue
                 part = _embed_group(
@@ -178,6 +188,7 @@ def embed_text_main_text_embed(
                     nim_http_max_concurrent=nim_http_max_concurrent,
                     input_type=input_type,
                     request_timeout_s=float(request_timeout_s),
+                    truncate="NONE" if endpoint is not None and embedding_input_policy is not None else "END",
                 )
                 parts.append(part)
             out_df = pd.concat(parts).sort_index()
@@ -190,13 +201,12 @@ def embed_text_main_text_embed(
             logger.debug("torch.cuda.empty_cache() failed during error cleanup: %s", _cache_exc)
         logger.error("Embedding failed: %s: %s", type(exc).__name__, exc, exc_info=True)
         report_error("embed", exc)
-        out_df = batch_df.copy()
+        out_df = prepared_df.copy()
         out_df[output_column] = [{"embedding": [], "error": str(exc)}] * len(out_df)
         out_df[embedding_dim_column] = 0
         out_df[has_embedding_column] = False
         if "_embed_modality" in out_df.columns:
             out_df = out_df.drop(columns=["_embed_modality"])
-        return out_df
 
     if embedding_dim_column:
 
@@ -219,7 +229,41 @@ def embed_text_main_text_embed(
 
     embedded_flags = out_df[has_embedding_column].tolist()
     out_df["embedding_v1_num_detections"] = [int(f) for f in embedded_flags]
-    out_df["embedding_v1_counts_by_label"] = [{"embedded": 1} if f else {} for f in embedded_flags]
+    counts_by_label: list[dict[str, int]] = []
+    for _, row in out_df.iterrows():
+        embedded = bool(row.get(has_embedding_column))
+        counts = {"embedded": 1} if embedded else {"unembedded": 1}
+        payload = row.get(output_column)
+        if isinstance(payload, dict) and payload.get("error") is not None:
+            counts["failed"] = 1
+        if bool(row.get("_embedding_input_overlength", False)):
+            counts["overlength"] = 1
+        if bool(row.get("_embedding_input_split_parent", False)):
+            counts["split"] = 1
+        if bool(row.get("_embedding_input_split_child", False)):
+            counts["split_child"] = 1
+        counts_by_label.append(counts)
+    out_df["embedding_v1_counts_by_label"] = counts_by_label
+
+    totals = {
+        label: sum(int(counts.get(label, 0)) for counts in counts_by_label)
+        for label in ("overlength", "split", "split_child", "failed", "embedded", "unembedded")
+    }
+    input_rows = len(out_df.index) - totals["split_child"] + totals["split"]
+    summary = (
+        f"Embedding summary: input_rows={input_rows} output_rows={len(out_df.index)} "
+        f"overlength={totals['overlength']} split={totals['split']} truncated=0 "
+        f"failed={totals['failed']} embedded={totals['embedded']} unembedded={totals['unembedded']} "
+        f"split_children={totals['split_child']}"
+    )
+    if totals["failed"] or totals["unembedded"]:
+        logger.warning(summary)
+    elif totals["overlength"]:
+        logger.info(summary)
+
+    internal_accounting = [column for column in _INTERNAL_ACCOUNTING_COLUMNS if column in out_df.columns]
+    if internal_accounting:
+        out_df = out_df.drop(columns=internal_accounting)
 
     if "_embed_modality" in out_df.columns:
         # Internal embedding router column; StoreOperator consumes _image_b64.

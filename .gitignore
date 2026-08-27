@@ -280,3 +280,8 @@ spool/
 # Local huggingface cache and build directories
 .work*/
 dist*
+
+# Mirrored unit test for the embedding input module (the generic models/ rule above is for artifacts).
+!nemo_retriever/tests/models/
+!nemo_retriever/tests/models/inference/
+!nemo_retriever/tests/models/inference/test_embedding_input.py

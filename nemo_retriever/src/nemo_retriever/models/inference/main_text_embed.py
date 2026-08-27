@@ -72,6 +72,19 @@ _DEFAULT_HTTP_MAX_429_RETRIES = 3
 _MAX_HTTP_RETRY_DELAY_S = 30.0
 _MAX_HTTP_ERROR_BODY_CHARS = 2_000
 _VERIFIED_IMAGE_B64_FIELD = "_verified_image_b64"
+_INPUT_REJECTION_HTTP_STATUS_CODES = frozenset({400, 413, 422})
+
+
+class EmbeddingRequestError(RuntimeError):
+    """A remote embedding request failed with a known HTTP status."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = int(status_code)
+
+    @property
+    def is_input_rejection(self) -> bool:
+        return self.status_code in _INPUT_REJECTION_HTTP_STATUS_CODES
 
 
 @dataclass(slots=True)
@@ -400,7 +413,10 @@ def _http_embed_openai_compat(
                 if len(body) > _MAX_HTTP_ERROR_BODY_CHARS:
                     body = body[:_MAX_HTTP_ERROR_BODY_CHARS] + "... [truncated]"
                 detail = f"; response body: {body}" if body else ""
-                raise RuntimeError(f"Embedding endpoint returned HTTP {status_code}{detail}") from exc
+                raise EmbeddingRequestError(
+                    f"Embedding endpoint returned HTTP {status_code}{detail}",
+                    status_code=status_code,
+                ) from exc
             data = resp.json()
             break
 
@@ -477,6 +493,8 @@ def _make_async_request(
         )
         response["embedding"] = vecs
         response["info_msg"] = None
+    except EmbeddingRequestError:
+        raise
     except Exception as err:
         err_str = str(err)
         if len(err_str) > 500:
@@ -504,27 +522,58 @@ def _async_request_handler(
     if modalities is None:
         modalities = [None] * len(prompts)  # type: ignore[assignment]
 
+    def request_batch(prompt_batch: List[str], modality_batch: Optional[List[str]]) -> List[dict]:
+        try:
+            return [
+                _make_async_request(
+                    prompts=prompt_batch,
+                    api_key=api_key or None,
+                    embedding_nim_endpoint=str(embedding_nim_endpoint),
+                    embedding_model=str(embedding_model),
+                    embedding_model_provider_prefix=embedding_model_provider_prefix,
+                    encoding_format=str(encoding_format),
+                    input_type=str(input_type),
+                    truncate=str(truncate),
+                    filter_errors=bool(filter_errors),
+                    modalities=modality_batch,
+                    dimensions=dimensions,
+                    timeout_s=timeout_s,
+                )
+            ]
+        except EmbeddingRequestError as exc:
+            if not exc.is_input_rejection:
+                raise
+            if len(prompt_batch) > 1:
+                midpoint = len(prompt_batch) // 2
+                left_modalities = modality_batch[:midpoint] if modality_batch is not None else None
+                right_modalities = modality_batch[midpoint:] if modality_batch is not None else None
+                return request_batch(prompt_batch[:midpoint], left_modalities) + request_batch(
+                    prompt_batch[midpoint:], right_modalities
+                )
+            return [
+                {
+                    "embedding": [None],
+                    "info_msg": {
+                        "error": {
+                            "stage": "embed",
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    },
+                }
+            ]
+
     pool_size = max_concurrent if max_concurrent and max_concurrent > 0 else None
     with ThreadPoolExecutor(max_workers=pool_size) as executor:
         futures = [
             executor.submit(
-                _make_async_request,
-                prompts=prompt_batch,
-                api_key=api_key or None,
-                embedding_nim_endpoint=str(embedding_nim_endpoint),
-                embedding_model=str(embedding_model),
-                embedding_model_provider_prefix=embedding_model_provider_prefix,
-                encoding_format=str(encoding_format),
-                input_type=str(input_type),
-                truncate=str(truncate),
-                filter_errors=bool(filter_errors),
-                modalities=modality_batch,  # type: ignore[arg-type]
-                dimensions=dimensions,
-                timeout_s=timeout_s,
+                request_batch,
+                prompt_batch,
+                modality_batch,
             )
             for prompt_batch, modality_batch in zip(prompts, modalities)
         ]
-        results = [future.result() for future in futures]
+        results = [result for future in futures for result in future.result()]
 
     return results
 
@@ -579,20 +628,47 @@ def _callable_runner(
     flat_embeddings: List[Optional[Sequence[float]]] = []
     flat_info_msgs: List[Optional[dict]] = []
 
-    for prompt_batch in prompts:
-        if not prompt_batch:
-            continue
-        for i in range(0, len(prompt_batch), max(1, int(batch_size))):
-            chunk = prompt_batch[i : i + max(1, int(batch_size))]
-            vecs = embedder(chunk)
-            vecs_list = list(vecs)
+    def is_systemic_failure(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return isinstance(exc, MemoryError) or "out of memory" in message or "outofmemory" in type(exc).__name__.lower()
+
+    def embed_chunk(chunk: List[str]) -> None:
+        try:
+            vecs_list = list(embedder(chunk))
             if len(vecs_list) != len(chunk):
                 raise ValueError(
                     "Local embedder returned a mismatched number of embeddings "
                     f"(got={len(vecs_list)} expected={len(chunk)})"
                 )
-            flat_embeddings.extend(vecs_list)
-            flat_info_msgs.extend([None] * len(vecs_list))
+        except Exception as exc:  # noqa: BLE001 - isolate row-specific failures regardless of adapter exception type
+            if is_systemic_failure(exc):
+                raise
+            if len(chunk) > 1:
+                midpoint = len(chunk) // 2
+                embed_chunk(chunk[:midpoint])
+                embed_chunk(chunk[midpoint:])
+                return
+            flat_embeddings.append(None)
+            flat_info_msgs.append(
+                {
+                    "error": {
+                        "stage": "embed",
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                }
+            )
+            return
+
+        flat_embeddings.extend(vecs_list)
+        flat_info_msgs.extend([None] * len(vecs_list))
+
+    for prompt_batch in prompts:
+        if not prompt_batch:
+            continue
+        for i in range(0, len(prompt_batch), max(1, int(batch_size))):
+            chunk = prompt_batch[i : i + max(1, int(batch_size))]
+            embed_chunk(chunk)
 
     return {"embeddings": flat_embeddings, "info_msgs": flat_info_msgs}
 
@@ -622,7 +698,10 @@ def _add_embeddings_retriever_df(
         row[metadata_column] = md
 
     if output_payload_column:
-        row[output_payload_column] = {"embedding": embedding, "info_msg": info_msg}
+        payload = {"embedding": embedding, "info_msg": info_msg}
+        if isinstance(info_msg, dict) and info_msg.get("error") is not None:
+            payload["error"] = info_msg["error"]
+        row[output_payload_column] = payload
 
     row["_contains_embeddings"] = embedding is not None
     return row
