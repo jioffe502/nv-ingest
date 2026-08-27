@@ -22,6 +22,7 @@ from nemo_retriever.common.io.image_handle import (
     EMBEDDING_IMAGE_HANDLE_FIELD,
     IMAGE_HANDLE_CONTAINER_FIELD,
     build_image_handle,
+    image_transport_stats,
 )
 from nemo_retriever.common.modality.ocr.shared import _crop_b64_image_by_norm_bbox
 from nemo_retriever.operators.abstract_operator import AbstractOperator
@@ -385,13 +386,38 @@ class StoreOperator(AbstractOperator, CPUOperator):
             store_kwargs = self._params
         else:
             store_kwargs = {}
-        return _store_row_images(
+        strip_base64 = bool(store_kwargs.get("strip_base64", True))
+        out = _store_row_images(
             data,
             storage_uri=store_kwargs.get("storage_uri", "stored_images"),
             storage_options=store_kwargs.get("storage_options") or {},
             image_format=store_kwargs.get("image_format", "png"),
-            strip_base64=bool(store_kwargs.get("strip_base64", True)),
+            strip_base64=strip_base64,
         )
+        inline_values: list[Any] = []
+        for column in ("_image_b64", "image_b64"):
+            if column in out.columns:
+                inline_values.extend(out[column].tolist())
+        stats = image_transport_stats(
+            row_count=len(out.index),
+            inline_values=inline_values,
+            handle_values=out.get(EMBEDDING_IMAGE_HANDLE_FIELD, pd.Series(dtype=object)),
+        )
+        if stats["handle_rows"] or stats["inline_rows"]:
+            logger.info(
+                "Image handle production: rows=%d handle_rows=%d logical_handle_bytes=%d "
+                "unique_handles=%d unique_handle_bytes=%d inline_output_rows=%d "
+                "inline_output_base64_chars=%d strip_base64=%s",
+                stats["rows"],
+                stats["handle_rows"],
+                stats["logical_handle_bytes"],
+                stats["unique_handles"],
+                stats["unique_handle_bytes"],
+                stats["inline_rows"],
+                stats["inline_base64_chars"],
+                strip_base64,
+            )
+        return out
 
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data
