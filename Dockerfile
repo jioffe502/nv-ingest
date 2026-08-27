@@ -18,6 +18,9 @@ FROM $BASE_IMG:$BASE_IMG_TAG AS base
 
 ARG DOWNLOAD_DEFAULT_TOKENIZER="False"
 
+# Historical build-arg name retained for compatibility. Admission now needs
+# the pinned model config and prompt metadata in addition to tokenizer.json.
+
 ENV HF_HOME=/opt/nemo-retriever/huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -122,7 +125,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/retriever_runtime/bin/activate \
     && uv pip install -e "./nemo_retriever[service,multimedia]" \
     && if [ "${DOWNLOAD_DEFAULT_TOKENIZER}" = "True" ]; then \
-         python -c "from nemo_retriever.common.modality.txt.split import DEFAULT_TOKENIZER_MODEL_ID; from nemo_retriever.common.modality.txt.tokenizer_provider import load_chunk_tokenizer; load_chunk_tokenizer(DEFAULT_TOKENIZER_MODEL_ID)"; \
+         python -c "from nemo_retriever.common.modality.txt.split import DEFAULT_TOKENIZER_MODEL_ID; from nemo_retriever.models.inference.embedding_input import resolve_embedding_input_policy; resolve_embedding_input_policy(DEFAULT_TOKENIZER_MODEL_ID, configured_max_tokens=8192, input_type='passage')"; \
        fi
 
 # GPU service install: in-pod Hugging Face models + multimedia (ASR, SVG).
@@ -141,7 +144,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/retriever_runtime/bin/activate \
     && uv pip install -e "./nemo_retriever[service,local,multimedia]" \
     && if [ "${DOWNLOAD_DEFAULT_TOKENIZER}" = "True" ]; then \
-         python -c "from nemo_retriever.common.modality.txt.split import DEFAULT_TOKENIZER_MODEL_ID; from nemo_retriever.common.modality.txt.tokenizer_provider import load_chunk_tokenizer; load_chunk_tokenizer(DEFAULT_TOKENIZER_MODEL_ID)"; \
+         python -c "from nemo_retriever.common.modality.txt.split import DEFAULT_TOKENIZER_MODEL_ID; from nemo_retriever.models.inference.embedding_input import resolve_embedding_input_policy; resolve_embedding_input_policy(DEFAULT_TOKENIZER_MODEL_ID, configured_max_tokens=8192, input_type='passage')"; \
        fi
 
 # Default: run in-process pipeline (help if no args)
