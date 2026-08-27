@@ -12,10 +12,13 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
-from ray.data.block import BlockAccessor
 from ray.data import DataContext
+from ray.data.block import BlockAccessor
 from ray.data.extensions import TensorArray
 
+from nemo_retriever.common.io.image_handle import EMBEDDING_IMAGE_HANDLE_FIELD
+from nemo_retriever.common.modality.content_transforms import collapse_content_to_page_rows, explode_content_to_rows
+from nemo_retriever.common.modality.embedding_transport import EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD
 from nemo_retriever.graph.executor import (
     _ArrowPandasOperatorAdapter,
     _FinalProducerTelemetryAdapter,
@@ -25,8 +28,6 @@ from nemo_retriever.graph.executor import (
     ray_dataset_to_pandas,
 )
 from nemo_retriever.graph.pipeline_graph import Graph
-from nemo_retriever.common.modality.content_transforms import collapse_content_to_page_rows, explode_content_to_rows
-from nemo_retriever.common.modality.embedding_transport import EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD
 from nemo_retriever.operators.abstract_operator import AbstractOperator
 from nemo_retriever.operators.extract.txt.ray_data import TextChunkCPUActor
 from nemo_retriever.operators.graph_ops.custom_operator import UDFOperator
@@ -60,11 +61,20 @@ def test_final_producer_telemetry_adapter_preserves_output_and_reports_phase(cap
 
 
 def test_narrow_embedding_transport_adapter_reports_compaction(capsys) -> None:
+    handle = {
+        "version": 1,
+        "uri": "s3://page.png",
+        "sha256": "a" * 64,
+        "byte_length": 123,
+        "media_type": "image/png",
+        "crop_bbox_xyxy_norm": None,
+    }
     batch = pd.DataFrame(
         {
             "text": ["page text"],
             "page_image": [{"image_b64": "payload" * 100, "stored_image_uri": "s3://page.png"}],
             "table": [[{"text": "table text"}]],
+            EMBEDDING_IMAGE_HANDLE_FIELD: [handle],
         }
     )
 
@@ -76,6 +86,7 @@ def test_narrow_embedding_transport_adapter_reports_compaction(capsys) -> None:
 
     assert "page_image" not in result.columns
     assert result.iloc[0][EMBEDDING_TRANSPORT_PAGE_IMAGE_URI_FIELD] == "s3://page.png"
+    assert result.iloc[0][EMBEDDING_IMAGE_HANDLE_FIELD] == handle
     prefix = "NEMO_RETRIEVER_EMBEDDING_TRANSPORT "
     line = capsys.readouterr().out.strip()
     assert line.startswith(prefix)

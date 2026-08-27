@@ -8,11 +8,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from nemo_retriever.ingest.plan import ResolvedIngestPlan
-from nemo_retriever.ingestor.manifest import format_branch_summary
-from nemo_retriever.ingestor import Ingestor, create_ingestor
+from nemo_retriever.common.params.models import IMAGE_MODALITIES
 from nemo_retriever.common.vdb.lancedb import LanceDB
 from nemo_retriever.common.vdb.records import to_sparse_client_vdb_records
+from nemo_retriever.ingest.plan import ResolvedIngestPlan
+from nemo_retriever.ingestor import Ingestor, create_ingestor
+from nemo_retriever.ingestor.manifest import format_branch_summary
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +75,20 @@ def build_ingest_pipeline(plan: ResolvedIngestPlan) -> Ingestor:
     if plan.caption_params is not None:
         ingestor = ingestor.caption(plan.caption_params)
 
+    store_before_embed = bool(
+        plan.store_params is not None
+        and plan.embed_params is not None
+        and plan.embed_params.embed_modality in IMAGE_MODALITIES
+        and plan.vdb_params is not None
+        and plan.vdb_params.execution.embedding_transport_mode == "compact"
+    )
+    if store_before_embed:
+        assert plan.store_params is not None
+        ingestor = ingestor.store(plan.store_params)
+
     if not plan.sparse:
         ingestor = ingestor.embed(plan.embed_params) if plan.embed_params is not None else ingestor.embed()
-    if plan.store_params is not None:
+    if plan.store_params is not None and not store_before_embed:
         ingestor = ingestor.store(plan.store_params)
 
     if plan.vdb_params is not None and not plan.sparse:

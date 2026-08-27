@@ -8,21 +8,30 @@ Unit tests for multimodal embedding helpers and explode_content_to_rows.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import io
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
+from PIL import Image
+
+from nemo_retriever.common.io.image_handle import EMBEDDING_IMAGE_HANDLE_FIELD, ImageHandleError
 
 # ---------------------------------------------------------------------------
 # Pure helpers from main_text_embed (no transitive-import issues)
 # ---------------------------------------------------------------------------
 from nemo_retriever.models.inference.main_text_embed import (
+    TextEmbeddingConfig,
     _format_image_input_string,
     _format_text_image_pair_input_string,
     _image_from_row,
     _multimodal_callable_runner,
+    create_text_embeddings_for_df,
 )
 
 # ---------------------------------------------------------------------------
@@ -97,6 +106,67 @@ class TestImageFromRow:
         row = pd.Series(data)
         assert _image_from_row(row) is None
 
+    def test_rehydrates_and_crops_verified_handle(self, tmp_path: Path):
+        buf = io.BytesIO()
+        Image.new("RGB", (100, 80), color=(255, 0, 0)).save(buf, format="PNG")
+        raw = buf.getvalue()
+        image_path = tmp_path / "page.png"
+        image_path.write_bytes(raw)
+        row = pd.Series(
+            {
+                EMBEDDING_IMAGE_HANDLE_FIELD: {
+                    "version": 1,
+                    "uri": image_path.as_uri(),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "byte_length": len(raw),
+                    "media_type": "image/png",
+                    "crop_bbox_xyxy_norm": [0.25, 0.25, 0.75, 0.75],
+                }
+            }
+        )
+
+        rehydrated = _image_from_row(row)
+
+        assert rehydrated is not None
+        with Image.open(io.BytesIO(base64.b64decode(rehydrated))) as image:
+            assert image.size == (50, 40)
+
+    def test_corrupt_handle_fails_closed_before_embedding(self, tmp_path: Path):
+        image_path = tmp_path / "page.png"
+        image_path.write_bytes(b"corrupt")
+        row = pd.Series(
+            {
+                EMBEDDING_IMAGE_HANDLE_FIELD: {
+                    "version": 1,
+                    "uri": image_path.as_uri(),
+                    "sha256": hashlib.sha256(b"original").hexdigest(),
+                    "byte_length": len(b"original"),
+                    "media_type": "image/png",
+                    "crop_bbox_xyxy_norm": None,
+                }
+            }
+        )
+
+        with pytest.raises(ImageHandleError, match="byte length"):
+            _image_from_row(row)
+
+    def test_missing_handle_object_fails_closed_before_embedding(self, tmp_path: Path):
+        row = pd.Series(
+            {
+                EMBEDDING_IMAGE_HANDLE_FIELD: {
+                    "version": 1,
+                    "uri": (tmp_path / "missing.png").as_uri(),
+                    "sha256": "0" * 64,
+                    "byte_length": 1,
+                    "media_type": "image/png",
+                    "crop_bbox_xyxy_norm": None,
+                }
+            }
+        )
+
+        with pytest.raises(ImageHandleError, match="Failed to read"):
+            _image_from_row(row)
+
 
 class TestFormatInputStrings:
     def test_format_image_input_string(self):
@@ -168,6 +238,28 @@ class TestMultimodalCallableRunner:
         # Order must be preserved: row 0 (multimodal), row 1 (text fallback)
         assert result["embeddings"] == [[1.0, 2.0], [3.0, 4.0]]
         assert len(result["info_msgs"]) == 2
+
+    @patch("nemo_retriever.models.inference.main_text_embed.load_verified_image_b64", return_value="verified_b64")
+    def test_verified_handle_is_loaded_once_and_discarded_after_local_embedding(self, mock_load):
+        embedder = MagicMock()
+        embedder.embed_text_image.return_value = [[1.0, 2.0]]
+        handle = {
+            "version": 1,
+            "uri": "file:///shared/page.png",
+            "sha256": "a" * 64,
+            "byte_length": 123,
+            "media_type": "image/png",
+            "crop_bbox_xyxy_norm": None,
+        }
+
+        result, _ = create_text_embeddings_for_df(
+            pd.DataFrame({"text": ["with image"], EMBEDDING_IMAGE_HANDLE_FIELD: [handle]}),
+            task_config={"multimodal_embedder": embedder, "endpoint_url": None},
+            transform_config=TextEmbeddingConfig(embed_modality="text_image"),
+        )
+
+        assert mock_load.call_count == 1
+        assert "_verified_image_b64" not in result.columns
 
 
 # ===================================================================

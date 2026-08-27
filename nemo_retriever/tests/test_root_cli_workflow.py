@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import importlib
 import itertools
 import json
@@ -12,23 +11,23 @@ import logging
 import os
 import re
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import create_autospec
 
 import pytest
-from pydantic import ValidationError
 import typer.rich_utils as typer_rich_utils
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
+import nemo_retriever.cli.ingest.graph_commands as ingest_cli_graph
+import nemo_retriever.cli.ingest.shared as ingest_cli_shared
+import nemo_retriever.cli.ingest_workflow as ingest_workflow
+import nemo_retriever.cli.shared as cli_shared
 import nemo_retriever.ingest.execution as ingest_execution
 import nemo_retriever.ingest.plan as ingest_plan
 import nemo_retriever.ingest.service as ingest_service
-import nemo_retriever.cli.ingest_workflow as ingest_workflow
-import nemo_retriever.cli.ingest.graph_commands as ingest_cli_graph
-import nemo_retriever.cli.ingest.shared as ingest_cli_shared
-import nemo_retriever.cli.shared as cli_shared
-from nemo_retriever.ingestor.graph_ingestor import GraphIngestor
 from nemo_retriever.common.params import (
     ASRParams,
     AudioChunkParams,
@@ -43,6 +42,7 @@ from nemo_retriever.common.params import (
     VideoFrameParams,
     VideoFrameTextDedupParams,
 )
+from nemo_retriever.ingestor.graph_ingestor import GraphIngestor
 
 RUNNER = CliRunner()
 cli_main = importlib.import_module("nemo_retriever.cli.main")
@@ -993,6 +993,43 @@ def test_build_ingest_pipeline_attaches_store_after_embed_with_tuning(monkeypatc
     assert isinstance(store_params, StoreParams)
     assert store_params.storage_uri.endswith("/stored-images")
     assert store_params.batch_tuning.store_workers == 4
+
+
+def test_build_ingest_pipeline_stores_images_before_compact_multimodal_embed(monkeypatch, tmp_path) -> None:
+    fake_ingestor = _make_fake_ingestor()
+    document = tmp_path / "multimodal.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(ingest_execution, "create_ingestor", lambda **_kwargs: fake_ingestor)
+
+    plan = ingest_plan.resolve_ingest_plan(
+        ingest_plan.IngestPlanRequest(
+            source=ingest_plan.IngestSourceOptions(documents=[str(document)], input_type="pdf"),
+            runtime=ingest_plan.IngestRuntimeOptions(run_mode="batch"),
+            embed=ingest_plan.IngestEmbedOptions(
+                embed_model_name="nvidia/llama-nemotron-embed-vl-1b-v2",
+                embed_modality="text_image",
+                embed_granularity="page",
+            ),
+            image_store=ingest_plan.IngestImageStoreOptions(images_uri=str(tmp_path / "embedding-images")),
+            storage=ingest_plan.IngestStorageOptions(
+                result_mode="write_receipt",
+                transport_mode="canonical_stream",
+                embedding_transport_mode="compact",
+                vector_dim=2048,
+            ),
+        )
+    )
+
+    ingest_execution.build_ingest_pipeline(plan)
+
+    assert [method_call[0] for method_call in fake_ingestor.method_calls] == [
+        "files",
+        "extract",
+        "store",
+        "embed",
+        "vdb_upload",
+    ]
 
 
 def test_execute_ingest_plan_returns_structured_execution_data(monkeypatch, tmp_path) -> None:

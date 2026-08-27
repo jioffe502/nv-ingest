@@ -11,6 +11,11 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from nemo_retriever.common.io.image_handle import (
+    EMBEDDING_IMAGE_HANDLE_FIELD,
+    handle_with_crop,
+    image_handle_from_container,
+)
 from nemo_retriever.common.io.image_store import inline_image_b64
 from nemo_retriever.common.params.models import IMAGE_MODALITIES
 from nemo_retriever.operators.extract.ocr.ocr import _crop_b64_image_by_norm_bbox
@@ -106,6 +111,7 @@ def explode_content_to_rows(
             batch_df["_image_b64"] = batch_df["page_image"].apply(
                 lambda page_image: inline_image_b64(page_image) if isinstance(page_image, dict) else None
             )
+            batch_df[EMBEDDING_IMAGE_HANDLE_FIELD] = batch_df["page_image"].apply(image_handle_from_container)
         if "page_image" in batch_df.columns:
             batch_df["_stored_image_uri"] = batch_df["page_image"].apply(
                 lambda page_image: page_image.get("stored_image_uri") if isinstance(page_image, dict) else None
@@ -120,11 +126,13 @@ def explode_content_to_rows(
 
         page_image = row_dict.get("page_image")
         page_image_b64: Optional[str] = None
+        page_image_handle: Optional[dict[str, Any]] = None
         page_stored_uri: Optional[str] = None
         if isinstance(page_image, dict):
             page_stored_uri = page_image.get("stored_image_uri")
             if any_images:
                 page_image_b64 = inline_image_b64(page_image)
+                page_image_handle = image_handle_from_container(page_image)
 
         page_text = row_dict.get(text_column)
         if isinstance(page_text, str) and page_text.strip():
@@ -133,6 +141,7 @@ def explode_content_to_rows(
             page_row["_content_type"] = "text"
             if text_mod in IMAGE_MODALITIES:
                 page_row["_image_b64"] = page_image_b64
+                page_row[EMBEDDING_IMAGE_HANDLE_FIELD] = page_image_handle
             page_row["_stored_image_uri"] = page_stored_uri
             page_row["_bbox_xyxy_norm"] = None
             new_rows.append(page_row)
@@ -146,6 +155,7 @@ def explode_content_to_rows(
                 if not isinstance(item, dict):
                     continue
                 item_b64 = inline_image_b64(item) if struct_mod in IMAGE_MODALITIES else None
+                item_image_handle = image_handle_from_container(item) if struct_mod in IMAGE_MODALITIES else None
                 # Emit rows for text and (optionally) caption fields.
                 for field, content_type in [("text", column), ("caption", f"{column}_caption")]:
                     value = item.get(field, "")
@@ -158,15 +168,26 @@ def explode_content_to_rows(
                     if struct_mod in IMAGE_MODALITIES:
                         if item_b64:
                             content_row["_image_b64"] = item_b64
+                            content_row[EMBEDDING_IMAGE_HANDLE_FIELD] = item_image_handle
                         elif page_image_b64:
                             bbox = _normalize_bbox(item.get("bbox_xyxy_norm"))
                             if bbox is not None and len(bbox) == 4:
-                                cropped_b64, _ = _crop_b64_image_by_norm_bbox(page_image_b64, bbox_xyxy_norm=bbox)
+                                crop_result = _crop_b64_image_by_norm_bbox(page_image_b64, bbox_xyxy_norm=bbox)
+                                cropped_b64 = crop_result[0] if isinstance(crop_result, tuple) and crop_result else None
                                 content_row["_image_b64"] = cropped_b64
                             else:
                                 content_row["_image_b64"] = page_image_b64
+                            content_row[EMBEDDING_IMAGE_HANDLE_FIELD] = page_image_handle
+                        elif item_image_handle is not None:
+                            content_row["_image_b64"] = None
+                            content_row[EMBEDDING_IMAGE_HANDLE_FIELD] = item_image_handle
+                        elif page_image_handle is not None:
+                            bbox = _normalize_bbox(item.get("bbox_xyxy_norm"))
+                            content_row["_image_b64"] = None
+                            content_row[EMBEDDING_IMAGE_HANDLE_FIELD] = handle_with_crop(page_image_handle, bbox)
                         else:
                             content_row["_image_b64"] = None
+                            content_row[EMBEDDING_IMAGE_HANDLE_FIELD] = None
                     content_row["_stored_image_uri"] = item.get("stored_image_uri") or page_stored_uri
                     content_row["_bbox_xyxy_norm"] = _normalize_bbox(item.get("bbox_xyxy_norm"))
                     new_rows.append(content_row)
@@ -178,6 +199,7 @@ def explode_content_to_rows(
             preserved["_content_type"] = "text"
             if text_mod in IMAGE_MODALITIES:
                 preserved["_image_b64"] = page_image_b64
+                preserved[EMBEDDING_IMAGE_HANDLE_FIELD] = page_image_handle
             preserved["_stored_image_uri"] = page_stored_uri
             preserved["_bbox_xyxy_norm"] = None
             new_rows.append(preserved)
@@ -204,6 +226,7 @@ def collapse_content_to_page_rows(
         page_image = row_dict.get("page_image") if has_page_image else None
         if modality in IMAGE_MODALITIES:
             row_dict["_image_b64"] = inline_image_b64(page_image) if isinstance(page_image, dict) else None
+            row_dict[EMBEDDING_IMAGE_HANDLE_FIELD] = image_handle_from_container(page_image)
         if has_page_image:
             row_dict["_stored_image_uri"] = page_image.get("stored_image_uri") if isinstance(page_image, dict) else None
         row_dict["_embed_modality"] = modality

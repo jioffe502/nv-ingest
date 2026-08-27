@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from ray.data.extensions import TensorArray
 import pytest
 from pydantic import ValidationError
+from ray.data.extensions import TensorArray
 
+from nemo_retriever.common.io.image_handle import EMBEDDING_IMAGE_HANDLE_FIELD
 from nemo_retriever.common.modality.content_transforms import explode_content_to_rows
 from nemo_retriever.common.modality.embedding_transport import (
     EMBEDDING_TRANSPORT_CONTENT_COUNTS_FIELD,
@@ -343,6 +344,23 @@ def test_embedding_transport_projection_drops_unknown_future_multimodal_payload(
     )
 
     assert "future_multimodal_payload" not in compact.columns
+
+
+def test_embedding_transport_projection_preserves_verified_image_handle() -> None:
+    handle = {
+        "version": 1,
+        "uri": "s3://embedding-images/page.png",
+        "sha256": "a" * 64,
+        "byte_length": 123,
+        "media_type": "image/png",
+        "crop_bbox_xyxy_norm": None,
+    }
+
+    compact = project_embedding_transport(
+        pd.DataFrame({"text": ["searchable"], EMBEDDING_IMAGE_HANDLE_FIELD: [handle]})
+    )
+
+    assert compact.iloc[0][EMBEDDING_IMAGE_HANDLE_FIELD] == handle
 
 
 def test_embedding_transport_projection_drops_unknown_columns_from_empty_batches() -> None:

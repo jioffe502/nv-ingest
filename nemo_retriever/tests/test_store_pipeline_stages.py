@@ -17,10 +17,11 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-from nemo_retriever.graph import InprocessExecutor, StoreOperator, UDFOperator
+from nemo_retriever.common.io.image_handle import EMBEDDING_IMAGE_HANDLE_FIELD
 from nemo_retriever.common.modality.content_transforms import explode_content_to_rows
 from nemo_retriever.common.params import StoreParams
 from nemo_retriever.common.vdb.records import to_client_vdb_records
+from nemo_retriever.graph import InprocessExecutor, StoreOperator, UDFOperator
 
 
 def _make_tiny_png_b64(width: int = 4, height: int = 4, color=(255, 0, 0)) -> str:
@@ -136,6 +137,14 @@ class TestStoreOperatorInGraph:
         assert result.iloc[0]["table"][0]["image_b64"] is None
         assert result.iloc[0]["table"][0]["stored_image_uri"] == "file:///old/table.png"
 
+        handle = result.iloc[0][EMBEDDING_IMAGE_HANDLE_FIELD]
+        assert handle == result.iloc[0]["page_image"]["image_handle"]
+        assert handle["version"] == 1
+        assert handle["uri"] == result.iloc[0]["_stored_image_uri"]
+        assert handle["sha256"] == hashlib.sha256(base64.b64decode(b64)).hexdigest()
+        assert handle["byte_length"] == len(base64.b64decode(b64))
+        assert handle["media_type"] == "image/png"
+
     def test_store_operator_writes_nested_image_payloads(self, tmp_path: Path):
         b64 = _make_tiny_png_b64(color=(0, 255, 0))
         df = pd.DataFrame(
@@ -162,6 +171,8 @@ class TestStoreOperatorInGraph:
         nested = result.iloc[0]["images"][0]
         assert nested["image_b64"] is None
         assert nested["stored_image_uri"].startswith("file://")
+        assert nested["image_handle"]["uri"] == nested["stored_image_uri"]
+        assert nested["image_handle"]["sha256"] == hashlib.sha256(base64.b64decode(b64)).hexdigest()
         assert Path(urlparse(nested["stored_image_uri"]).path).exists()
         assert "_stored_image_uri" not in result.columns
 
@@ -245,6 +256,29 @@ class TestStoreOperatorInGraph:
 
         stored_uri = result.iloc[0]["_stored_image_uri"]
         assert Image.open(Path(urlparse(stored_uri).path)).size == (50, 40)
+
+    def test_store_before_reshape_emits_page_and_cropped_image_handles(self, tmp_path: Path):
+        page_b64 = _make_tiny_png_b64(width=100, height=80)
+        source = pd.DataFrame(
+            [
+                {
+                    "text": "page text",
+                    "page_image": {"image_b64": page_b64},
+                    "table": [{"text": "table text", "bbox_xyxy_norm": [0.25, 0.25, 0.75, 0.75]}],
+                }
+            ]
+        )
+
+        stored = StoreOperator(params=StoreParams(storage_uri=str(tmp_path))).process(source)
+        result = explode_content_to_rows(stored, modality="text_image")
+
+        page_row = result.loc[result["_content_type"] == "text"].iloc[0]
+        table_row = result.loc[result["_content_type"] == "table"].iloc[0]
+        assert page_row["_image_b64"] is None
+        assert page_row[EMBEDDING_IMAGE_HANDLE_FIELD]["crop_bbox_xyxy_norm"] is None
+        assert table_row["_image_b64"] is None
+        assert table_row[EMBEDDING_IMAGE_HANDLE_FIELD]["uri"] == page_row[EMBEDDING_IMAGE_HANDLE_FIELD]["uri"]
+        assert table_row[EMBEDDING_IMAGE_HANDLE_FIELD]["crop_bbox_xyxy_norm"] == [0.25, 0.25, 0.75, 0.75]
 
     def test_store_operator_skips_rows_without_image_b64(self, tmp_path: Path):
         df = _make_embedded_df(None)

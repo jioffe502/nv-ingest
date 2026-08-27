@@ -42,13 +42,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
 from nemo_retriever.common.api.util.string_processing import (
     ensure_openai_embeddings_http_url,
     prepend_model_provider_prefix,
+)
+from nemo_retriever.common.io.image_handle import (
+    EMBEDDING_IMAGE_HANDLE_FIELD,
+    ImageHandleError,
+    load_verified_image_b64,
 )
 from nemo_retriever.common.params.models import IMAGE_MODALITIES
 from nemo_retriever.models import _DEFAULT_EMBED_MODEL
@@ -66,6 +71,7 @@ _DEFAULT_HTTP_MAX_RETRIES = 5
 _DEFAULT_HTTP_MAX_429_RETRIES = 3
 _MAX_HTTP_RETRY_DELAY_S = 30.0
 _MAX_HTTP_ERROR_BODY_CHARS = 2_000
+_VERIFIED_IMAGE_B64_FIELD = "_verified_image_b64"
 
 
 @dataclass(slots=True)
@@ -157,11 +163,24 @@ def _ensure_metadata_dict(row: pd.Series, *, metadata_column: str = "metadata") 
 
 
 def _image_from_row(row: pd.Series) -> Optional[str]:
-    """Extract ``_image_b64`` column value from a row."""
+    """Return an inline image or strictly rehydrate its transport handle."""
     v = row.get("_image_b64")
     if isinstance(v, str) and v.strip():
         return v
-    return None
+
+    handle = row.get(EMBEDDING_IMAGE_HANDLE_FIELD)
+    if handle is None or (isinstance(handle, float) and pd.isna(handle)):
+        return None
+    if not isinstance(handle, Mapping):
+        raise ImageHandleError("Embedding image handle must be a mapping")
+    return load_verified_image_b64(handle)
+
+
+def _verified_image_from_row(row: pd.Series) -> Optional[str]:
+    value = row.get(_VERIFIED_IMAGE_B64_FIELD)
+    if isinstance(value, str) and value.strip():
+        return value
+    return _image_from_row(row)
 
 
 def _format_image_input_string(image_b64: str, mime: str = "image/png") -> str:
@@ -205,7 +224,7 @@ def _multimodal_callable_runner(
     for start in range(0, n, bs):
         chunk = df_slice.iloc[start : start + bs]
         size = len(chunk)
-        images_b64 = [_image_from_row(chunk.iloc[i]) or "" for i in range(size)]
+        images_b64 = [_verified_image_from_row(chunk.iloc[i]) or "" for i in range(size)]
         texts = [_text_from_row(chunk.iloc[i], text_column=text_column) or "" for i in range(size)]
 
         if embed_modality == "image":
@@ -691,21 +710,30 @@ def create_text_embeddings_for_df(
     multimodal_embedder = task_config.get("multimodal_embedder")  # local VL model for image/text_image
 
     # Extract content and normalize empty or non-str to None (adapted for retriever-local schema).
+    verified_images: pd.Series | None = None
+    if embed_modality in IMAGE_MODALITIES:
+        verified_images = df_transform_ledger.apply(_image_from_row, axis=1)
+
     if embed_modality == "image":
         # For image-only, valid rows are those with a non-empty _image_b64.
-        extracted_content = df_transform_ledger.apply(lambda r: _image_from_row(r), axis=1).apply(
+        assert verified_images is not None
+        extracted_content = verified_images.apply(
             lambda x: x if isinstance(x, str) and x.strip() else None
         )
     elif embed_modality == "text_image":
         # For text_image, a row is valid if it has either text or image (prefer both).
-        def _text_image_content(r: pd.Series) -> Optional[str]:
-            text = _text_from_row(r, text_column=str(transform_config.text_column))
-            image = _image_from_row(r)
-            if text or image:
-                return text or "__image_only__"
-            return None
-
-        extracted_content = df_transform_ledger.apply(_text_image_content, axis=1)
+        assert verified_images is not None
+        extracted_text = df_transform_ledger.apply(
+            lambda row: _text_from_row(row, text_column=str(transform_config.text_column)), axis=1
+        )
+        extracted_content = pd.Series(
+            [
+                text or "__image_only__" if text or image else None
+                for text, image in zip(extracted_text, verified_images)
+            ],
+            index=df_transform_ledger.index,
+            dtype=object,
+        )
     else:
         extracted_content = df_transform_ledger.apply(
             lambda r: _text_from_row(r, text_column=str(transform_config.text_column)), axis=1
@@ -713,6 +741,8 @@ def create_text_embeddings_for_df(
 
     df_content = df_transform_ledger.copy()
     df_content["_content"] = extracted_content
+    if verified_images is not None:
+        df_content[_VERIFIED_IMAGE_B64_FIELD] = verified_images
 
     valid_content_mask = df_content["_content"].notna()
     if valid_content_mask.any():
@@ -738,7 +768,7 @@ def create_text_embeddings_for_df(
                 filtered_modalities = []
                 for _, r in df_content.loc[valid_content_mask].iterrows():
                     text = _text_from_row(r, text_column=str(transform_config.text_column)) or ""
-                    image = _image_from_row(r) or ""
+                    image = _verified_image_from_row(r) or ""
                     if image and text.strip():
                         filtered_content_list.append(_format_text_image_pair_input_string(text, image))
                         filtered_modalities.append("text_image")
@@ -822,7 +852,8 @@ def create_text_embeddings_for_df(
     )
 
     # Drop helper column to keep the output clean.
-    if "_content" in df_content.columns:
-        df_content = df_content.drop(columns=["_content"])
+    helper_columns = [column for column in ("_content", _VERIFIED_IMAGE_B64_FIELD) if column in df_content.columns]
+    if helper_columns:
+        df_content = df_content.drop(columns=helper_columns)
 
     return df_content, {"trace_info": execution_trace_log}

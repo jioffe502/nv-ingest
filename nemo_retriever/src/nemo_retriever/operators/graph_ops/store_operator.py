@@ -18,6 +18,11 @@ import fsspec
 import numpy as np
 import pandas as pd
 
+from nemo_retriever.common.io.image_handle import (
+    EMBEDDING_IMAGE_HANDLE_FIELD,
+    IMAGE_HANDLE_CONTAINER_FIELD,
+    build_image_handle,
+)
 from nemo_retriever.common.modality.ocr.shared import _crop_b64_image_by_norm_bbox
 from nemo_retriever.operators.abstract_operator import AbstractOperator
 from nemo_retriever.operators.cpu_operator import CPUOperator
@@ -82,9 +87,25 @@ def _write_image_b64(
     storage_options: dict[str, Any],
     fallback_format: str,
 ) -> str | None:
+    stored_uri, _ = _write_image_b64_with_handle(
+        value,
+        storage_uri=storage_uri,
+        storage_options=storage_options,
+        fallback_format=fallback_format,
+    )
+    return stored_uri
+
+
+def _write_image_b64_with_handle(
+    value: Any,
+    *,
+    storage_uri: str,
+    storage_options: dict[str, Any],
+    fallback_format: str,
+) -> tuple[str | None, dict[str, Any] | None]:
     raw = _decode_image_b64(value)
     if raw is None:
-        return None
+        return None, None
 
     extension = _sniff_image_format(raw) or fallback_format
     object_key = _build_object_key(raw=raw, extension=extension)
@@ -96,7 +117,9 @@ def _write_image_b64(
     except Exception as exc:
         raise RuntimeError(f"Failed to store image to {dest_uri!r}: {exc}") from exc
 
-    return _stored_uri(dest_uri)
+    stored_uri = _stored_uri(dest_uri)
+    media_type = "image/jpeg" if extension == "jpeg" else "image/png"
+    return stored_uri, build_image_handle(raw, uri=stored_uri, media_type=media_type)
 
 
 def _store_nested_image_payloads(
@@ -132,8 +155,10 @@ def _store_nested_image_payloads(
     image_b64 = out.get("image_b64")
     stored_uri = out.get("stored_image_uri")
     if isinstance(image_b64, str) and image_b64.strip():
+        raw = _decode_image_b64(image_b64)
+        image_handle = None
         if not stored_uri:
-            stored_uri = _write_image_b64(
+            stored_uri, image_handle = _write_image_b64_with_handle(
                 image_b64,
                 storage_uri=storage_uri,
                 storage_options=storage_options,
@@ -141,11 +166,17 @@ def _store_nested_image_payloads(
             )
             if stored_uri:
                 out["stored_image_uri"] = stored_uri
+        elif raw is not None:
+            extension = _sniff_image_format(raw) or fallback_format
+            media_type = "image/jpeg" if extension == "jpeg" else "image/png"
+            image_handle = build_image_handle(raw, uri=_stored_uri(stored_uri), media_type=media_type)
+        if image_handle is not None:
+            out[IMAGE_HANDLE_CONTAINER_FIELD] = image_handle
         if strip_base64:
             out["image_b64"] = None
 
     for key, child in list(out.items()):
-        if key in {"image_b64", "stored_image_uri"}:
+        if key in {"image_b64", "stored_image_uri", IMAGE_HANDLE_CONTAINER_FIELD}:
             continue
         out[key] = _store_nested_image_payloads(
             child,
@@ -275,6 +306,10 @@ def _store_row_images(
     out = df.copy()
     for column in (*image_columns, *row_image_columns, "_stored_image_uri", "metadata"):
         _ensure_object_column(out, column)
+    if EMBEDDING_IMAGE_HANDLE_FIELD not in out.columns:
+        out[EMBEDDING_IMAGE_HANDLE_FIELD] = pd.Series([None] * len(out.index), index=out.index, dtype=object)
+    else:
+        _ensure_object_column(out, EMBEDDING_IMAGE_HANDLE_FIELD)
     fallback_format = _normalize_image_format(image_format)
     fsspec_options = dict(storage_options or {})
 
@@ -284,7 +319,7 @@ def _store_row_images(
         raw = _decode_image_b64(image_b64)
         inherited_page_uri = _is_inherited_page_uri(row, stored_uri, image_source=image_source, raw=raw)
         if raw is not None:
-            stored_uri = _write_image_b64(
+            stored_uri, image_handle = _write_image_b64_with_handle(
                 image_b64,
                 storage_uri=storage_uri,
                 storage_options=fsspec_options,
@@ -292,11 +327,13 @@ def _store_row_images(
             )
             if stored_uri is not None:
                 out.at[idx, "_stored_image_uri"] = stored_uri
+                out.at[idx, EMBEDDING_IMAGE_HANDLE_FIELD] = image_handle
 
                 page_image = row.get("page_image")
                 if isinstance(page_image, dict) and _row_image_represents_page(row, image_source=image_source):
                     updated_page_image = dict(page_image)
                     updated_page_image["stored_image_uri"] = stored_uri
+                    updated_page_image[IMAGE_HANDLE_CONTAINER_FIELD] = image_handle
                     if strip_base64:
                         updated_page_image["image_b64"] = None
                     out.at[idx, "page_image"] = updated_page_image

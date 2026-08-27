@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from nemo_retriever.common.io.image_handle import EMBEDDING_IMAGE_HANDLE_FIELD
 from nemo_retriever.common.stage_errors import iter_stage_errors_from_value
 
 EMBEDDING_TRANSPORT_VERSION = 1
@@ -44,6 +45,7 @@ EMBEDDING_TRANSPORT_FIELDS = (
     "document_type",
     "_embed_modality",
     "_image_b64",
+    EMBEDDING_IMAGE_HANDLE_FIELD,
     "_content_type",
     "content_type",
     "_stored_image_uri",
