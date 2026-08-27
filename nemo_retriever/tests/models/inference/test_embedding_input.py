@@ -166,7 +166,7 @@ def test_batch_failure_is_counted_as_failed_and_unembedded(caplog) -> None:
 
 
 def test_oversized_middle_row_is_split_below_the_formatted_model_limit(caplog) -> None:
-    caplog.set_level(logging.INFO, logger="nemo_retriever.models.inference.runtime")
+    caplog.set_level(logging.WARNING, logger="nemo_retriever.models.inference.runtime")
     source = pd.DataFrame(
         {
             "text": ["before", "one two three four five", "after"],
@@ -234,6 +234,7 @@ def test_oversized_middle_row_is_split_below_the_formatted_model_limit(caplog) -
         "Embedding summary: input_rows=3 output_rows=5 overlength=1 split=1 truncated=0 "
         "failed=0 embedded=5 unembedded=0"
     ) in caplog.text
+    assert any(record.levelno == logging.WARNING and "overlength=1" in record.message for record in caplog.records)
 
 
 def test_policy_measures_and_preserves_leading_and_trailing_whitespace() -> None:

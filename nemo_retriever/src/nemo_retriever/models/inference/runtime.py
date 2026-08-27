@@ -256,10 +256,8 @@ def embed_text_main_text_embed(
         f"failed={totals['failed']} embedded={totals['embedded']} unembedded={totals['unembedded']} "
         f"split_children={totals['split_child']}"
     )
-    if totals["failed"] or totals["unembedded"]:
+    if totals["failed"] or totals["unembedded"] or totals["overlength"]:
         logger.warning(summary)
-    elif totals["overlength"]:
-        logger.info(summary)
 
     internal_accounting = [column for column in _INTERNAL_ACCOUNTING_COLUMNS if column in out_df.columns]
     if internal_accounting:
