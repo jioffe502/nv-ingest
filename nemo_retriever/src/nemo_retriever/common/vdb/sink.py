@@ -21,7 +21,8 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any
 
 import numpy as np
@@ -36,8 +37,8 @@ from nemo_retriever.common.vdb.sink_operation import (
 _CREATE_OPERATION_KEY = b"nemo_retriever.sink_create_operation_sha256"
 _CREATE_REQUEST_KEY = b"nemo_retriever.sink_create_request_sha256"
 _CANONICAL_BATCH_KEY = b"nemo_retriever.canonical_vdb_batch"
-_CANONICAL_BATCH_VERSION = b"1"
-_CANONICAL_CONVERSION_KEY = b"nemo_retriever.canonical_vdb_conversion"
+_CANONICAL_BATCH_VERSION = b"2"
+_CANONICAL_CONVERSION_COLUMN = "__nemo_retriever_canonical_vdb_conversion_v2"
 _MAX_PENDING_CANONICAL_ROWS = 256
 _TIMING_PHASES = (
     "prepare",
@@ -200,9 +201,7 @@ def _bounded_create_is_finalized(table: Any) -> bool:
         raise VdbWriteNotFinalized(
             f"LanceDB table {table.name!r} has incomplete sink creation metadata and is not finalized."
         )
-    success_prefix = (
-        f"nemo_sink_success_{create_operation.decode('ascii')[:24]}_" f"{create_request.decode('ascii')[:24]}_"
-    )
+    success_prefix = f"nemo_sink_success_{create_operation.decode('ascii')[:24]}_{create_request.decode('ascii')[:24]}_"
     return any(name.startswith(success_prefix) for name in table.tags.list())
 
 
@@ -225,9 +224,10 @@ class _StreamStats:
     canonical_hash_xor: int = 0
     vector_dim: int | None = None
     conversion_input_rows: int = 0
+    conversion_reports: int = 0
     conversion_upstream_error_count: int = 0
-    conversion_upstream_error_fields: Counter[str] = field(default_factory=Counter)
-    conversion_rejection_reasons: Counter[str] = field(default_factory=Counter)
+    conversion_upstream_error_fields: Counter[str] = dataclass_field(default_factory=Counter)
+    conversion_rejection_reasons: Counter[str] = dataclass_field(default_factory=Counter)
 
     @property
     def digest(self) -> str:
@@ -831,7 +831,7 @@ def _reject_empty_operation_bypass(table: Any | None, *, operation_id: str) -> N
         )
     if not _bounded_create_is_finalized(table):
         raise VdbWriteNotFinalized(
-            f"LanceDB table {table.name!r} has an unfinished create operation; " "empty input cannot finalize it."
+            f"LanceDB table {table.name!r} has an unfinished create operation; empty input cannot finalize it."
         )
 
 
@@ -863,6 +863,43 @@ def _schema_for_stream(vdb: Any, *, vector_dim: int | None) -> pa.Schema:
         embedding_model_name=vdb.embedding_model_name,
         embedding_model_revision=vdb.embedding_model_revision,
     )
+
+
+def _canonical_transport_schema(product_schema: pa.Schema) -> pa.Schema:
+    """Add a row-preserved conversion receipt to the canonical product schema."""
+
+    return product_schema.append(pa.field(_CANONICAL_CONVERSION_COLUMN, pa.large_binary(), nullable=True))
+
+
+def _conversion_payload(stats: _StreamStats) -> bytes:
+    return json.dumps(
+        {
+            "input_rows": stats.conversion_input_rows,
+            "rejection_reasons": dict(stats.conversion_rejection_reasons),
+            "upstream_error_count": stats.conversion_upstream_error_count,
+            "upstream_error_fields": dict(stats.conversion_upstream_error_fields),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _with_conversion_envelope(table: pa.Table, *, stats: _StreamStats) -> pa.Table:
+    """Carry one producer receipt as data so Ray block coalescing cannot discard it."""
+
+    transport_schema = _canonical_transport_schema(table.schema)
+    data = pa.Table.from_arrays(
+        [*table.columns, pa.chunked_array([pa.nulls(table.num_rows, type=pa.large_binary())])],
+        schema=transport_schema,
+    )
+    receipt = pa.Table.from_arrays(
+        [
+            *[pa.chunked_array([pa.nulls(1, type=field.type)]) for field in table.schema],
+            pa.chunked_array([pa.array([_conversion_payload(stats)], type=pa.large_binary())]),
+        ],
+        schema=transport_schema,
+    )
+    return pa.concat_tables([data, receipt])
 
 
 def project_graph_batch_to_canonical_vdb(
@@ -912,18 +949,9 @@ def project_graph_batch_to_canonical_vdb(
         )
     )
     table = pa.Table.from_batches(projected_batches, schema=schema)
+    table = _with_conversion_envelope(table, stats=stats)
     metadata = dict(table.schema.metadata or {})
     metadata[_CANONICAL_BATCH_KEY] = _CANONICAL_BATCH_VERSION
-    metadata[_CANONICAL_CONVERSION_KEY] = json.dumps(
-        {
-            "input_rows": stats.conversion_input_rows,
-            "rejection_reasons": dict(stats.conversion_rejection_reasons),
-            "upstream_error_count": stats.conversion_upstream_error_count,
-            "upstream_error_fields": dict(stats.conversion_upstream_error_fields),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
     table = table.replace_schema_metadata(metadata)
 
     output_retained, output_logical, output_unique_bytes, output_unique_buffers = _batch_memory_metrics(table)
@@ -958,24 +986,37 @@ def _iter_canonical_vdb_batches(
     expected_schema: pa.Schema | None = None
     for block in batches:
         if not isinstance(block, (pa.Table, pa.RecordBatch)):
-            raise TypeError(
-                "Canonical VDB stream input must remain Arrow-native; "
-                f"received {type(block).__name__}."
-            )
+            raise TypeError(f"Canonical VDB stream input must remain Arrow-native; received {type(block).__name__}.")
         metadata = dict(block.schema.metadata or {})
         if metadata.pop(_CANONICAL_BATCH_KEY, None) != _CANONICAL_BATCH_VERSION:
             raise ValueError("Canonical VDB stream input is missing its schema marker.")
-        conversion_payload = metadata.pop(_CANONICAL_CONVERSION_KEY, None)
-        if conversion_payload is not None:
+        block_schema = block.schema.with_metadata(metadata or None)
+        try:
+            conversion_field = block_schema.field(_CANONICAL_CONVERSION_COLUMN)
+        except KeyError as exc:
+            raise ValueError("Canonical VDB stream input has no conversion receipt column.") from exc
+        if not pa.types.is_large_binary(conversion_field.type):
+            raise ValueError(
+                f"Canonical VDB stream conversion receipt column must be large_binary, got {conversion_field.type}."
+            )
+        conversion_values = block.column(_CANONICAL_CONVERSION_COLUMN)
+        conversion_payloads = [value for value in conversion_values.to_pylist() if value is not None]
+        for conversion_payload in conversion_payloads:
             try:
                 conversion = json.loads(conversion_payload.decode("utf-8"))
                 stats.conversion_input_rows += int(conversion.get("input_rows", 0))
+                stats.conversion_reports += 1
                 stats.conversion_upstream_error_count += int(conversion.get("upstream_error_count", 0))
                 stats.conversion_upstream_error_fields.update(conversion.get("upstream_error_fields") or {})
                 stats.conversion_rejection_reasons.update(conversion.get("rejection_reasons") or {})
             except (AttributeError, TypeError, ValueError) as exc:
                 raise ValueError("Canonical VDB stream input has invalid conversion diagnostics.") from exc
-        block_schema = block.schema.with_metadata(metadata or None)
+        receipt_mask = pa.compute.is_valid(conversion_values)
+        receipt_rows = block.filter(receipt_mask)
+        if any(receipt_rows.column(name).null_count != receipt_rows.num_rows for name in block_schema.names[:-1]):
+            raise ValueError("Canonical VDB stream conversion receipt rows must not contain product values.")
+        data_rows = block.filter(pa.compute.invert(receipt_mask)).select(block_schema.names[:-1])
+        block_schema = block_schema.remove(block_schema.get_field_index(_CANONICAL_CONVERSION_COLUMN))
         try:
             vector_field = block_schema.field("vector")
         except KeyError as exc:
@@ -986,9 +1027,7 @@ def _iter_canonical_vdb_batches(
         if stats.vector_dim is None:
             stats.vector_dim = vector_dim
         elif vector_dim is not None and int(stats.vector_dim) != vector_dim:
-            raise ValueError(
-                f"Canonical VDB stream vector dimensions changed from {stats.vector_dim} to {vector_dim}."
-            )
+            raise ValueError(f"Canonical VDB stream vector dimensions changed from {stats.vector_dim} to {vector_dim}.")
         product_schema = _schema_for_stream(vdb, vector_dim=stats.vector_dim)
         if not block_schema.equals(product_schema, check_metadata=True):
             raise ValueError(
@@ -1002,15 +1041,15 @@ def _iter_canonical_vdb_batches(
 
         retained_bytes, logical_bytes, unique_buffer_bytes, unique_buffers = _batch_memory_metrics(block)
         stats.input_batches += 1
-        stats.input_rows += int(block.num_rows)
+        stats.input_rows += int(data_rows.num_rows)
         stats.input_bytes += retained_bytes
         stats.input_logical_bytes += logical_bytes
         stats.input_unique_buffer_bytes += unique_buffer_bytes
         stats.input_unique_buffers += unique_buffers
         stats.max_input_batch_bytes = max(stats.max_input_batch_bytes, retained_bytes)
-        stats.client_records += int(block.num_rows)
+        stats.client_records += int(data_rows.num_rows)
 
-        record_batches = block.to_batches() if isinstance(block, pa.Table) else [block]
+        record_batches = data_rows.to_batches() if isinstance(data_rows, pa.Table) else [data_rows]
         for record_batch in record_batches:
             clean_batch = pa.RecordBatch.from_arrays(record_batch.columns, schema=block_schema)
             batch_bytes = int(clean_batch.get_total_buffer_size())
@@ -1025,6 +1064,8 @@ def _iter_canonical_vdb_batches(
             stats.output_batches += 1
             yield clean_batch
 
+    if stats.conversion_reports == 0:
+        raise ValueError("Canonical VDB stream input contained no conversion receipts.")
     if stats.client_records == 0 and stats.conversion_input_rows:
         raise _empty_conversion_error(
             rows=stats.conversion_input_rows,
