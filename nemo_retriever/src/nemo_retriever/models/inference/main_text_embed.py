@@ -53,6 +53,7 @@ from nemo_retriever.common.api.util.string_processing import (
 from nemo_retriever.common.io.image_handle import (
     EMBEDDING_IMAGE_HANDLE_FIELD,
     ImageHandleError,
+    image_transport_stats,
     load_verified_image_b64,
 )
 from nemo_retriever.common.params.models import IMAGE_MODALITIES
@@ -791,7 +792,29 @@ def create_text_embeddings_for_df(
     # Extract content and normalize empty or non-str to None (adapted for retriever-local schema).
     verified_images: pd.Series | None = None
     if embed_modality in IMAGE_MODALITIES:
-        verified_images = df_transform_ledger.apply(_image_from_row, axis=1)
+        image_transport = image_transport_stats(
+            row_count=len(df_transform_ledger.index),
+            inline_values=df_transform_ledger.get("_image_b64", pd.Series(dtype=object)),
+            handle_values=df_transform_ledger.get(EMBEDDING_IMAGE_HANDLE_FIELD, pd.Series(dtype=object)),
+        )
+        try:
+            verified_images = df_transform_ledger.apply(_image_from_row, axis=1)
+        except ImageHandleError:
+            logger.exception("Embedding image transport verification failed: %s", image_transport)
+            raise
+        logger.info(
+            "Embedding image transport: rows=%d inline_rows=%d inline_base64_chars=%d "
+            "handle_rows=%d verified_handle_rows=%d logical_handle_bytes=%d "
+            "unique_handles=%d unique_handle_bytes=%d",
+            image_transport["rows"],
+            image_transport["inline_rows"],
+            image_transport["inline_base64_chars"],
+            image_transport["handle_rows"],
+            image_transport["handle_rows"],
+            image_transport["logical_handle_bytes"],
+            image_transport["unique_handles"],
+            image_transport["unique_handle_bytes"],
+        )
 
     if embed_modality == "image":
         # For image-only, valid rows are those with a non-empty _image_b64.

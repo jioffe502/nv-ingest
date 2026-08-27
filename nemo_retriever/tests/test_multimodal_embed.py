@@ -20,7 +20,11 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-from nemo_retriever.common.io.image_handle import EMBEDDING_IMAGE_HANDLE_FIELD, ImageHandleError
+from nemo_retriever.common.io.image_handle import (
+    EMBEDDING_IMAGE_HANDLE_FIELD,
+    ImageHandleError,
+    image_transport_stats,
+)
 
 # ---------------------------------------------------------------------------
 # Pure helpers from main_text_embed (no transitive-import issues)
@@ -79,10 +83,10 @@ for _mod_name in _HEAVY_INTERNAL:
         sys.modules[_mod_name] = MagicMock()
         _injected.append(_mod_name)
 
-from nemo_retriever.common.modality.content_transforms import (
+from nemo_retriever.common.modality.content_transforms import (  # noqa: E402
     collapse_content_to_page_rows,
     explode_content_to_rows,
-)  # noqa: E402
+)
 
 # Clean up injected mocks so they don't poison imports in other test files.
 for _mod_name in _injected:
@@ -168,6 +172,27 @@ class TestImageFromRow:
             _image_from_row(row)
 
 
+def test_image_transport_stats_separate_logical_references_from_unique_objects():
+    shared = {"uri": "s3://bucket/page.png", "sha256": "a" * 64, "byte_length": 100}
+    other = {"uri": "s3://bucket/other.png", "sha256": "b" * 64, "byte_length": 40}
+
+    stats = image_transport_stats(
+        row_count=4,
+        inline_values=["abcd", None, "  ", "xy"],
+        handle_values=[shared, dict(shared), other, {"uri": []}],
+    )
+
+    assert stats == {
+        "rows": 4,
+        "inline_rows": 2,
+        "inline_base64_chars": 6,
+        "handle_rows": 4,
+        "logical_handle_bytes": 240,
+        "unique_handles": 2,
+        "unique_handle_bytes": 140,
+    }
+
+
 class TestFormatInputStrings:
     def test_format_image_input_string(self):
         result = _format_image_input_string("AAAA")
@@ -240,7 +265,7 @@ class TestMultimodalCallableRunner:
         assert len(result["info_msgs"]) == 2
 
     @patch("nemo_retriever.models.inference.main_text_embed.load_verified_image_b64", return_value="verified_b64")
-    def test_verified_handle_is_loaded_once_and_discarded_after_local_embedding(self, mock_load):
+    def test_verified_handle_is_loaded_once_audited_and_discarded_after_local_embedding(self, mock_load, caplog):
         embedder = MagicMock()
         embedder.embed_text_image.return_value = [[1.0, 2.0]]
         handle = {
@@ -252,14 +277,47 @@ class TestMultimodalCallableRunner:
             "crop_bbox_xyxy_norm": None,
         }
 
-        result, _ = create_text_embeddings_for_df(
-            pd.DataFrame({"text": ["with image"], EMBEDDING_IMAGE_HANDLE_FIELD: [handle]}),
-            task_config={"multimodal_embedder": embedder, "endpoint_url": None},
-            transform_config=TextEmbeddingConfig(embed_modality="text_image"),
-        )
+        with caplog.at_level("INFO", logger="nemo_retriever.models.inference.main_text_embed"):
+            result, _ = create_text_embeddings_for_df(
+                pd.DataFrame({"text": ["with image"], EMBEDDING_IMAGE_HANDLE_FIELD: [handle]}),
+                task_config={"multimodal_embedder": embedder, "endpoint_url": None},
+                transform_config=TextEmbeddingConfig(embed_modality="text_image"),
+            )
 
         assert mock_load.call_count == 1
         assert "_verified_image_b64" not in result.columns
+        assert "inline_rows=0" in caplog.text
+        assert "handle_rows=1" in caplog.text
+        assert "verified_handle_rows=1" in caplog.text
+        assert "logical_handle_bytes=123" in caplog.text
+        assert "unique_handles=1" in caplog.text
+        assert "unique_handle_bytes=123" in caplog.text
+
+    @patch(
+        "nemo_retriever.models.inference.main_text_embed.load_verified_image_b64",
+        side_effect=ImageHandleError("digest changed"),
+    )
+    def test_handle_verification_failure_is_audited_and_fails_closed(self, mock_load, caplog):
+        handle = {
+            "version": 1,
+            "uri": "file:///shared/page.png",
+            "sha256": "a" * 64,
+            "byte_length": 123,
+            "media_type": "image/png",
+            "crop_bbox_xyxy_norm": None,
+        }
+
+        with caplog.at_level("ERROR", logger="nemo_retriever.models.inference.main_text_embed"):
+            with pytest.raises(ImageHandleError, match="digest changed"):
+                create_text_embeddings_for_df(
+                    pd.DataFrame({"text": ["with image"], EMBEDDING_IMAGE_HANDLE_FIELD: [handle]}),
+                    task_config={"multimodal_embedder": MagicMock(), "endpoint_url": None},
+                    transform_config=TextEmbeddingConfig(embed_modality="text_image"),
+                )
+
+        assert mock_load.call_count == 1
+        assert "Embedding image transport verification failed" in caplog.text
+        assert "'handle_rows': 1" in caplog.text
 
 
 # ===================================================================

@@ -14,7 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import fsspec
 
@@ -68,6 +68,37 @@ def image_handle_from_container(value: Any) -> dict[str, Any] | None:
         return None
     handle = value.get(IMAGE_HANDLE_CONTAINER_FIELD)
     return validate_image_handle(handle) if isinstance(handle, Mapping) else None
+
+
+def image_transport_stats(
+    *,
+    row_count: int,
+    inline_values: Iterable[Any] = (),
+    handle_values: Iterable[Any] = (),
+) -> dict[str, int]:
+    """Return logical and unique byte accounting for one transport boundary."""
+
+    inline_payloads = [value.strip() for value in inline_values if isinstance(value, str) and value.strip()]
+    handles = [value for value in handle_values if isinstance(value, Mapping)]
+    valid_identities = [
+        (value.get("uri"), value.get("sha256"), value.get("byte_length"))
+        for value in handles
+        if isinstance(value.get("uri"), str)
+        and isinstance(value.get("sha256"), str)
+        and isinstance(value.get("byte_length"), int)
+        and not isinstance(value.get("byte_length"), bool)
+        and value.get("byte_length", -1) >= 0
+    ]
+    unique_identities = set(valid_identities)
+    return {
+        "rows": int(row_count),
+        "inline_rows": len(inline_payloads),
+        "inline_base64_chars": sum(len(value) for value in inline_payloads),
+        "handle_rows": len(handles),
+        "logical_handle_bytes": sum(int(identity[2]) for identity in valid_identities),
+        "unique_handles": len(unique_identities),
+        "unique_handle_bytes": sum(int(identity[2]) for identity in unique_identities),
+    }
 
 
 def validate_image_handle(value: Mapping[str, Any]) -> dict[str, Any]:
