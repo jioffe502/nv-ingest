@@ -570,8 +570,8 @@ def _canonical_rows(
     )
     from nemo_retriever.common.vdb.records import (
         _client_record_from_graph_row,
-        _row_has_uploadable_content_without_embedding,
         _stage_error_field,
+        row_has_uploadable_content_without_embedding,
     )
     from nemo_retriever.common.vdb.sidecar_metadata import (
         apply_sidecar_metadata_to_client_batches,
@@ -617,7 +617,7 @@ def _canonical_rows(
                     else:
                         reason = (
                             "missing embedding"
-                            if _row_has_uploadable_content_without_embedding(graph_row)
+                            if row_has_uploadable_content_without_embedding(graph_row)
                             else "missing searchable text or image backing"
                         )
                         rejections[reason] += 1
