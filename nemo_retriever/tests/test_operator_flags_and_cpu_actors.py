@@ -4,7 +4,7 @@
 
 """Unit tests for GPUOperator/CPUOperator flags and CPU-only actor variants."""
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
@@ -306,6 +306,14 @@ class TestNemotronParseCPUActor:
 
 
 class TestBatchEmbedCPUActor:
+    @pytest.fixture(autouse=True)
+    def _stub_input_policy(self, monkeypatch):
+        policy = Mock(max_tokens=8192)
+        monkeypatch.setattr(
+            "nemo_retriever.operators.embed.cpu_operator.configure_embedding_input_policy",
+            Mock(return_value=policy),
+        )
+
     def _make_params(self):
         from nemo_retriever.common.params import EmbedParams
 

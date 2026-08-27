@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from nemo_retriever.common.schemas.collections import QueryHit
 from nemo_retriever.common.vdb.records import (
+    VdbUploadError,
     normalize_retrieval_results,
     to_client_vdb_records,
 )
@@ -166,6 +167,12 @@ def test_graph_record_conversion_preserves_service_provenance() -> None:
                 "metadata": {
                     "chunk_index": 4,
                     "chunk_count": 9,
+                    "embedding_parent_id": "parent-1",
+                    "embedding_chunk_id": "child-2",
+                    "embedding_chunk_index": 2,
+                    "embedding_chunk_count": 3,
+                    "embedding_chunk_start_token": 200,
+                    "embedding_chunk_end_token": 400,
                     "segment_start_seconds": 1.5,
                     "frame_timestamp_seconds": 2.5,
                     "content_metadata": {"page_number": 1},
@@ -193,6 +200,12 @@ def test_graph_record_conversion_preserves_service_provenance() -> None:
         "ocr_table_detections": 2,
         "chunk_index": 4,
         "chunk_count": 9,
+        "embedding_parent_id": "parent-1",
+        "embedding_chunk_id": "child-2",
+        "embedding_chunk_index": 2,
+        "embedding_chunk_count": 3,
+        "embedding_chunk_start_token": 200,
+        "embedding_chunk_end_token": 400,
         "segment_start_seconds": 1.5,
         "frame_timestamp_seconds": 2.5,
     }
@@ -250,6 +263,26 @@ def test_graph_record_conversion_normalizes_ray_tensor_embedding() -> None:
     records = to_client_vdb_records([{"text": "embedded content", "metadata": {"embedding": embedding}}])
 
     assert records[0][0]["metadata"]["embedding"] == [0.1, 0.2]
+
+
+def test_dense_record_conversion_rejects_partial_embedding_coverage() -> None:
+    rows = [
+        {"text": "embedded", "metadata": {"embedding": [0.1, 0.2]}},
+        {
+            "text": "failed",
+            "metadata": {"embedding": None},
+            "text_embeddings_1b_v2": {
+                "embedding": None,
+                "error": {"stage": "embed", "type": "ValueError", "message": "invalid input"},
+            },
+        },
+    ]
+
+    with pytest.raises(
+        VdbUploadError,
+        match=r"refusing a partial write.*input rows=2.*uploadable rows=1.*missing embedding=1",
+    ):
+        to_client_vdb_records(rows)
 
 
 def test_narrow_lancedb_hit_promotes_canonical_multimodal_metadata() -> None:

@@ -25,6 +25,20 @@ _CONTENT_TYPE_ALIASES: dict[str, str] = {
     "table_caption": "table",
 }
 
+CONTENT_PROVENANCE_METADATA_KEYS = (
+    "chunk_index",
+    "chunk_count",
+    "embedding_parent_id",
+    "embedding_chunk_id",
+    "embedding_chunk_index",
+    "embedding_chunk_count",
+    "embedding_chunk_start_token",
+    "embedding_chunk_end_token",
+    "segment_start_seconds",
+    "segment_end_seconds",
+    "frame_timestamp_seconds",
+)
+
 
 def normalize_content_type(value: Any) -> str | None:
     """Return the canonical public modality for an extracted content type."""
@@ -37,7 +51,7 @@ class RetrievalContractError(RuntimeError):
 
 
 class VdbUploadError(ValueError):
-    """A nonempty graph batch cannot produce any canonical VDB records."""
+    """A nonempty graph batch cannot safely produce canonical VDB records."""
 
 
 def validate_collection_retrieval_results(
@@ -312,13 +326,7 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
     if bbox is not None:
         content_metadata.setdefault("bbox_xyxy_norm", bbox)
 
-    for key in (
-        "chunk_index",
-        "chunk_count",
-        "segment_start_seconds",
-        "segment_end_seconds",
-        "frame_timestamp_seconds",
-    ):
+    for key in CONTENT_PROVENANCE_METADATA_KEYS:
         if key in metadata:
             content_metadata.setdefault(key, metadata[key])
 
@@ -347,7 +355,8 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
     return {"document_type": str(document_type), "metadata": record_metadata}
 
 
-def _row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
+def row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
+    """Return whether a searchable graph row is missing its dense embedding."""
     metadata = _dict_or_empty(row.get("metadata"))
     if _embedding_from_graph_row(row, metadata) is not None:
         return False
@@ -376,7 +385,7 @@ def _raise_for_empty_vdb_conversion(graph_rows: list[dict[str, Any]]) -> None:
     reasons = Counter(
         (
             "missing embedding"
-            if _row_has_uploadable_content_without_embedding(row)
+            if row_has_uploadable_content_without_embedding(row)
             else "missing searchable text or image backing"
         )
         for row in graph_rows
@@ -403,8 +412,8 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
     :class:`VdbUploadError` before a backend write is attempted.
     When at least one row converts, returns ``[batch]`` with a single non-empty inner list
     (never ``[[]]``, which would be truthy and could trip backends on an empty insert).
-    Uploadable graph content without an embedding raises ``VdbUploadError`` when
-    no row survives conversion.
+    Any uploadable graph content without an embedding raises ``VdbUploadError``
+    before a partial backend write can occur.
     """
     if isinstance(rows, list) and all(isinstance(batch, list) for batch in rows):
         nonempty_batches = [batch for batch in rows if batch]
@@ -418,6 +427,12 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
     # would call _client_record_from_graph_row twice per row on large datasets.
     # isinstance(row, dict): plain lists are not normalized like DataFrame rows; skip None/Series/etc.
     inner = [record for row in graph_rows if (record := _client_record_from_graph_row(row)) is not None]
+    missing_embeddings = sum(row_has_uploadable_content_without_embedding(row) for row in graph_rows)
+    if inner and missing_embeddings:
+        raise VdbUploadError(
+            "vdb_upload is refusing a partial write because searchable rows are missing embeddings: "
+            f"input rows={len(graph_rows)}, uploadable rows={len(inner)}, missing embedding={missing_embeddings}."
+        )
     if not inner and graph_rows:
         _raise_for_empty_vdb_conversion(graph_rows)
     # Preserve legacy contract: no uploadable rows → [], not [[]].

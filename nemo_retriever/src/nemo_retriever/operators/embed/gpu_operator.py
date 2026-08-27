@@ -12,6 +12,7 @@ from nemo_retriever.operators.abstract_operator import AbstractOperator
 from nemo_retriever.operators.gpu_operator import GPUOperator
 from nemo_retriever.common.params import EmbedParams
 from nemo_retriever.models.inference.runtime import embed_text_main_text_embed
+from nemo_retriever.models.inference.embedding_input import configure_embedding_input_policy
 from nemo_retriever.models.inference.shared import build_embed_kwargs, _to_bool
 
 
@@ -30,6 +31,8 @@ class _BatchEmbedActor(AbstractOperator, GPUOperator):
 
         self._params = params
         self._kwargs = build_embed_kwargs(params)
+        input_policy = configure_embedding_input_policy(self._kwargs)
+        self._kwargs["max_length"] = input_policy.max_tokens
 
         endpoint = (self._kwargs.get("embedding_endpoint") or self._kwargs.get("embed_invoke_url") or "").strip()
         if endpoint:
