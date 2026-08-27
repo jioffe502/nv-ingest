@@ -4,10 +4,10 @@
 
 import json
 import logging
+import math
 import os
 import threading
 import time
-
 from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any, Final, FrozenSet
@@ -27,9 +27,9 @@ from nemo_retriever.common.schemas.collections import (
     DocumentPage,
 )
 from nemo_retriever.common.vdb.adt_vdb import (
+    VDB,
     CollectionWriteContext,
     CollectionWriteResult,
-    VDB,
 )
 from nemo_retriever.common.vdb.lancedb_capabilities import (
     inspect_lancedb_table_object,
@@ -74,6 +74,43 @@ def _normalize_on_bad_vectors(value: str) -> str:
     if normalized not in _VALID_ON_BAD_VECTORS:
         raise ValueError(f"on_bad_vectors must be one of {sorted(_VALID_ON_BAD_VECTORS)}; got {value!r}")
     return normalized
+
+
+def _stabilize_fill_vectors(
+    rows: list[dict[str, Any]],
+    *,
+    vector_dim: int,
+    fill_value: float,
+) -> list[dict[str, Any]]:
+    """Make ``fill`` independent of the installed LanceDB release.
+
+    LanceDB 0.34 replaces the complete vector when its width is wrong or any
+    element is NaN. Newer releases preserve valid elements and fill only the
+    invalid positions. NeMo Retriever supports both installation paths, so
+    normalize the historical public behavior before handing rows to LanceDB.
+    Values that LanceDB cannot coerce remain untouched so its normal validation
+    and error reporting still apply.
+    """
+
+    replacement = [float(fill_value)] * int(vector_dim)
+    stabilized: list[dict[str, Any]] = []
+    for row in rows:
+        vector = row.get("vector")
+        try:
+            wrong_dim = len(vector) != vector_dim
+        except TypeError:
+            wrong_dim = True
+
+        has_nan = False
+        if not wrong_dim:
+            try:
+                has_nan = any(value is not None and math.isnan(float(value)) for value in vector)
+            except (TypeError, ValueError):
+                stabilized.append(row)
+                continue
+
+        stabilized.append({**row, "vector": list(replacement)} if wrong_dim or has_nan else row)
+    return stabilized
 
 
 def _json_str(value) -> str:
@@ -897,6 +934,13 @@ class LanceDB(VDB):
                     record_batches, expected_dim=vector_dim if enforce_dim else None
                 )
 
+            if self.on_bad_vectors == "fill":
+                results = _stabilize_fill_vectors(
+                    results,
+                    vector_dim=vector_dim,
+                    fill_value=self.fill_value,
+                )
+
             if self._service_table_schema:
                 results = _to_service_lancedb_rows(results)
                 schema = _with_retrieval_mode_metadata(
@@ -1221,6 +1265,13 @@ class LanceDB(VDB):
                 f"LanceDB.put: table {target_name!r} not found at uri={self.uri!r}; "
                 "put() only updates existing rows and will not create tables."
             ) from exc
+
+        if self.on_bad_vectors == "fill":
+            rows = _stabilize_fill_vectors(
+                rows,
+                vector_dim=_schema_vector_dim(_table_schema(table)),
+                fill_value=self.fill_value,
+            )
 
         input_ids = [r[key] for r in rows]
         unique_input_ids = list(dict.fromkeys(input_ids))
