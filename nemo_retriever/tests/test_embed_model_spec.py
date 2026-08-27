@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import huggingface_hub
 import pytest
-
 from nemo_retriever.models.embed_model_spec import (
     resolve_embed_model_revision,
     resolve_embed_model_spec,
@@ -26,6 +25,12 @@ def _write_config(tmp_path, config):
 def _write_prompt_config(tmp_path, prompts):
     path = tmp_path / "config_sentence_transformers.json"
     path.write_text(json.dumps({"prompts": prompts}), encoding="utf-8")
+    return path
+
+
+def _write_sentence_config(tmp_path, **config):
+    path = tmp_path / "sentence_bert_config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
     return path
 
 
@@ -65,6 +70,7 @@ def _vl_config(**overrides):
 
 def test_local_text_checkpoint_is_resolved_from_model_type(tmp_path):
     _write_config(tmp_path, _text_config())
+    _write_sentence_config(tmp_path, max_seq_length=8192)
 
     spec = resolve_embed_model_spec(str(tmp_path))
 
@@ -72,6 +78,15 @@ def test_local_text_checkpoint_is_resolved_from_model_type(tmp_path):
     assert spec.output_dimension == 2048
     assert spec.revision is None
     assert spec.requires_vllm is False
+    assert spec.max_input_tokens == 8192
+
+
+def test_vl_checkpoint_uses_declared_document_input_limit(tmp_path):
+    _write_config(tmp_path, _vl_config(p_max_length=4096))
+
+    spec = resolve_embed_model_spec(str(tmp_path))
+
+    assert spec.max_input_tokens == 4096
 
 
 @pytest.mark.parametrize(
@@ -334,6 +349,7 @@ def test_compatible_custom_hub_model_is_pinned_before_config_load(monkeypatch, t
     assert {call["filename"] for call in calls["downloads"]} == {
         "config.json",
         "config_sentence_transformers.json",
+        "sentence_bert_config.json",
     }
     assert all(call["revision"] == resolved_sha for call in calls["downloads"])
     assert all(call["cache_dir"] == cache_dir for call in calls["downloads"])

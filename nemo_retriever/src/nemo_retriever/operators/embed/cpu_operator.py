@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from nemo_retriever.operators.abstract_operator import AbstractOperator
-from nemo_retriever.operators.cpu_operator import CPUOperator
-from nemo_retriever.models.nim.probe import probe_endpoint
-from nemo_retriever.common.params import EmbedParams
 from nemo_retriever.common.api.util.string_processing import prepend_model_provider_prefix
+from nemo_retriever.common.params import EmbedParams
+from nemo_retriever.models.inference.embedding_input import configure_embedding_input_policy
 from nemo_retriever.models.inference.runtime import embed_text_main_text_embed
 from nemo_retriever.models.inference.shared import build_embed_kwargs
+from nemo_retriever.models.nim.probe import probe_endpoint
+from nemo_retriever.operators.abstract_operator import AbstractOperator
+from nemo_retriever.operators.cpu_operator import CPUOperator
 
 
 class _BatchEmbedCPUActor(AbstractOperator, CPUOperator):
@@ -26,6 +27,7 @@ class _BatchEmbedCPUActor(AbstractOperator, CPUOperator):
         super().__init__()
         self._params = params
         self._kwargs = build_embed_kwargs(params)
+        configure_embedding_input_policy(self._kwargs)
         if "embedding_endpoint" not in self._kwargs:
             self._kwargs["embedding_endpoint"] = self._kwargs.get("embed_invoke_url") or self.DEFAULT_EMBED_INVOKE_URL
 
