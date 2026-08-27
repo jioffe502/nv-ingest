@@ -53,6 +53,7 @@ from nemo_retriever.common.api.util.string_processing import (
 from nemo_retriever.common.io.image_handle import (
     EMBEDDING_IMAGE_HANDLE_FIELD,
     ImageHandleError,
+    image_transport_audit_enabled,
     image_transport_stats,
     load_verified_image_b64,
 )
@@ -802,7 +803,8 @@ def create_text_embeddings_for_df(
         except ImageHandleError:
             logger.exception("Embedding image transport verification failed: %s", image_transport)
             raise
-        logger.info(
+        logger.log(
+            logging.WARNING if image_transport_audit_enabled() else logging.INFO,
             "Embedding image transport: rows=%d inline_rows=%d inline_base64_chars=%d "
             "handle_rows=%d verified_handle_rows=%d logical_handle_bytes=%d "
             "unique_handles=%d unique_handle_bytes=%d",

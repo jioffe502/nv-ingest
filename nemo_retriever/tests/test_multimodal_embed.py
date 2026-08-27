@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -292,6 +293,33 @@ class TestMultimodalCallableRunner:
         assert "logical_handle_bytes=123" in caplog.text
         assert "unique_handles=1" in caplog.text
         assert "unique_handle_bytes=123" in caplog.text
+
+    @patch("nemo_retriever.models.inference.main_text_embed.load_verified_image_b64", return_value="verified_b64")
+    def test_qualification_audit_promotes_handle_accounting_to_warning(self, mock_load, caplog, monkeypatch):
+        monkeypatch.setenv("NEMO_RETRIEVER_IMAGE_HANDLE_AUDIT", "1")
+        handle = {
+            "version": 1,
+            "uri": "file:///shared/page.png",
+            "sha256": "a" * 64,
+            "byte_length": 123,
+            "media_type": "image/png",
+            "crop_bbox_xyxy_norm": None,
+        }
+        embedder = MagicMock()
+        embedder.embed_text_image.return_value = [[1.0, 2.0]]
+
+        with caplog.at_level("WARNING", logger="nemo_retriever.models.inference.main_text_embed"):
+            create_text_embeddings_for_df(
+                pd.DataFrame({"text": ["with image"], EMBEDDING_IMAGE_HANDLE_FIELD: [handle]}),
+                task_config={"multimodal_embedder": embedder, "endpoint_url": None},
+                transform_config=TextEmbeddingConfig(embed_modality="text_image"),
+            )
+
+        assert mock_load.call_count == 1
+        assert any(
+            record.levelno == logging.WARNING and "Embedding image transport" in record.message
+            for record in caplog.records
+        )
 
     @patch(
         "nemo_retriever.models.inference.main_text_embed.load_verified_image_b64",

@@ -22,6 +22,7 @@ from nemo_retriever.common.io.image_handle import (
     EMBEDDING_IMAGE_HANDLE_FIELD,
     IMAGE_HANDLE_CONTAINER_FIELD,
     build_image_handle,
+    image_transport_audit_enabled,
     image_transport_stats,
 )
 from nemo_retriever.common.modality.ocr.shared import _crop_b64_image_by_norm_bbox
@@ -404,7 +405,8 @@ class StoreOperator(AbstractOperator, CPUOperator):
             handle_values=out.get(EMBEDDING_IMAGE_HANDLE_FIELD, pd.Series(dtype=object)),
         )
         if stats["handle_rows"] or stats["inline_rows"]:
-            logger.info(
+            logger.log(
+                logging.WARNING if image_transport_audit_enabled() else logging.INFO,
                 "Image handle production: rows=%d handle_rows=%d logical_handle_bytes=%d "
                 "unique_handles=%d unique_handle_bytes=%d inline_output_rows=%d "
                 "inline_output_base64_chars=%d strip_base64=%s",
