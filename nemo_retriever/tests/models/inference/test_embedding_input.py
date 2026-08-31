@@ -39,6 +39,15 @@ class _AlwaysFailsEmbedder:
         raise RuntimeError("embedding service unavailable")
 
 
+class _RecordingEmbedder:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def embed(self, texts: Sequence[str], *, batch_size: int):
+        self.calls.append(list(texts))
+        return [[float(len(text))] for text in texts]
+
+
 class _WhitespaceTokenizer:
     def __init__(self) -> None:
         self._tokens: dict[str, int] = {}
@@ -216,6 +225,36 @@ def test_policy_measures_and_preserves_leading_and_trailing_whitespace() -> None
         (metadata["embedding_chunk_start_token"], metadata["embedding_chunk_end_token"])
         for metadata in result["metadata"]
     ] == [(0, 3), (3, 4)]
+
+
+def test_split_children_reach_text_embedder_without_whitespace_normalization() -> None:
+    policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=5, prefix="p")
+    embedder = _RecordingEmbedder()
+
+    result = embed_text_main_text_embed(
+        pd.DataFrame({"text": [" x ", "ab  cd"]}),
+        model=embedder,
+        embedding_input_policy=policy,
+    )
+
+    assert result["text"].tolist() == [" x ", "ab ", " cd"]
+    assert embedder.calls == [["passage: x", "passage: ab ", "passage:  cd"]]
+    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, True, True]
+
+
+def test_whitespace_only_split_child_is_embedded_without_content_loss() -> None:
+    policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=5, prefix="p")
+    embedder = _RecordingEmbedder()
+
+    result = embed_text_main_text_embed(
+        pd.DataFrame({"text": [" ab "]}),
+        model=embedder,
+        embedding_input_policy=policy,
+    )
+
+    assert result["text"].tolist() == [" ab", " "]
+    assert embedder.calls == [["passage:  ab", "passage:  "]]
+    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, True]
 
 
 def test_policy_fails_closed_when_tokenizer_decode_changes_source_text() -> None:

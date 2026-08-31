@@ -149,6 +149,18 @@ def _text_from_row(row: pd.Series, *, text_column: str) -> Optional[str]:
     return None
 
 
+def _text_input_for_embedding(row: pd.Series, *, text_column: str) -> Optional[str]:
+    """Preserve lossless split children while retaining legacy normalization for ordinary rows."""
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("embedding_chunk_id"):
+        split_content = metadata.get("content")
+        if isinstance(split_content, str):
+            return split_content
+
+    text = _text_from_row(row, text_column=text_column)
+    return text.strip() if text is not None else None
+
+
 def _ensure_metadata_dict(row: pd.Series, *, metadata_column: str = "metadata") -> Dict[str, Any]:
     md = row.get(metadata_column)
     if isinstance(md, dict):
@@ -708,8 +720,8 @@ def create_text_embeddings_for_df(
         extracted_content = df_transform_ledger.apply(_text_image_content, axis=1)
     else:
         extracted_content = df_transform_ledger.apply(
-            lambda r: _text_from_row(r, text_column=str(transform_config.text_column)), axis=1
-        ).apply(lambda x: x.strip() if isinstance(x, str) and x.strip() else None)
+            lambda r: _text_input_for_embedding(r, text_column=str(transform_config.text_column)), axis=1
+        )
 
     df_content = df_transform_ledger.copy()
     df_content["_content"] = extracted_content
