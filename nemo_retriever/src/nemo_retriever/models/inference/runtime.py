@@ -12,8 +12,11 @@ from typing import Any, List, Optional, Sequence
 import pandas as pd
 
 from nemo_retriever.common.params.models import IMAGE_MODALITIES
+from nemo_retriever.common.schemas.embedding import (
+    embedding_runtime_modality,
+)
 from nemo_retriever.models import VL_EMBED_MODEL, resolve_embed_model
-from nemo_retriever.models.inference.embedding_input import _INTERNAL_ACCOUNTING_COLUMNS, EmbeddingInputPolicy
+from nemo_retriever.models.inference.embedding_input import EmbeddingInputPolicy
 from nemo_retriever.models.inference.main_text_embed import TextEmbeddingConfig, create_text_embeddings_for_df
 from nemo_retriever.models.nim.error_reporter import report_error
 
@@ -137,17 +140,28 @@ def embed_text_main_text_embed(
 
     resolved_model_name = resolve_embed_model(model_name)
 
-    prepared_df = (
-        embedding_input_policy.prepare(batch_df, text_column=text_column, default_modality=embed_modality)
-        if embedding_input_policy is not None
-        else batch_df
-    )
-
-    has_per_row_modality = "_embed_modality" in prepared_df.columns
-    if has_per_row_modality:
-        modalities = prepared_df["_embed_modality"].fillna(embed_modality).unique().tolist()
+    if embedding_input_policy is not None:
+        preparation = embedding_input_policy.prepare_with_summary(
+            batch_df,
+            text_column=text_column,
+            default_modality=embed_modality,
+        )
+        prepared_df = preparation.frame
+        input_row_count = preparation.input_rows
+        current_split_child_positions = preparation.split_child_positions
+        current_split_parent_positions = preparation.split_parent_positions
     else:
-        modalities = [embed_modality]
+        prepared_df = batch_df
+        input_row_count = len(batch_df.index)
+        current_split_child_positions = frozenset()
+        current_split_parent_positions = frozenset()
+
+    effective_modalities = prepared_df.apply(
+        lambda row: embedding_runtime_modality(row, default_modality=embed_modality), axis=1
+    )
+    modalities = effective_modalities.unique().tolist() or [
+        embedding_runtime_modality({}, default_modality=embed_modality)
+    ]
 
     try:
         if len(modalities) == 1:
@@ -170,7 +184,7 @@ def embed_text_main_text_embed(
         else:
             parts: List[pd.DataFrame] = []
             for modality in modalities:
-                mask = prepared_df["_embed_modality"] == modality
+                mask = effective_modalities == modality
                 group_df = prepared_df.loc[mask]
                 if group_df.empty:
                     continue
@@ -231,18 +245,17 @@ def embed_text_main_text_embed(
     embedded_flags = out_df[has_embedding_column].tolist()
     out_df["embedding_v1_num_detections"] = [int(f) for f in embedded_flags]
     counts_by_label: list[dict[str, int]] = []
-    for _, row in out_df.iterrows():
+    for position, (_, row) in enumerate(out_df.iterrows()):
         embedded = bool(row.get(has_embedding_column))
         counts = {"embedded": 1} if embedded else {"unembedded": 1}
         payload = row.get(output_column)
         if isinstance(payload, dict) and payload.get("error") is not None:
             counts["failed"] = 1
-        if bool(row.get("_embedding_input_overlength", False)):
-            counts["overlength"] = 1
-        if bool(row.get("_embedding_input_split_parent", False)):
-            counts["split"] = 1
-        if bool(row.get("_embedding_input_split_child", False)):
+        if position in current_split_child_positions:
             counts["split_child"] = 1
+            if position in current_split_parent_positions:
+                counts["overlength"] = 1
+                counts["split"] = 1
         counts_by_label.append(counts)
     out_df["embedding_v1_counts_by_label"] = counts_by_label
 
@@ -250,19 +263,14 @@ def embed_text_main_text_embed(
         label: sum(int(counts.get(label, 0)) for counts in counts_by_label)
         for label in ("overlength", "split", "split_child", "failed", "embedded", "unembedded")
     }
-    input_rows = len(out_df.index) - totals["split_child"] + totals["split"]
     summary = (
-        f"Embedding summary: input_rows={input_rows} output_rows={len(out_df.index)} "
+        f"Embedding summary: input_rows={input_row_count} output_rows={len(out_df.index)} "
         f"overlength={totals['overlength']} split={totals['split']} truncated=0 "
         f"failed={totals['failed']} embedded={totals['embedded']} unembedded={totals['unembedded']} "
         f"split_children={totals['split_child']}"
     )
     if totals["failed"] or totals["unembedded"] or totals["overlength"]:
         logger.warning(summary)
-
-    internal_accounting = [column for column in _INTERNAL_ACCOUNTING_COLUMNS if column in out_df.columns]
-    if internal_accounting:
-        out_df = out_df.drop(columns=internal_accounting)
 
     if "_embed_modality" in out_df.columns:
         # Internal embedding router column; StoreOperator consumes _image_b64.

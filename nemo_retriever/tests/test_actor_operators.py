@@ -865,8 +865,8 @@ class TestBatchEmbedActor:
     @pytest.fixture(autouse=True)
     def _stub_input_policy(self, monkeypatch):
         monkeypatch.setattr(
-            "nemo_retriever.operators.embed.cpu_operator.configure_embedding_input_policy",
-            lambda kwargs: SimpleNamespace(max_tokens=8192),
+            "nemo_retriever.operators.embed.cpu_operator.ensure_embedding_input_policy_for_batch",
+            lambda kwargs, frame: SimpleNamespace(max_tokens=8192),
         )
 
     def _make(self):

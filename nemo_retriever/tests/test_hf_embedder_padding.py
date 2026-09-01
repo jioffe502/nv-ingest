@@ -102,6 +102,14 @@ def test_hf_passage_embedder_preserves_blank_input_cardinality() -> None:
     assert tokenizer.calls[0]["texts"] == ["passage: content", "passage:  "]
 
 
+def test_hf_passage_embedder_preserves_literal_prefixed_source_text() -> None:
+    embedder, tokenizer = _make_loaded_embedder()
+
+    embedder.embed(["passage: source text"], batch_size=8)
+
+    assert tokenizer.calls[0]["texts"] == ["passage: source text"]
+
+
 class _FakeTextModel:
     def __init__(self) -> None:
         self.embed_calls: list[list[str]] = []

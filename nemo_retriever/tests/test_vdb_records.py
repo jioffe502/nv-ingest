@@ -135,8 +135,8 @@ def test_canonical_record_batches_pass_through_without_reconversion() -> None:
         pytest.param([[]], [], id="single-empty-batch"),
         pytest.param([[], []], [], id="multiple-empty-batches"),
         pytest.param(
-            [[], [{"metadata": {"content": "canonical"}}], []],
-            [[{"metadata": {"content": "canonical"}}]],
+            [[], [{"metadata": {"content": "canonical", "embedding": [0.1, 0.2]}}], []],
+            [[{"metadata": {"content": "canonical", "embedding": [0.1, 0.2]}}]],
             id="mixed",
         ),
     ],
@@ -284,6 +284,57 @@ def test_dense_record_conversion_rejects_partial_embedding_coverage() -> None:
         to_client_vdb_records(rows)
 
 
+def test_dense_record_conversion_rejects_runtime_failure_empty_vectors() -> None:
+    rows = [
+        {
+            "text": "failed before",
+            "text_embeddings_1b_v2": {
+                "embedding": [],
+                "error": "RuntimeError: embedding batch failed; inspect embed-stage logs for the cause",
+            },
+        },
+        {
+            "text": "failed after",
+            "text_embeddings_1b_v2": {
+                "embedding": [],
+                "error": "RuntimeError: embedding batch failed; inspect embed-stage logs for the cause",
+            },
+        },
+    ]
+
+    with pytest.raises(
+        VdbUploadError,
+        match=r"none were uploadable",
+    ):
+        to_client_vdb_records(rows)
+
+
+def test_dense_record_conversion_rejects_partial_canonical_embedding_coverage() -> None:
+    records = [
+        [
+            {
+                "document_type": "text",
+                "metadata": {
+                    "content": "embedded child",
+                    "embedding": [0.1, 0.2],
+                    "content_metadata": {"embedding_chunk_id": "child-0"},
+                },
+            },
+            {
+                "document_type": "text",
+                "metadata": {
+                    "content": "missing child",
+                    "embedding": [],
+                    "content_metadata": {"embedding_chunk_id": "child-1"},
+                },
+            },
+        ]
+    ]
+
+    with pytest.raises(VdbUploadError, match=r"canonical records.*missing embeddings"):
+        to_client_vdb_records(records)
+
+
 def test_dense_record_conversion_preserves_whitespace_only_embedding_child() -> None:
     rows = [
         {"text": "embedded", "metadata": {"embedding": [0.1, 0.2]}},
@@ -331,6 +382,30 @@ def test_dense_record_conversion_rejects_missing_whitespace_only_child_embedding
         match=r"refusing a partial write.*input rows=2.*uploadable rows=1.*missing embedding=1",
     ):
         to_client_vdb_records(rows)
+
+
+def test_canonical_record_rejects_missing_whitespace_only_child_embedding() -> None:
+    records = [
+        [
+            {
+                "document_type": "text",
+                "metadata": {
+                    "content": "  ",
+                    "content_metadata": {
+                        "embedding_parent_id": "parent",
+                        "embedding_chunk_id": "child-1",
+                        "embedding_chunk_index": 1,
+                        "embedding_chunk_count": 2,
+                        "embedding_chunk_start_token": 8187,
+                        "embedding_chunk_end_token": 8188,
+                    },
+                },
+            }
+        ]
+    ]
+
+    with pytest.raises(VdbUploadError, match=r"canonical records.*missing embeddings"):
+        to_client_vdb_records(records)
 
 
 def test_dense_record_conversion_ignores_inherited_page_uri_without_searchable_content() -> None:

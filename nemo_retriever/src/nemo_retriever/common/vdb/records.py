@@ -15,6 +15,11 @@ from typing import Any, TypedDict
 from pydantic import ValidationError
 
 from nemo_retriever.common.schemas.collections import QueryHit
+from nemo_retriever.common.schemas.embedding import (
+    EMBEDDING_SPLIT_METADATA_KEYS,
+    embedding_split_content,
+    embedding_split_id,
+)
 from nemo_retriever.common.stage_errors import ERROR_FIELD_KEYS, iter_stage_errors_from_value
 
 _CONTENT_TYPE_ALIASES: dict[str, str] = {
@@ -28,12 +33,7 @@ _CONTENT_TYPE_ALIASES: dict[str, str] = {
 _CONTENT_PROVENANCE_METADATA_KEYS = (
     "chunk_index",
     "chunk_count",
-    "embedding_parent_id",
-    "embedding_chunk_id",
-    "embedding_chunk_index",
-    "embedding_chunk_count",
-    "embedding_chunk_start_token",
-    "embedding_chunk_end_token",
+    *EMBEDDING_SPLIT_METADATA_KEYS,
     "segment_start_seconds",
     "segment_end_seconds",
     "frame_timestamp_seconds",
@@ -166,6 +166,8 @@ def _embedding_from_graph_row(row: dict[str, Any], metadata: dict[str, Any]) -> 
             embedding = tolist()
         elif isinstance(embedding, tuple):
             embedding = list(embedding)
+    if isinstance(embedding, list) and not embedding:
+        return None
     return embedding
 
 
@@ -178,11 +180,15 @@ def _first_str(*values: Any) -> str:
 
 def _text_from_graph_row(row: dict[str, Any], metadata: dict[str, Any]) -> str:
     """Return exact split-child text or the first ordinary nonblank text field."""
-    preserve_split_child = isinstance(metadata.get("embedding_chunk_id"), str) and bool(
-        metadata["embedding_chunk_id"].strip()
-    )
+    split_content = embedding_split_content(metadata)
+    if split_content is not None:
+        return split_content
+    content_metadata = metadata.get("content_metadata")
+    canonical_content = metadata.get("content")
+    if embedding_split_id(content_metadata) is not None and isinstance(canonical_content, str):
+        return canonical_content
     for value in (row.get("text"), row.get("content"), metadata.get("content")):
-        if isinstance(value, str) and (value.strip() or (preserve_split_child and value)):
+        if isinstance(value, str) and value.strip():
             return value
     return ""
 
@@ -368,8 +374,13 @@ def _row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
     if _first_str(row.get("_image_b64")):
         return True
 
-    stored_image_uri = _first_str(row.get("_stored_image_uri"), row.get("stored_image_uri"))
     content_metadata = _dict_or_empty(metadata.get("content_metadata"))
+    stored_image_uri = _first_str(
+        row.get("_stored_image_uri"),
+        row.get("stored_image_uri"),
+        content_metadata.get("stored_image_uri"),
+        content_metadata.get("uploaded_image_uri"),
+    )
     content_type = normalize_content_type(
         row.get("_content_type") or row.get("content_type") or content_metadata.get("type")
     )
@@ -430,6 +441,13 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
     """
     if isinstance(rows, list) and all(isinstance(batch, list) for batch in rows):
         nonempty_batches = [batch for batch in rows if batch]
+        canonical_records = [record for batch in nonempty_batches for record in batch if isinstance(record, dict)]
+        missing_embeddings = sum(_row_has_uploadable_content_without_embedding(record) for record in canonical_records)
+        if missing_embeddings:
+            raise VdbUploadError(
+                "vdb_upload is refusing canonical records with missing embeddings: "
+                f"input records={len(canonical_records)}, missing embedding={missing_embeddings}."
+            )
         return rows if len(nonempty_batches) == len(rows) else nonempty_batches
     if hasattr(rows, "to_pandas"):
         rows = rows.to_pandas()

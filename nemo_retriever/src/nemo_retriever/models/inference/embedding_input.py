@@ -19,45 +19,21 @@ from nemo_retriever.common.modality.txt.tokenizer_provider import (
     ChunkTokenizer,
     load_chunk_tokenizer,
 )
+from nemo_retriever.common.schemas.embedding import (
+    EmbeddingSplitProvenance,
+    SelectedEmbeddingText,
+    requires_text_admission,
+    select_embedding_text,
+)
 from nemo_retriever.models import resolve_embed_model
 from nemo_retriever.models.embed_model_spec import resolve_embed_model_spec
 from nemo_retriever.models.hf_model_registry import HF_MODEL_REVISIONS
-
-_OVERLENGTH_COLUMN = "_embedding_input_overlength"
-_SPLIT_PARENT_COLUMN = "_embedding_input_split_parent"
-_SPLIT_CHILD_COLUMN = "_embedding_input_split_child"
-_INTERNAL_ACCOUNTING_COLUMNS = (
-    _OVERLENGTH_COLUMN,
-    _SPLIT_PARENT_COLUMN,
-    _SPLIT_CHILD_COLUMN,
-)
 
 
 def _deep_copy_row(row: pd.Series) -> dict[str, Any]:
     return {
         key: copy.deepcopy(value) if isinstance(value, (dict, list)) else value for key, value in row.to_dict().items()
     }
-
-
-def _set_accounting(
-    row: dict[str, Any],
-    *,
-    overlength: bool = False,
-    split_parent: bool = False,
-    split_child: bool = False,
-) -> dict[str, Any]:
-    row[_OVERLENGTH_COLUMN] = overlength
-    row[_SPLIT_PARENT_COLUMN] = split_parent
-    row[_SPLIT_CHILD_COLUMN] = split_child
-    return row
-
-
-def _embedding_text(row: pd.Series, text_column: str) -> tuple[str, str] | None:
-    for column in dict.fromkeys((text_column, "text", "content", "chunk", "page_text")):
-        value = row.get(column)
-        if isinstance(value, str) and value.strip():
-            return column, value
-    return None
 
 
 def _stable_json(value: Any) -> str:
@@ -129,19 +105,35 @@ def _parent_id(row: dict[str, Any], text: str) -> str:
 
 
 @dataclass(frozen=True)
+class EmbeddingPreparationResult:
+    """Prepared frame plus events created by this admission invocation."""
+
+    frame: pd.DataFrame
+    input_rows: int
+    split_child_positions: frozenset[int]
+    split_parent_positions: frozenset[int]
+
+
+@dataclass(frozen=True)
 class EmbeddingInputPolicy:
     """Prepare text rows so every formatted prompt fits the model input limit."""
 
     tokenizer: ChunkTokenizer
     max_tokens: int
     prefix: str
+    prefix_if_missing: bool = False
 
     def __post_init__(self) -> None:
         if self.max_tokens <= 0:
             raise ValueError("Embedding input max_tokens must be positive")
 
+    def _format(self, text: str) -> str:
+        if self.prefix_if_missing and text.lower().startswith(self.prefix.lower()):
+            return text
+        return f"{self.prefix}{text}"
+
     def _formatted_token_count(self, text: str) -> int:
-        return len(self.tokenizer.encode(f"{self.prefix}{text}", add_special_tokens=True))
+        return len(self.tokenizer.encode(self._format(text), add_special_tokens=True))
 
     def _formatted_token_counts(self, texts: list[str]) -> list[int]:
         encode_batch = getattr(self.tokenizer, "encode_batch", None)
@@ -149,7 +141,7 @@ class EmbeddingInputPolicy:
             return [
                 len(token_ids)
                 for token_ids in encode_batch(
-                    [f"{self.prefix}{text}" for text in texts],
+                    [self._format(text) for text in texts],
                     add_special_tokens=True,
                 )
             ]
@@ -197,14 +189,14 @@ class EmbeddingInputPolicy:
     def _expand_row(
         self,
         row: pd.Series,
-        selected: tuple[str, str] | None,
+        selected: SelectedEmbeddingText | None,
         parent_tokens: int | None,
     ) -> list[dict[str, Any]]:
         row_copy = _deep_copy_row(row)
         if selected is None or parent_tokens is None or parent_tokens <= self.max_tokens:
-            return [_set_accounting(row_copy)]
+            return [row_copy]
 
-        selected_column, text = selected
+        selected_column, text = selected.column, selected.content
         chunks = self._split(text)
         parent_id = _parent_id(row_copy, text)
         expanded: list[dict[str, Any]] = []
@@ -218,26 +210,84 @@ class EmbeddingInputPolicy:
                 metadata = {}
                 child["metadata"] = metadata
             chunk_id = hashlib.sha256(f"{parent_id}\0{start}\0{end}".encode("utf-8")).hexdigest()
-            metadata.update(
-                {
-                    "content": chunk,
-                    "embedding_parent_id": parent_id,
-                    "embedding_chunk_id": chunk_id,
-                    "embedding_chunk_index": chunk_index,
-                    "embedding_chunk_count": len(chunks),
-                    "embedding_chunk_start_token": start,
-                    "embedding_chunk_end_token": end,
-                }
+            provenance = EmbeddingSplitProvenance(
+                parent_id=parent_id,
+                chunk_id=chunk_id,
+                chunk_index=chunk_index,
+                chunk_count=len(chunks),
+                start_token=start,
+                end_token=end,
             )
-            expanded.append(
-                _set_accounting(
-                    child,
-                    overlength=chunk_index == 0,
-                    split_parent=chunk_index == 0,
-                    split_child=True,
-                )
-            )
+            metadata.update(provenance.as_metadata(content=chunk))
+            expanded.append(child)
         return expanded
+
+    def prepare_with_summary(
+        self,
+        frame: pd.DataFrame,
+        *,
+        text_column: str = "text",
+        default_modality: str = "text",
+    ) -> EmbeddingPreparationResult:
+        """Prepare rows and report only split events created by this invocation."""
+        input_rows = len(frame.index)
+
+        def unchanged() -> EmbeddingPreparationResult:
+            return EmbeddingPreparationResult(
+                frame=frame.copy(),
+                input_rows=input_rows,
+                split_child_positions=frozenset(),
+                split_parent_positions=frozenset(),
+            )
+
+        if frame.empty:
+            return unchanged()
+
+        text_admission = [
+            requires_text_admission(row, default_modality=default_modality) for _, row in frame.iterrows()
+        ]
+        if not any(text_admission):
+            return unchanged()
+
+        rows = [row for _, row in frame.iterrows()]
+        selected_inputs: list[SelectedEmbeddingText | None] = []
+        text_positions: list[int] = []
+        texts: list[str] = []
+        for position, row in enumerate(rows):
+            selected = (
+                select_embedding_text(row, text_column=text_column)
+                if requires_text_admission(row, default_modality=default_modality)
+                else None
+            )
+            selected_inputs.append(selected)
+            if selected is not None:
+                text_positions.append(position)
+                texts.append(selected.content)
+
+        parent_token_counts: list[int | None] = [None] * len(rows)
+        for position, token_count in zip(text_positions, self._formatted_token_counts(texts)):
+            parent_token_counts[position] = token_count
+
+        if not any(token_count is not None and token_count > self.max_tokens for token_count in parent_token_counts):
+            return unchanged()
+
+        prepared: list[dict[str, Any]] = []
+        split_child_positions: set[int] = set()
+        split_parent_positions: set[int] = set()
+        for row, selected, parent_tokens in zip(rows, selected_inputs, parent_token_counts):
+            first_output_position = len(prepared)
+            expanded = self._expand_row(row, selected, parent_tokens)
+            prepared.extend(expanded)
+            if parent_tokens is not None and parent_tokens > self.max_tokens:
+                split_parent_positions.add(first_output_position)
+                split_child_positions.update(range(first_output_position, first_output_position + len(expanded)))
+
+        return EmbeddingPreparationResult(
+            frame=pd.DataFrame(prepared).reset_index(drop=True),
+            input_rows=input_rows,
+            split_child_positions=frozenset(split_child_positions),
+            split_parent_positions=frozenset(split_parent_positions),
+        )
 
     def prepare(
         self,
@@ -247,51 +297,11 @@ class EmbeddingInputPolicy:
         default_modality: str = "text",
     ) -> pd.DataFrame:
         """Return rows ready for embedding, expanding only overlength text inputs."""
-        if frame.empty:
-            return frame.copy()
-
-        if "_embed_modality" in frame.columns:
-            modalities = [str(_first_present(value, default_modality)) for value in frame["_embed_modality"].tolist()]
-            if all(modality != "text" for modality in modalities):
-                return frame.copy()
-        elif default_modality != "text":
-            return frame.copy()
-
-        if text_column in frame.columns:
-            texts = frame[text_column].tolist()
-            all_text = all(isinstance(text, str) and text.strip() for text in texts)
-            all_text_modalities = "_embed_modality" not in frame.columns or all(
-                modality == "text" for modality in modalities
-            )
-            if all_text and all_text_modalities:
-                parent_token_counts = self._formatted_token_counts(texts)
-                if all(token_count <= self.max_tokens for token_count in parent_token_counts):
-                    return frame.copy()
-
-        rows = [row for _, row in frame.iterrows()]
-        selected_inputs: list[tuple[str, str] | None] = []
-        text_positions: list[int] = []
-        texts: list[str] = []
-        for position, row in enumerate(rows):
-            modality = str(_first_present(row.get("_embed_modality"), default_modality))
-            selected = _embedding_text(row, text_column) if modality == "text" else None
-            selected_inputs.append(selected)
-            if selected is not None:
-                text_positions.append(position)
-                texts.append(selected[1])
-
-        parent_token_counts: list[int | None] = [None] * len(rows)
-        for position, token_count in zip(text_positions, self._formatted_token_counts(texts)):
-            parent_token_counts[position] = token_count
-
-        if not any(token_count is not None and token_count > self.max_tokens for token_count in parent_token_counts):
-            return frame.copy()
-
-        prepared: list[dict[str, Any]] = []
-        for row, selected, parent_tokens in zip(rows, selected_inputs, parent_token_counts):
-            prepared.extend(self._expand_row(row, selected, parent_tokens))
-
-        return pd.DataFrame(prepared).reset_index(drop=True)
+        return self.prepare_with_summary(
+            frame,
+            text_column=text_column,
+            default_modality=default_modality,
+        ).frame
 
 
 def resolve_embedding_input_policy(
@@ -301,6 +311,7 @@ def resolve_embedding_input_policy(
     input_type: str,
     revision: str | None = None,
     cache_dir: str | None = None,
+    prefix_if_missing: bool = False,
 ) -> EmbeddingInputPolicy:
     """Resolve a model-pinned input policy shared by local and remote adapters."""
     if configured_max_tokens <= 0:
@@ -326,7 +337,12 @@ def resolve_embedding_input_policy(
         cache_dir=cache_dir,
         revision=spec.revision,
     )
-    return EmbeddingInputPolicy(tokenizer=tokenizer, max_tokens=effective_max, prefix=prefix)
+    return EmbeddingInputPolicy(
+        tokenizer=tokenizer,
+        max_tokens=effective_max,
+        prefix=prefix,
+        prefix_if_missing=prefix_if_missing,
+    )
 
 
 def resolve_known_embedding_input_policy(
@@ -336,6 +352,7 @@ def resolve_known_embedding_input_policy(
     input_type: str,
     revision: str | None = None,
     cache_dir: str | None = None,
+    prefix_if_missing: bool = False,
 ) -> EmbeddingInputPolicy:
     """Resolve input protection for a pinned or local model, failing closed otherwise."""
     model_id = resolve_embed_model(model_name)
@@ -351,6 +368,7 @@ def resolve_known_embedding_input_policy(
         input_type=input_type,
         revision=revision,
         cache_dir=cache_dir,
+        prefix_if_missing=prefix_if_missing,
     )
 
 
@@ -368,15 +386,31 @@ def configure_embedding_input_policy(kwargs: dict[str, Any]) -> EmbeddingInputPo
         input_type=input_type,
         revision=kwargs.get("embed_model_revision"),
         cache_dir=kwargs.get("hf_cache_dir"),
+        prefix_if_missing=bool(kwargs.get("_embedding_prefix_if_missing", False)),
     )
     kwargs["embedding_input_policy"] = policy
     return policy
 
 
+def ensure_embedding_input_policy_for_batch(kwargs: dict[str, Any], frame: Any) -> EmbeddingInputPolicy | None:
+    """Lazily install text admission only when a batch will use the text route."""
+    existing = kwargs.get("embedding_input_policy")
+    if existing is not None:
+        return existing
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+    default_modality = str(kwargs.get("embed_modality", "text"))
+    needs_text_policy = any(
+        requires_text_admission(row, default_modality=default_modality) for _, row in frame.iterrows()
+    )
+    return configure_embedding_input_policy(kwargs) if needs_text_policy else None
+
+
 __all__ = [
     "EmbeddingInputPolicy",
+    "EmbeddingPreparationResult",
     "configure_embedding_input_policy",
+    "ensure_embedding_input_policy_for_batch",
     "resolve_embedding_input_policy",
     "resolve_known_embedding_input_policy",
-    "_INTERNAL_ACCOUNTING_COLUMNS",
 ]

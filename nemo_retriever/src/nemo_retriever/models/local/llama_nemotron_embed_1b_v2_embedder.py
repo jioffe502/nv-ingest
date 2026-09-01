@@ -84,12 +84,12 @@ class LlamaNemotronEmbed1BV2Embedder:
         return False
 
     def _finalize_vectors(self, vectors: List[List[float]]) -> torch.Tensor:
-        valid = [v for v in vectors if v]
-        if not valid:
+        if not vectors:
             return torch.empty((0, 0), dtype=torch.float32)
-        dim = len(valid[0])
-        padded: List[List[float]] = [v if v else [0.0] * dim for v in vectors]
-        t = torch.tensor(padded, dtype=torch.float32)
+        missing = sum(not vector for vector in vectors)
+        if missing:
+            raise RuntimeError(f"vLLM failed to return an embedding for {missing}/{len(vectors)} inputs")
+        t = torch.tensor(vectors, dtype=torch.float32)
         if self.normalize:
             return _l2_normalize(t)
         return t
