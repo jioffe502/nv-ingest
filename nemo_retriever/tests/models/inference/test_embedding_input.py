@@ -644,10 +644,26 @@ def test_query_actor_resolves_the_shared_policy_at_query_max_length(
 
 def test_local_actor_does_not_raise_vllm_above_checkpoint_support(monkeypatch) -> None:
     from nemo_retriever.models import create_local_embedder as create_local_embedder_factory
+    from nemo_retriever.models.embed_model_spec import EmbedModelSpec
     from nemo_retriever.operators.embed import gpu_operator
 
     create_local_embedder = Mock(spec=create_local_embedder_factory, return_value=object())
+    checkpoint = EmbedModelSpec(
+        model_id="nvidia/llama-nemotron-embed-1b-v2",
+        revision="113abe4acafa848e77ead9c0623205e511932348",
+        family="text",
+        output_dimension=2048,
+        query_prefix="query: ",
+        document_prefix="passage: ",
+        max_input_tokens=8192,
+        query_prefix_declared=True,
+        document_prefix_declared=True,
+    )
     monkeypatch.setattr("nemo_retriever.models.create_local_embedder", create_local_embedder)
+    monkeypatch.setattr(
+        "nemo_retriever.models.embed_model_spec.resolve_embed_model_spec",
+        Mock(return_value=checkpoint),
+    )
     monkeypatch.setattr(
         "nemo_retriever.models.warmup_registry.get_warmed_model",
         lambda name, *, expected_identity=None: None,
