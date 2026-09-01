@@ -253,9 +253,9 @@ class EmbeddingInputPolicy:
         if "_embed_modality" in frame.columns:
             modalities = [str(_first_present(value, default_modality)) for value in frame["_embed_modality"].tolist()]
             if all(modality != "text" for modality in modalities):
-                return frame.copy().reset_index(drop=True)
+                return frame.copy()
         elif default_modality != "text":
-            return frame.copy().reset_index(drop=True)
+            return frame.copy()
 
         if text_column in frame.columns:
             texts = frame[text_column].tolist()
@@ -266,7 +266,7 @@ class EmbeddingInputPolicy:
             if all_text and all_text_modalities:
                 parent_token_counts = self._formatted_token_counts(texts)
                 if all(token_count <= self.max_tokens for token_count in parent_token_counts):
-                    return frame.copy().reset_index(drop=True)
+                    return frame.copy()
 
         rows = [row for _, row in frame.iterrows()]
         selected_inputs: list[tuple[str, str] | None] = []
@@ -285,7 +285,7 @@ class EmbeddingInputPolicy:
             parent_token_counts[position] = token_count
 
         if not any(token_count is not None and token_count > self.max_tokens for token_count in parent_token_counts):
-            return frame.copy().reset_index(drop=True)
+            return frame.copy()
 
         prepared: list[dict[str, Any]] = []
         for row, selected, parent_tokens in zip(rows, selected_inputs, parent_token_counts):
@@ -306,9 +306,21 @@ def resolve_embedding_input_policy(
     if configured_max_tokens <= 0:
         raise ValueError("Configured embedding max length must be positive")
     spec = resolve_embed_model_spec(model_id, revision=revision, hf_cache_dir=cache_dir)
-    supported_max = spec.max_input_tokens or configured_max_tokens
-    effective_max = min(configured_max_tokens, supported_max)
-    prefix = spec.query_prefix if str(input_type).strip().lower() == "query" else spec.document_prefix
+    if spec.max_input_tokens is None:
+        raise ValueError(
+            f"Embedding model {spec.model_id!r} does not declare a supported input limit; "
+            "exact pre-embedding admission cannot be enforced."
+        )
+    effective_max = min(configured_max_tokens, spec.max_input_tokens)
+    is_query = str(input_type).strip().lower() == "query"
+    prefix = spec.query_prefix if is_query else spec.document_prefix
+    prefix_declared = spec.query_prefix_declared if is_query else spec.document_prefix_declared
+    if not prefix_declared:
+        prompt_type = "query" if is_query else "passage"
+        raise ValueError(
+            f"Embedding model {spec.model_id!r} does not declare a {prompt_type} prompt; "
+            "exact pre-embedding admission cannot be enforced."
+        )
     tokenizer = load_chunk_tokenizer(
         spec.model_id,
         cache_dir=cache_dir,

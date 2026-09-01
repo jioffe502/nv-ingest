@@ -75,6 +75,8 @@ def test_input_limit_field_preserves_existing_positional_constructor_order():
     assert spec.quantization == "FP8"
     assert spec.requires_vllm is True
     assert spec.max_input_tokens is None
+    assert spec.query_prefix_declared is False
+    assert spec.document_prefix_declared is False
 
 
 def test_local_text_checkpoint_is_resolved_from_model_type(tmp_path):
@@ -253,6 +255,8 @@ def test_checkpoint_prompt_metadata_is_resolved(tmp_path):
 
     assert spec.query_prefix == "Instruct: Retrieve relevant passages\nQuery: "
     assert spec.document_prefix == ""
+    assert spec.query_prefix_declared is True
+    assert spec.document_prefix_declared is True
 
 
 @pytest.mark.parametrize(

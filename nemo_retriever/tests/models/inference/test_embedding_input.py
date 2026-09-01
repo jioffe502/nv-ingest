@@ -21,6 +21,7 @@ from nemo_retriever.models.inference.embedding_input import (
     resolve_embedding_input_policy,
 )
 from nemo_retriever.models.inference.runtime import embed_text_main_text_embed
+from nemo_retriever.models.local.llama_nemotron_embed_1b_v2_embedder import LlamaNemotronEmbed1BV2Embedder
 
 
 class _RejectOneInputEmbedder:
@@ -123,6 +124,24 @@ class _LiteralSpecialTokenizer:
             elif token_id != -1:
                 parts.append(chr(token_id))
         return "".join(parts)
+
+
+def _write_local_text_policy_metadata(tmp_path, *, prompts=None, max_input_tokens=None) -> None:
+    (tmp_path / "config.json").write_text(
+        '{"model_type":"llama_bidirec","architectures":["LlamaBidirectionalModel"],'
+        '"hidden_size":2048,"pooling":"avg"}',
+        encoding="utf-8",
+    )
+    if prompts is not None:
+        (tmp_path / "config_sentence_transformers.json").write_text(
+            json.dumps({"prompts": prompts}),
+            encoding="utf-8",
+        )
+    if max_input_tokens is not None:
+        (tmp_path / "sentence_bert_config.json").write_text(
+            json.dumps({"max_seq_length": max_input_tokens}),
+            encoding="utf-8",
+        )
 
 
 def test_systemic_local_failure_is_not_replayed_as_row_rejections(caplog) -> None:
@@ -257,6 +276,38 @@ def test_whitespace_only_split_child_is_embedded_without_content_loss() -> None:
     assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, True]
 
 
+@pytest.mark.parametrize(("input_type", "prefix"), [("passage", "p"), ("query", "q")])
+def test_whitespace_only_split_child_preserves_local_embedder_cardinality(
+    monkeypatch: pytest.MonkeyPatch,
+    input_type: str,
+    prefix: str,
+) -> None:
+    policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=5, prefix=prefix)
+    embedder = LlamaNemotronEmbed1BV2Embedder()
+    embedder._llm = object()
+    model_inputs: list[str] = []
+
+    def embed_with_vllm(texts, _model, *, batch_size, prefix, normalize):
+        model_inputs.extend(texts)
+        return [[3.0, 4.0] for _ in texts]
+
+    monkeypatch.setattr(
+        "nemo_retriever.models.inference.vllm.embed_with_vllm_llm",
+        embed_with_vllm,
+    )
+
+    result = embed_text_main_text_embed(
+        pd.DataFrame({"marker": ["before", "overflow", "after"], "text": ["x", " ab ", "y"]}),
+        model=embedder,
+        input_type=input_type,
+        embedding_input_policy=policy,
+    )
+
+    assert result["text"].tolist() == ["x", " ab", " ", "y"]
+    assert model_inputs == ["x", " ab", " ", "y"]
+    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, True, True, True]
+
+
 def test_policy_fails_closed_when_tokenizer_decode_changes_source_text() -> None:
     policy = EmbeddingInputPolicy(tokenizer=_NormalizingWhitespaceTokenizer(), max_tokens=4, prefix="passage: ")
 
@@ -280,6 +331,18 @@ def test_policy_batches_admission_and_preserves_non_overlength_rows_exactly() ->
 
     pd.testing.assert_frame_equal(result, source, check_exact=True)
     assert tokenizer.batch_calls == 1
+
+
+def test_policy_preserves_non_overlength_row_index_exactly() -> None:
+    policy = EmbeddingInputPolicy(tokenizer=_WhitespaceTokenizer(), max_tokens=20, prefix="passage: ")
+    source = pd.DataFrame(
+        {"text": ["short input", "another short input"]},
+        index=pd.Index([17, 41], name="source_row"),
+    )
+
+    result = policy.prepare(source)
+
+    pd.testing.assert_frame_equal(result, source, check_exact=True)
 
 
 def test_policy_preserves_non_text_batches_without_tokenizing() -> None:
@@ -350,6 +413,43 @@ def test_policy_resolver_caps_runtime_length_at_checkpoint_support(monkeypatch, 
     assert policy.max_tokens == 8192
     assert policy.prefix == "document: "
     assert policy.tokenizer is tokenizer
+
+
+def test_policy_resolver_rejects_missing_checkpoint_input_limit(monkeypatch, tmp_path) -> None:
+    _write_local_text_policy_metadata(tmp_path, prompts={"query": "query: ", "document": "document: "})
+    monkeypatch.setattr(
+        "nemo_retriever.models.inference.embedding_input.load_chunk_tokenizer",
+        lambda *args, **kwargs: _WhitespaceTokenizer(),
+    )
+
+    with pytest.raises(ValueError, match="does not declare a supported input limit"):
+        resolve_embedding_input_policy(
+            str(tmp_path),
+            configured_max_tokens=8192,
+            input_type="passage",
+        )
+
+
+@pytest.mark.parametrize(
+    ("input_type", "prompts"),
+    [
+        pytest.param("passage", None, id="passage"),
+        pytest.param("query", {"document": "document: "}, id="query"),
+    ],
+)
+def test_policy_resolver_rejects_missing_checkpoint_prompt(monkeypatch, tmp_path, input_type, prompts) -> None:
+    _write_local_text_policy_metadata(tmp_path, prompts=prompts, max_input_tokens=8192)
+    monkeypatch.setattr(
+        "nemo_retriever.models.inference.embedding_input.load_chunk_tokenizer",
+        lambda *args, **kwargs: _WhitespaceTokenizer(),
+    )
+
+    with pytest.raises(ValueError, match=f"does not declare a {input_type} prompt"):
+        resolve_embedding_input_policy(
+            str(tmp_path),
+            configured_max_tokens=8192,
+            input_type=input_type,
+        )
 
 
 def test_unpinned_model_fails_closed_before_embedding() -> None:

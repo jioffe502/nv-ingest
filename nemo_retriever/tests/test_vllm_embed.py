@@ -544,9 +544,15 @@ class TestLlamaNemotronEmbed1BV2Embedder:
         assert "use_activation" not in mock_fn.call_args[1]
         assert mock_fn.call_args[1].get("normalize") is True
 
-    def test_embed_empty_input_returns_empty_tensor(self):
-        result = self.embedder.embed(["", "  "])
-        assert result.shape == (0, 0)
+    def test_embed_blank_inputs_preserves_cardinality(self):
+        with patch(
+            "nemo_retriever.models.inference.vllm.embed_with_vllm_llm",
+            return_value=[[1.0, 0.0], [0.0, 1.0]],
+        ) as mock_fn:
+            result = self.embedder.embed(["", "  "])
+
+        assert result.shape == (2, 2)
+        assert mock_fn.call_args.args[0] == ["", "  "]
 
     def test_unload_clears_llm(self):
         with patch("torch.cuda.is_available", return_value=False):

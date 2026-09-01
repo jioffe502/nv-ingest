@@ -284,6 +284,55 @@ def test_dense_record_conversion_rejects_partial_embedding_coverage() -> None:
         to_client_vdb_records(rows)
 
 
+def test_dense_record_conversion_preserves_whitespace_only_embedding_child() -> None:
+    rows = [
+        {"text": "embedded", "metadata": {"embedding": [0.1, 0.2]}},
+        {
+            "text": "  ",
+            "metadata": {
+                "content": "  ",
+                "embedding": [0.3, 0.4],
+                "embedding_parent_id": "parent",
+                "embedding_chunk_id": "child-1",
+                "embedding_chunk_index": 1,
+                "embedding_chunk_count": 2,
+                "embedding_chunk_start_token": 8187,
+                "embedding_chunk_end_token": 8188,
+            },
+        },
+    ]
+
+    records = to_client_vdb_records(rows)
+
+    assert len(records[0]) == 2
+    assert records[0][1]["metadata"]["content"] == "  "
+
+
+def test_dense_record_conversion_rejects_missing_whitespace_only_child_embedding() -> None:
+    rows = [
+        {"text": "embedded", "metadata": {"embedding": [0.1, 0.2]}},
+        {
+            "text": "  ",
+            "metadata": {
+                "content": "  ",
+                "embedding": None,
+                "embedding_parent_id": "parent",
+                "embedding_chunk_id": "child-1",
+                "embedding_chunk_index": 1,
+                "embedding_chunk_count": 2,
+                "embedding_chunk_start_token": 8187,
+                "embedding_chunk_end_token": 8188,
+            },
+        },
+    ]
+
+    with pytest.raises(
+        VdbUploadError,
+        match=r"refusing a partial write.*input rows=2.*uploadable rows=1.*missing embedding=1",
+    ):
+        to_client_vdb_records(rows)
+
+
 def test_dense_record_conversion_ignores_inherited_page_uri_without_searchable_content() -> None:
     rows = [
         {"text": "embedded", "metadata": {"embedding": [0.1, 0.2]}},

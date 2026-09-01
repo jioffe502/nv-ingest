@@ -177,9 +177,12 @@ def _first_str(*values: Any) -> str:
 
 
 def _text_from_graph_row(row: dict[str, Any], metadata: dict[str, Any]) -> str:
-    """Return the first nonblank text field without rewriting its contents."""
+    """Return exact split-child text or the first ordinary nonblank text field."""
+    preserve_split_child = isinstance(metadata.get("embedding_chunk_id"), str) and bool(
+        metadata["embedding_chunk_id"].strip()
+    )
     for value in (row.get("text"), row.get("content"), metadata.get("content")):
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and (value.strip() or (preserve_split_child and value)):
             return value
     return ""
 

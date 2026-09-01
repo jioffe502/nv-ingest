@@ -46,7 +46,9 @@ or a local checkpoint, the library loads the tokenizer and prompt configuration
 for that exact model version. If the text does not fit, the library splits it
 into deterministic contiguous token ranges that fit. This split does not
 truncate text and occurs before either local or remote embedding.
-If the exact tokenizer is unavailable, embedding stage setup fails before inference.
+If the exact tokenizer, selected prompt prefix, or checkpoint-supported token
+limit is unavailable, embedding stage setup fails before inference rather than
+guessing an admission policy.
 
 Each split row preserves the source, page, element, bounding box, and existing
 document chunk metadata from its parent. The library adds the following fields

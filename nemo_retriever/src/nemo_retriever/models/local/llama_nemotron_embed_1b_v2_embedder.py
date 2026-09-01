@@ -102,7 +102,7 @@ class LlamaNemotronEmbed1BV2Embedder:
         self._ensure_loaded()
         from nemo_retriever.models.inference.vllm import embed_with_vllm_llm
 
-        texts_list = [str(t) for t in texts if str(t).strip()]
+        texts_list = [str(t) for t in texts]
         if not texts_list:
             return torch.empty((0, 0), dtype=torch.float32)
         vectors = embed_with_vllm_llm(
@@ -119,7 +119,7 @@ class LlamaNemotronEmbed1BV2Embedder:
         self._ensure_loaded()
         from nemo_retriever.models.inference.vllm import embed_with_vllm_llm
 
-        texts_list = [str(t) for t in texts if str(t).strip()]
+        texts_list = [str(t) for t in texts]
         if not texts_list:
             return torch.empty((0, 0), dtype=torch.float32)
         vectors = embed_with_vllm_llm(

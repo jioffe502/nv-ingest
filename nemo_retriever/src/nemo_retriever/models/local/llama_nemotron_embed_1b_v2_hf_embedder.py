@@ -126,12 +126,10 @@ class LlamaNemotronEmbed1BV2HFEmbedder:
 
     @staticmethod
     def _prepare_texts(texts: Sequence[str], prefix: str) -> List[str]:
-        """Drop blank inputs and apply *prefix* to any line that lacks it."""
+        """Apply *prefix* to every input while preserving batch cardinality."""
         prepared: List[str] = []
         for text in texts:
             raw = str(text)
-            if not raw.strip():
-                continue
             if prefix and not raw.lower().startswith(prefix.lower()):
                 raw = prefix + raw
             prepared.append(raw)
