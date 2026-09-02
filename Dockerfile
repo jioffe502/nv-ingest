@@ -18,9 +18,6 @@ FROM $BASE_IMG:$BASE_IMG_TAG AS base
 
 ARG DOWNLOAD_DEFAULT_TOKENIZER="False"
 
-# Historical build-arg name retained for compatibility. Admission now needs
-# the pinned model config and prompt metadata in addition to tokenizer.json.
-
 ENV HF_HOME=/opt/nemo-retriever/huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

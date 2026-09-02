@@ -20,8 +20,8 @@ from nemo_retriever.common.modality.txt.tokenizer_provider import (
     load_chunk_tokenizer,
 )
 from nemo_retriever.common.schemas.embedding import (
-    EmbeddingSplitProvenance,
     SelectedEmbeddingText,
+    embedding_split_metadata,
     requires_text_admission,
     select_embedding_text,
 )
@@ -109,7 +109,6 @@ class EmbeddingPreparationResult:
     """Prepared frame plus events created by this admission invocation."""
 
     frame: pd.DataFrame
-    input_rows: int
     split_child_positions: frozenset[int]
     split_parent_positions: frozenset[int]
 
@@ -210,19 +209,21 @@ class EmbeddingInputPolicy:
                 metadata = {}
                 child["metadata"] = metadata
             chunk_id = hashlib.sha256(f"{parent_id}\0{start}\0{end}".encode("utf-8")).hexdigest()
-            provenance = EmbeddingSplitProvenance(
-                parent_id=parent_id,
-                chunk_id=chunk_id,
-                chunk_index=chunk_index,
-                chunk_count=len(chunks),
-                start_token=start,
-                end_token=end,
+            metadata.update(
+                embedding_split_metadata(
+                    content=chunk,
+                    parent_id=parent_id,
+                    chunk_id=chunk_id,
+                    chunk_index=chunk_index,
+                    chunk_count=len(chunks),
+                    start_token=start,
+                    end_token=end,
+                )
             )
-            metadata.update(provenance.as_metadata(content=chunk))
             expanded.append(child)
         return expanded
 
-    def prepare_with_summary(
+    def prepare(
         self,
         frame: pd.DataFrame,
         *,
@@ -230,12 +231,10 @@ class EmbeddingInputPolicy:
         default_modality: str = "text",
     ) -> EmbeddingPreparationResult:
         """Prepare rows and report only split events created by this invocation."""
-        input_rows = len(frame.index)
 
         def unchanged() -> EmbeddingPreparationResult:
             return EmbeddingPreparationResult(
                 frame=frame.copy(),
-                input_rows=input_rows,
                 split_child_positions=frozenset(),
                 split_parent_positions=frozenset(),
             )
@@ -243,22 +242,16 @@ class EmbeddingInputPolicy:
         if frame.empty:
             return unchanged()
 
-        text_admission = [
-            requires_text_admission(row, default_modality=default_modality) for _, row in frame.iterrows()
-        ]
+        rows = [row for _, row in frame.iterrows()]
+        text_admission = [requires_text_admission(row, default_modality=default_modality) for row in rows]
         if not any(text_admission):
             return unchanged()
 
-        rows = [row for _, row in frame.iterrows()]
         selected_inputs: list[SelectedEmbeddingText | None] = []
         text_positions: list[int] = []
         texts: list[str] = []
-        for position, row in enumerate(rows):
-            selected = (
-                select_embedding_text(row, text_column=text_column)
-                if requires_text_admission(row, default_modality=default_modality)
-                else None
-            )
+        for position, (row, needs_text_admission) in enumerate(zip(rows, text_admission)):
+            selected = select_embedding_text(row, text_column=text_column) if needs_text_admission else None
             selected_inputs.append(selected)
             if selected is not None:
                 text_positions.append(position)
@@ -284,28 +277,13 @@ class EmbeddingInputPolicy:
 
         return EmbeddingPreparationResult(
             frame=pd.DataFrame(prepared).reset_index(drop=True),
-            input_rows=input_rows,
             split_child_positions=frozenset(split_child_positions),
             split_parent_positions=frozenset(split_parent_positions),
         )
 
-    def prepare(
-        self,
-        frame: pd.DataFrame,
-        *,
-        text_column: str = "text",
-        default_modality: str = "text",
-    ) -> pd.DataFrame:
-        """Return rows ready for embedding, expanding only overlength text inputs."""
-        return self.prepare_with_summary(
-            frame,
-            text_column=text_column,
-            default_modality=default_modality,
-        ).frame
-
 
 def resolve_embedding_input_policy(
-    model_id: str,
+    model_name: str | None,
     *,
     configured_max_tokens: int,
     input_type: str,
@@ -316,6 +294,13 @@ def resolve_embedding_input_policy(
     """Resolve a model-pinned input policy shared by local and remote adapters."""
     if configured_max_tokens <= 0:
         raise ValueError("Configured embedding max length must be positive")
+    model_id = resolve_embed_model(model_name)
+    if model_id not in HF_MODEL_REVISIONS and not Path(model_id).expanduser().is_dir() and revision is None:
+        raise ValueError(
+            f"Embedding model {model_id!r} is not revision-pinned, so the embedding stage cannot enforce "
+            "its tokenizer, prefix, and input limit. Use a registered model, a local checkpoint, or set an "
+            "immutable embed_model_revision."
+        )
     spec = resolve_embed_model_spec(model_id, revision=revision, hf_cache_dir=cache_dir)
     if spec.max_input_tokens is None:
         raise ValueError(
@@ -345,33 +330,6 @@ def resolve_embedding_input_policy(
     )
 
 
-def resolve_known_embedding_input_policy(
-    *,
-    model_name: str | None,
-    configured_max_tokens: int,
-    input_type: str,
-    revision: str | None = None,
-    cache_dir: str | None = None,
-    prefix_if_missing: bool = False,
-) -> EmbeddingInputPolicy:
-    """Resolve input protection for a pinned or local model, failing closed otherwise."""
-    model_id = resolve_embed_model(model_name)
-    if model_id not in HF_MODEL_REVISIONS and not Path(model_id).expanduser().is_dir() and revision is None:
-        raise ValueError(
-            f"Embedding model {model_id!r} is not revision-pinned, so the embedding stage cannot enforce "
-            "its tokenizer, prefix, and input limit. Use a registered model, a local checkpoint, or set an "
-            "immutable embed_model_revision."
-        )
-    return resolve_embedding_input_policy(
-        model_id,
-        configured_max_tokens=configured_max_tokens,
-        input_type=input_type,
-        revision=revision,
-        cache_dir=cache_dir,
-        prefix_if_missing=prefix_if_missing,
-    )
-
-
 def configure_embedding_input_policy(kwargs: dict[str, Any]) -> EmbeddingInputPolicy:
     """Resolve and install the shared input policy for an embedding actor."""
     input_type = str(kwargs.get("input_type", "passage"))
@@ -380,8 +338,8 @@ def configure_embedding_input_policy(kwargs: dict[str, Any]) -> EmbeddingInputPo
         if input_type.strip().lower() == "query"
         else int(kwargs.get("max_length", 8192))
     )
-    policy = resolve_known_embedding_input_policy(
-        model_name=kwargs.get("embed_model_name") or kwargs.get("model_name"),
+    policy = resolve_embedding_input_policy(
+        kwargs.get("embed_model_name") or kwargs.get("model_name"),
         configured_max_tokens=configured_max_tokens,
         input_type=input_type,
         revision=kwargs.get("embed_model_revision"),
@@ -412,5 +370,4 @@ __all__ = [
     "configure_embedding_input_policy",
     "ensure_embedding_input_policy_for_batch",
     "resolve_embedding_input_policy",
-    "resolve_known_embedding_input_policy",
 ]

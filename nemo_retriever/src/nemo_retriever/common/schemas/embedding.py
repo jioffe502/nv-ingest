@@ -22,28 +22,26 @@ EMBEDDING_SPLIT_METADATA_KEYS = (
 )
 
 
-@dataclass(frozen=True)
-class EmbeddingSplitProvenance:
-    """Identity and token range carried by one lossless split child."""
-
-    parent_id: str
-    chunk_id: str
-    chunk_index: int
-    chunk_count: int
-    start_token: int
-    end_token: int
-
-    def as_metadata(self, *, content: str) -> dict[str, Any]:
-        """Return canonical child metadata, including its exact embedding text."""
-        return {
-            "content": content,
-            "embedding_parent_id": self.parent_id,
-            "embedding_chunk_id": self.chunk_id,
-            "embedding_chunk_index": self.chunk_index,
-            "embedding_chunk_count": self.chunk_count,
-            "embedding_chunk_start_token": self.start_token,
-            "embedding_chunk_end_token": self.end_token,
-        }
+def embedding_split_metadata(
+    *,
+    content: str,
+    parent_id: str,
+    chunk_id: str,
+    chunk_index: int,
+    chunk_count: int,
+    start_token: int,
+    end_token: int,
+) -> dict[str, Any]:
+    """Return canonical metadata for one lossless split child."""
+    return {
+        "content": content,
+        "embedding_parent_id": parent_id,
+        "embedding_chunk_id": chunk_id,
+        "embedding_chunk_index": chunk_index,
+        "embedding_chunk_count": chunk_count,
+        "embedding_chunk_start_token": start_token,
+        "embedding_chunk_end_token": end_token,
+    }
 
 
 @dataclass(frozen=True)
@@ -119,20 +117,6 @@ def embedding_split_content(metadata: Any) -> str | None:
     return None
 
 
-def embedding_split_index(metadata: Any) -> int | None:
-    """Return the canonical child index when *metadata* identifies a split child."""
-    if not isinstance(metadata, Mapping):
-        return None
-    chunk_id = metadata.get("embedding_chunk_id")
-    chunk_index = metadata.get("embedding_chunk_index")
-    if not isinstance(chunk_id, str) or not chunk_id.strip() or isinstance(chunk_index, bool):
-        return None
-    try:
-        return int(chunk_index)
-    except (TypeError, ValueError):
-        return None
-
-
 def embedding_split_id(metadata: Any) -> str | None:
     """Return the canonical child ID when present."""
     if not isinstance(metadata, Mapping):
@@ -143,13 +127,12 @@ def embedding_split_id(metadata: Any) -> str | None:
 
 __all__ = [
     "EMBEDDING_SPLIT_METADATA_KEYS",
-    "EmbeddingSplitProvenance",
     "SelectedEmbeddingText",
     "embedding_runtime_modality",
+    "embedding_split_metadata",
     "embedding_text_input",
     "embedding_split_content",
     "embedding_split_id",
-    "embedding_split_index",
     "requires_text_admission",
     "select_embedding_text",
 ]

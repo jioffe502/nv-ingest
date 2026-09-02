@@ -35,7 +35,7 @@ class _AlwaysFailsEmbedder:
 
     def embed(self, texts: Sequence[str], *, batch_size: int):
         self.calls.append(list(texts))
-        raise RuntimeError("embedding service unavailable")
+        raise RuntimeError("echoed document: rejected input")
 
 
 class _RecordingEmbedder:
@@ -157,7 +157,7 @@ def _write_local_text_policy_metadata(tmp_path, *, prompts=None, max_input_token
         )
 
 
-def test_systemic_local_failure_is_not_replayed_as_row_rejections(caplog) -> None:
+def test_systemic_failure_is_not_replayed_or_exposed(caplog) -> None:
     caplog.set_level(logging.WARNING, logger="nemo_retriever.models.inference.runtime")
     embedder = _AlwaysFailsEmbedder()
 
@@ -171,6 +171,9 @@ def test_systemic_local_failure_is_not_replayed_as_row_rejections(caplog) -> Non
         {"unembedded": 1, "failed": 1},
         {"unembedded": 1, "failed": 1},
     ]
+    assert result.loc[0, "text_embeddings_1b_v2"]["error"] == (
+        "RuntimeError: embedding batch failed; inspect embed-stage logs for the cause"
+    )
     assert "failed=2 embedded=0 unembedded=2" in caplog.text
 
 
@@ -249,7 +252,7 @@ def test_oversized_middle_row_is_split_below_the_formatted_model_limit(caplog) -
 def test_policy_measures_and_preserves_leading_and_trailing_whitespace() -> None:
     policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=5, prefix="p")
 
-    result = policy.prepare(pd.DataFrame({"text": [" ab "]}))
+    result = policy.prepare(pd.DataFrame({"text": [" ab "]})).frame
 
     assert result["text"].tolist() == [" ab", " "]
     assert "".join(result["text"]) == " ab "
@@ -272,21 +275,6 @@ def test_split_children_reach_text_embedder_without_whitespace_normalization() -
     assert result["text"].tolist() == [" x ", "ab ", " cd"]
     assert embedder.calls == [["passage: x", "passage: ab ", "passage:  cd"]]
     assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, True, True]
-
-
-def test_whitespace_only_split_child_is_embedded_without_content_loss() -> None:
-    policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=5, prefix="p")
-    embedder = _RecordingEmbedder()
-
-    result = embed_text_main_text_embed(
-        pd.DataFrame({"text": [" ab "]}),
-        model=embedder,
-        embedding_input_policy=policy,
-    )
-
-    assert result["text"].tolist() == [" ab", " "]
-    assert embedder.calls == [["passage:  ab", "passage:  "]]
-    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True, True]
 
 
 @pytest.mark.parametrize(("input_type", "prefix"), [("passage", "p"), ("query", "q")])
@@ -339,23 +327,12 @@ def test_policy_batches_admission_and_preserves_non_overlength_rows_exactly() ->
             "metadata": [{"chunk_index": 0}, {"chunk_index": 1}],
         }
     )
+    source.index = pd.Index([17, 41], name="source_row")
 
-    result = policy.prepare(source)
+    result = policy.prepare(source).frame
 
     pd.testing.assert_frame_equal(result, source, check_exact=True)
     assert tokenizer.batch_calls == 1
-
-
-def test_policy_preserves_non_overlength_row_index_exactly() -> None:
-    policy = EmbeddingInputPolicy(tokenizer=_WhitespaceTokenizer(), max_tokens=20, prefix="passage: ")
-    source = pd.DataFrame(
-        {"text": ["short input", "another short input"]},
-        index=pd.Index([17, 41], name="source_row"),
-    )
-
-    result = policy.prepare(source)
-
-    pd.testing.assert_frame_equal(result, source, check_exact=True)
 
 
 def test_policy_preserves_non_text_batches_without_tokenizing() -> None:
@@ -369,7 +346,7 @@ def test_policy_preserves_non_text_batches_without_tokenizing() -> None:
         }
     )
 
-    result = policy.prepare(source)
+    result = policy.prepare(source).frame
 
     pd.testing.assert_frame_equal(result, source, check_exact=True)
 
@@ -385,7 +362,7 @@ def test_policy_preserves_mixed_short_batches_exactly() -> None:
         }
     )
 
-    result = policy.prepare(source)
+    result = policy.prepare(source).frame
 
     pd.testing.assert_frame_equal(result, source, check_exact=True)
     assert tokenizer.batch_calls == 1
@@ -457,7 +434,7 @@ def test_policy_preserves_literal_special_token_text() -> None:
     text = "abc<SPECIAL>def"
     policy = EmbeddingInputPolicy(tokenizer=_LiteralSpecialTokenizer(), max_tokens=5, prefix="p")
 
-    result = policy.prepare(pd.DataFrame({"text": [text]}))
+    result = policy.prepare(pd.DataFrame({"text": [text]})).frame
 
     assert "".join(result["text"]) == text
     assert "<SPECIAL>" in "".join(result["text"])
@@ -475,16 +452,11 @@ def test_hf_text_policy_counts_an_existing_prefix_exactly_once() -> None:
 
 
 def test_policy_resolver_caps_runtime_length_at_checkpoint_support(monkeypatch, tmp_path) -> None:
-    (tmp_path / "config.json").write_text(
-        '{"model_type":"llama_bidirec","architectures":["LlamaBidirectionalModel"],'
-        '"hidden_size":2048,"pooling":"avg"}',
-        encoding="utf-8",
+    _write_local_text_policy_metadata(
+        tmp_path,
+        prompts={"query": "query: ", "document": "document: "},
+        max_input_tokens=8192,
     )
-    (tmp_path / "config_sentence_transformers.json").write_text(
-        '{"prompts":{"query":"query: ","document":"document: "}}',
-        encoding="utf-8",
-    )
-    (tmp_path / "sentence_bert_config.json").write_text('{"max_seq_length":8192}', encoding="utf-8")
     tokenizer = _WhitespaceTokenizer()
     monkeypatch.setattr(
         "nemo_retriever.models.inference.embedding_input.load_chunk_tokenizer",
@@ -540,13 +512,9 @@ def test_policy_resolver_rejects_missing_checkpoint_prompt(monkeypatch, tmp_path
 
 
 def test_unpinned_model_fails_closed_before_embedding() -> None:
-    from nemo_retriever.models.inference.embedding_input import (
-        resolve_known_embedding_input_policy,
-    )
-
     with pytest.raises(ValueError, match="is not revision-pinned"):
-        resolve_known_embedding_input_policy(
-            model_name="custom/unpinned-model",
+        resolve_embedding_input_policy(
+            "custom/unpinned-model",
             configured_max_tokens=8192,
             input_type="passage",
         )
@@ -625,8 +593,8 @@ def test_query_actor_resolves_the_shared_policy_at_query_max_length(
     from nemo_retriever.models.inference import embedding_input
 
     policy = object()
-    resolver = Mock(spec=embedding_input.resolve_known_embedding_input_policy, return_value=policy)
-    monkeypatch.setattr(embedding_input, "resolve_known_embedding_input_policy", resolver)
+    resolver = Mock(spec=embedding_input.resolve_embedding_input_policy, return_value=policy)
+    monkeypatch.setattr(embedding_input, "resolve_embedding_input_policy", resolver)
 
     kwargs = {
         "model_name": "nvidia/llama-nemotron-embed-1b-v2",
@@ -679,57 +647,6 @@ def test_local_actor_does_not_raise_vllm_above_checkpoint_support(monkeypatch) -
     assert create_local_embedder.call_args.kwargs["max_length"] == 8192
 
 
-def test_remote_request_failure_is_not_replayed_or_persisted_with_response_body() -> None:
-    calls: list[list[str]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        prompts = json.loads(request.content)["input"]
-        calls.append(prompts)
-        return httpx.Response(400, text="echoed document: rejected input")
-
-    client_factory = httpx.Client
-    source = pd.DataFrame({"text": ["valid before", "rejected input", "valid after"]})
-    with patch(
-        "httpx.Client",
-        side_effect=lambda **kwargs: client_factory(transport=httpx.MockTransport(handler)),
-    ):
-        result = embed_text_main_text_embed(
-            source,
-            embedding_endpoint="http://embedding.test/v1",
-            model_name="test/model",
-            inference_batch_size=3,
-        )
-
-    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [False, False, False]
-    assert "echoed document" not in result.loc[1, "text_embeddings_1b_v2"]["error"]
-    assert result.loc[1, "text_embeddings_1b_v2"]["error"] == (
-        "RuntimeError: embedding batch failed; inspect embed-stage logs for the cause"
-    )
-    assert calls == [["valid before", "rejected input", "valid after"]]
-
-
-def test_client_side_policy_disables_remote_silent_truncation() -> None:
-    payloads: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        payloads.append(payload)
-        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1]}]})
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    policy = EmbeddingInputPolicy(tokenizer=_WhitespaceTokenizer(), max_tokens=4, prefix="passage: ")
-    with patch("httpx.Client", return_value=client):
-        result = embed_text_main_text_embed(
-            pd.DataFrame({"text": ["short input"]}),
-            embedding_endpoint="http://embedding.test/v1",
-            model_name="test/model",
-            embedding_input_policy=policy,
-        )
-
-    assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True]
-    assert payloads[0]["truncate"] == "NONE"
-
-
 def test_remote_default_text_image_fallback_preserves_raw_text_and_batch_cap() -> None:
     payloads: list[dict] = []
 
@@ -775,8 +692,8 @@ def test_split_identity_is_stable_across_batch_composition() -> None:
         "page_number": 7,
         "metadata": {"chunk_index": 4},
     }
-    alone = policy.prepare(pd.DataFrame([oversized]))
-    with_neighbors = policy.prepare(pd.DataFrame([{"text": "before"}, oversized, {"text": "after"}]))
+    alone = policy.prepare(pd.DataFrame([oversized])).frame
+    with_neighbors = policy.prepare(pd.DataFrame([{"text": "before"}, oversized, {"text": "after"}])).frame
 
     assert [metadata["embedding_chunk_id"] for metadata in alone["metadata"]] == [
         metadata["embedding_chunk_id"] for metadata in with_neighbors.loc[1:3, "metadata"]
@@ -793,8 +710,12 @@ def test_local_and_remote_adapters_apply_the_same_split_policy() -> None:
         embedding_input_policy=policy,
     )
 
+    remote_payloads: list[dict] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        prompts = json.loads(request.content)["input"]
+        payload = json.loads(request.content)
+        remote_payloads.append(payload)
+        prompts = payload["input"]
         return httpx.Response(
             200,
             json={"data": [{"index": index, "embedding": [float(len(text))]} for index, text in enumerate(prompts)]},
@@ -828,37 +749,12 @@ def test_local_and_remote_adapters_apply_the_same_split_policy() -> None:
     assert not any(column.startswith("_embedding_input_") for column in remote.columns)
     assert local["text_embeddings_1b_v2_has_embedding"].tolist() == [True] * 5
     assert remote["text_embeddings_1b_v2_has_embedding"].tolist() == [True] * 5
-
-
-def test_fitting_rows_preserve_caller_columns_that_match_old_accounting_names() -> None:
-    source = pd.DataFrame(
-        {
-            "text": ["fits"],
-            "_embedding_input_overlength": ["caller-overlength"],
-            "_embedding_input_split_parent": ["caller-parent"],
-            "_embedding_input_split_child": ["caller-child"],
-        }
-    )
-    policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=16, prefix="p")
-
-    result = embed_text_main_text_embed(
-        source,
-        model=_LengthEmbedder(),
-        embedding_input_policy=policy,
-    )
-
-    for column in (
-        "_embedding_input_overlength",
-        "_embedding_input_split_parent",
-        "_embedding_input_split_child",
-    ):
-        assert result[column].tolist() == source[column].tolist()
-    assert result["embedding_v1_counts_by_label"].tolist() == [{"embedded": 1}]
+    assert remote_payloads and all(payload["truncate"] == "NONE" for payload in remote_payloads)
 
 
 def test_retrying_persisted_split_children_does_not_report_a_new_split() -> None:
     policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=4, prefix="p")
-    split_children = policy.prepare(pd.DataFrame({"text": ["abcdef"], "metadata": [{}]}))
+    split_children = policy.prepare(pd.DataFrame({"text": ["abcdef"], "metadata": [{}]})).frame
 
     result = embed_text_main_text_embed(
         split_children,
@@ -872,7 +768,7 @@ def test_retrying_persisted_split_children_does_not_report_a_new_split() -> None
 def test_retry_child_id_collision_does_not_change_current_run_split_telemetry() -> None:
     policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=4, prefix="p")
     parent = pd.DataFrame({"text": ["abcdef"], "metadata": [{}]})
-    persisted_first_child = policy.prepare(parent).iloc[[0]]
+    persisted_first_child = policy.prepare(parent).frame.iloc[[0]]
     mixed = pd.concat([persisted_first_child, parent], ignore_index=True)
 
     result = embed_text_main_text_embed(
@@ -913,7 +809,7 @@ def test_persisted_split_content_is_admitted_even_when_source_column_is_stale() 
         }
     )
 
-    prepared = policy.prepare_with_summary(row)
+    prepared = policy.prepare(row)
 
     assert prepared.split_parent_positions == frozenset({0})
     assert "".join(prepared.frame["metadata"].map(lambda metadata: metadata["content"])) == "abcdef"

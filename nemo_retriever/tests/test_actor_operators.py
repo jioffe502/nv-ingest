@@ -6,7 +6,6 @@
 
 import inspect
 import json
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -866,7 +865,7 @@ class TestBatchEmbedActor:
     def _stub_input_policy(self, monkeypatch):
         monkeypatch.setattr(
             "nemo_retriever.operators.embed.cpu_operator.ensure_embedding_input_policy_for_batch",
-            lambda kwargs, frame: SimpleNamespace(max_tokens=8192),
+            lambda kwargs, frame: None,
         )
 
     def _make(self):

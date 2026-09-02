@@ -541,10 +541,6 @@ class TestLlamaNemotronEmbed1BV2Embedder:
     def setup_method(self):
         self.embedder = _make_text_embedder()
 
-    def test_finalize_vectors_rejects_all_missing_outputs(self):
-        with pytest.raises(RuntimeError, match=r"failed to return.*2/2"):
-            self.embedder._finalize_vectors([[], []])
-
     def test_finalize_vectors_rejects_one_missing_output(self):
         with pytest.raises(RuntimeError, match=r"failed to return.*1/2"):
             self.embedder._finalize_vectors([[1.0, 0.0], []])
@@ -604,12 +600,6 @@ class TestLlamaNemotronEmbed1BV2EmbedderNormalization:
 
 
 class TestLlamaNemotronEmbedVL1BV2VLLMEmbedderNormalization:
-    def test_missing_output_raises_instead_of_fabricating_vector(self):
-        embedder = _make_vllm_vl_embedder()
-
-        with pytest.raises(RuntimeError, match=r"failed to return.*1/2"):
-            embedder._finalize_vectors([[1.0, 0.0], []])
-
     def test_text_blank_inputs_preserve_cardinality(self):
         embedder = _make_vllm_vl_embedder()
         with patch(

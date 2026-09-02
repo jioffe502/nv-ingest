@@ -141,20 +141,19 @@ def embed_text_main_text_embed(
     resolved_model_name = resolve_embed_model(model_name)
 
     if embedding_input_policy is not None:
-        preparation = embedding_input_policy.prepare_with_summary(
+        preparation = embedding_input_policy.prepare(
             batch_df,
             text_column=text_column,
             default_modality=embed_modality,
         )
         prepared_df = preparation.frame
-        input_row_count = preparation.input_rows
         current_split_child_positions = preparation.split_child_positions
         current_split_parent_positions = preparation.split_parent_positions
     else:
         prepared_df = batch_df
-        input_row_count = len(batch_df.index)
         current_split_child_positions = frozenset()
         current_split_parent_positions = frozenset()
+    input_row_count = len(batch_df.index)
 
     effective_modalities = prepared_df.apply(
         lambda row: embedding_runtime_modality(row, default_modality=embed_modality), axis=1
