@@ -51,14 +51,15 @@ limit is unavailable, embedding stage setup fails before inference rather than
 guessing an admission policy.
 
 Each split row preserves the source, page, element, bounding box, and existing
-document chunk metadata from its parent. The library adds the following fields
-under `metadata` so you can identify and order the embedding-specific children:
+document chunk metadata from its parent. The library adds one
+`metadata["embedding_split"]` mapping so you can identify and order the
+embedding-specific children:
 
-- `embedding_parent_id` identifies the parent content and provenance.
-- `embedding_chunk_id` identifies one deterministic child.
-- `embedding_chunk_index` and `embedding_chunk_count` describe the child order.
-- `embedding_chunk_start_token` and `embedding_chunk_end_token` describe the
-  source token range.
+- `parent_id` identifies the parent content and provenance.
+- `chunk_id` identifies one deterministic child.
+- `chunk_index` and `chunk_count` describe the child order.
+- `start_token` and `end_token` describe the source token range.
+- `content` preserves the child's exact text, including whitespace.
 
 The returned `DataFrame` can therefore contain more rows than the embedding
 stage received. Existing fields such as `chunk_index` and the physical page

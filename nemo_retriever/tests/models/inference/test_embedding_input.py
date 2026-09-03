@@ -18,6 +18,7 @@ from nemo_retriever.common.params import EmbedParams, ModelRuntimeParams
 from nemo_retriever.common.vdb.records import to_client_vdb_records
 from nemo_retriever.models.inference.embedding_input import (
     EmbeddingInputPolicy,
+    prepare_embedding_inputs,
     resolve_embedding_input_policy,
 )
 from nemo_retriever.models.inference.runtime import embed_text_main_text_embed
@@ -215,24 +216,27 @@ def test_oversized_middle_row_is_split_below_the_formatted_model_limit(caplog) -
     assert result["page_number"].tolist() == [2, 7, 7, 7, 9]
     assert result["text_embeddings_1b_v2_has_embedding"].tolist() == [True] * 5
 
-    split_metadata = result.loc[1:3, "metadata"].tolist()
-    assert [metadata["chunk_index"] for metadata in split_metadata] == [4, 4, 4]
-    assert [metadata["embedding_chunk_index"] for metadata in split_metadata] == [
+    child_metadata = result.loc[1:3, "metadata"].tolist()
+    assert [metadata["chunk_index"] for metadata in child_metadata] == [4, 4, 4]
+    split_metadata = [metadata["embedding_split"] for metadata in child_metadata]
+    assert [metadata["chunk_index"] for metadata in split_metadata] == [
         0,
         1,
         2,
     ]
-    assert [metadata["embedding_chunk_count"] for metadata in split_metadata] == [
+    assert [metadata["chunk_count"] for metadata in split_metadata] == [
         3,
         3,
         3,
     ]
-    assert [
-        (metadata["embedding_chunk_start_token"], metadata["embedding_chunk_end_token"]) for metadata in split_metadata
-    ] == [(0, 2), (2, 4), (4, 5)]
-    assert [metadata["element"] for metadata in split_metadata] == [{"type": "table"}] * 3
-    assert len({metadata["embedding_chunk_id"] for metadata in split_metadata}) == 3
-    assert len({metadata["embedding_parent_id"] for metadata in split_metadata}) == 1
+    assert [(metadata["start_token"], metadata["end_token"]) for metadata in split_metadata] == [
+        (0, 2),
+        (2, 4),
+        (4, 5),
+    ]
+    assert [metadata["element"] for metadata in child_metadata] == [{"type": "table"}] * 3
+    assert len({metadata["chunk_id"] for metadata in split_metadata}) == 3
+    assert len({metadata["parent_id"] for metadata in split_metadata}) == 1
     assert [bbox.tolist() for bbox in result.loc[1:3, "_bbox_xyxy_norm"]] == [[0.1, 0.2, 0.8, 0.9]] * 3
 
     assert result["embedding_v1_counts_by_label"].tolist() == [
@@ -252,12 +256,12 @@ def test_oversized_middle_row_is_split_below_the_formatted_model_limit(caplog) -
 def test_policy_measures_and_preserves_leading_and_trailing_whitespace() -> None:
     policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=5, prefix="p")
 
-    result = policy.prepare(pd.DataFrame({"text": [" ab "]})).frame
+    result = prepare_embedding_inputs(pd.DataFrame({"text": [" ab "]}), policy=policy).frame
 
     assert result["text"].tolist() == [" ab", " "]
     assert "".join(result["text"]) == " ab "
     assert [
-        (metadata["embedding_chunk_start_token"], metadata["embedding_chunk_end_token"])
+        (metadata["embedding_split"]["start_token"], metadata["embedding_split"]["end_token"])
         for metadata in result["metadata"]
     ] == [(0, 3), (3, 4)]
 
@@ -313,7 +317,7 @@ def test_policy_fails_closed_when_tokenizer_decode_changes_source_text() -> None
     policy = EmbeddingInputPolicy(tokenizer=_NormalizingWhitespaceTokenizer(), max_tokens=4, prefix="passage: ")
 
     with pytest.raises(ValueError, match="without changing its (token sequence|source text)"):
-        policy.prepare(pd.DataFrame({"text": ["one  two three four five"]}))
+        prepare_embedding_inputs(pd.DataFrame({"text": ["one  two three four five"]}), policy=policy)
 
 
 def test_policy_batches_admission_and_preserves_non_overlength_rows_exactly() -> None:
@@ -329,7 +333,7 @@ def test_policy_batches_admission_and_preserves_non_overlength_rows_exactly() ->
     )
     source.index = pd.Index([17, 41], name="source_row")
 
-    result = policy.prepare(source).frame
+    result = prepare_embedding_inputs(source, policy=policy).frame
 
     pd.testing.assert_frame_equal(result, source, check_exact=True)
     assert tokenizer.batch_calls == 1
@@ -346,7 +350,7 @@ def test_policy_preserves_non_text_batches_without_tokenizing() -> None:
         }
     )
 
-    result = policy.prepare(source).frame
+    result = prepare_embedding_inputs(source, policy=policy).frame
 
     pd.testing.assert_frame_equal(result, source, check_exact=True)
 
@@ -362,7 +366,7 @@ def test_policy_preserves_mixed_short_batches_exactly() -> None:
         }
     )
 
-    result = policy.prepare(source).frame
+    result = prepare_embedding_inputs(source, policy=policy).frame
 
     pd.testing.assert_frame_equal(result, source, check_exact=True)
     assert tokenizer.batch_calls == 1
@@ -434,10 +438,11 @@ def test_policy_preserves_literal_special_token_text() -> None:
     text = "abc<SPECIAL>def"
     policy = EmbeddingInputPolicy(tokenizer=_LiteralSpecialTokenizer(), max_tokens=5, prefix="p")
 
-    result = policy.prepare(pd.DataFrame({"text": [text]})).frame
+    plan = policy.plan([text])[0]
 
-    assert "".join(result["text"]) == text
-    assert "<SPECIAL>" in "".join(result["text"])
+    reconstructed = "".join(child.content for child in plan.children)
+    assert reconstructed == text
+    assert "<SPECIAL>" in reconstructed
 
 
 def test_hf_text_policy_counts_an_existing_prefix_exactly_once() -> None:
@@ -448,7 +453,7 @@ def test_hf_text_policy_counts_an_existing_prefix_exactly_once() -> None:
         prefix_if_missing=True,
     )
 
-    assert policy._formatted_token_count("passage: source") == len("passage: source") + 1
+    assert policy.plan(["passage: source"])[0].formatted_tokens == len("passage: source") + 1
 
 
 def test_policy_resolver_caps_runtime_length_at_checkpoint_support(monkeypatch, tmp_path) -> None:
@@ -692,11 +697,13 @@ def test_split_identity_is_stable_across_batch_composition() -> None:
         "page_number": 7,
         "metadata": {"chunk_index": 4},
     }
-    alone = policy.prepare(pd.DataFrame([oversized])).frame
-    with_neighbors = policy.prepare(pd.DataFrame([{"text": "before"}, oversized, {"text": "after"}])).frame
+    alone = prepare_embedding_inputs(pd.DataFrame([oversized]), policy=policy).frame
+    with_neighbors = prepare_embedding_inputs(
+        pd.DataFrame([{"text": "before"}, oversized, {"text": "after"}]), policy=policy
+    ).frame
 
-    assert [metadata["embedding_chunk_id"] for metadata in alone["metadata"]] == [
-        metadata["embedding_chunk_id"] for metadata in with_neighbors.loc[1:3, "metadata"]
+    assert [metadata["embedding_split"]["chunk_id"] for metadata in alone["metadata"]] == [
+        metadata["embedding_split"]["chunk_id"] for metadata in with_neighbors.loc[1:3, "metadata"]
     ]
 
 
@@ -754,7 +761,7 @@ def test_local_and_remote_adapters_apply_the_same_split_policy() -> None:
 
 def test_retrying_persisted_split_children_does_not_report_a_new_split() -> None:
     policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=4, prefix="p")
-    split_children = policy.prepare(pd.DataFrame({"text": ["abcdef"], "metadata": [{}]})).frame
+    split_children = prepare_embedding_inputs(pd.DataFrame({"text": ["abcdef"], "metadata": [{}]}), policy=policy).frame
 
     result = embed_text_main_text_embed(
         split_children,
@@ -768,7 +775,7 @@ def test_retrying_persisted_split_children_does_not_report_a_new_split() -> None
 def test_retry_child_id_collision_does_not_change_current_run_split_telemetry() -> None:
     policy = EmbeddingInputPolicy(tokenizer=_CharacterTokenizer(), max_tokens=4, prefix="p")
     parent = pd.DataFrame({"text": ["abcdef"], "metadata": [{}]})
-    persisted_first_child = policy.prepare(parent).frame.iloc[[0]]
+    persisted_first_child = prepare_embedding_inputs(parent, policy=policy).frame.iloc[[0]]
     mixed = pd.concat([persisted_first_child, parent], ignore_index=True)
 
     result = embed_text_main_text_embed(
@@ -789,7 +796,7 @@ def test_persisted_split_child_with_nullable_source_field_uses_exact_metadata_co
     row = pd.DataFrame(
         {
             "text": [pd.NA],
-            "metadata": [{"embedding_chunk_id": "child", "content": "ab"}],
+            "metadata": [{"embedding_split": {"chunk_id": "child", "content": "ab"}}],
         }
     )
     model = _RecordingMultimodalEmbedder()
@@ -805,14 +812,14 @@ def test_persisted_split_content_is_admitted_even_when_source_column_is_stale() 
     row = pd.DataFrame(
         {
             "text": ["a"],
-            "metadata": [{"embedding_chunk_id": "old-child", "content": "abcdef"}],
+            "metadata": [{"embedding_split": {"chunk_id": "old-child", "content": "abcdef"}}],
         }
     )
 
-    prepared = policy.prepare(row)
+    prepared = prepare_embedding_inputs(row, policy=policy)
 
     assert prepared.split_parent_positions == frozenset({0})
-    assert "".join(prepared.frame["metadata"].map(lambda metadata: metadata["content"])) == "abcdef"
+    assert "".join(prepared.frame["metadata"].map(lambda metadata: metadata["embedding_split"]["content"])) == "abcdef"
     assert len(prepared.frame.index) == 3
 
 

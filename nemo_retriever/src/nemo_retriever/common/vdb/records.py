@@ -15,11 +15,7 @@ from typing import Any, TypedDict
 from pydantic import ValidationError
 
 from nemo_retriever.common.schemas.collections import QueryHit
-from nemo_retriever.common.schemas.embedding import (
-    EMBEDDING_SPLIT_METADATA_KEYS,
-    embedding_split_content,
-    embedding_split_id,
-)
+from nemo_retriever.common.schemas.embedding import embedding_record_content
 from nemo_retriever.common.stage_errors import ERROR_FIELD_KEYS, iter_stage_errors_from_value
 
 _CONTENT_TYPE_ALIASES: dict[str, str] = {
@@ -33,7 +29,6 @@ _CONTENT_TYPE_ALIASES: dict[str, str] = {
 _CONTENT_PROVENANCE_METADATA_KEYS = (
     "chunk_index",
     "chunk_count",
-    *EMBEDDING_SPLIT_METADATA_KEYS,
     "segment_start_seconds",
     "segment_end_seconds",
     "frame_timestamp_seconds",
@@ -178,19 +173,9 @@ def _first_str(*values: Any) -> str:
     return ""
 
 
-def _text_from_graph_row(row: dict[str, Any], metadata: dict[str, Any]) -> str:
-    """Return exact split-child text or the first ordinary nonblank text field."""
-    split_content = embedding_split_content(metadata)
-    if split_content is not None:
-        return split_content
-    content_metadata = metadata.get("content_metadata")
-    canonical_content = metadata.get("content")
-    if embedding_split_id(content_metadata) is not None and isinstance(canonical_content, str):
-        return canonical_content
-    for value in (row.get("text"), row.get("content"), metadata.get("content")):
-        if isinstance(value, str) and value.strip():
-            return value
-    return ""
+def _text_from_graph_row(row: dict[str, Any]) -> str | None:
+    """Return canonical embedding content without interpreting its provenance."""
+    return embedding_record_content(row)
 
 
 def _optional_int(value: Any) -> int | None:
@@ -302,11 +287,11 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
     metadata = _dict_or_empty(row.get("metadata"))
 
     embedding = _embedding_from_graph_row(row, metadata)
-    text = _text_from_graph_row(row, metadata)
+    text = _text_from_graph_row(row)
     if require_embedding and embedding is None:
         return None
-    image_only = require_embedding and not text and _is_image_backed_row(row)
-    if not text and not image_only:
+    image_only = require_embedding and text is None and _is_image_backed_row(row)
+    if text is None and not image_only:
         return None
 
     content_metadata = _dict_or_empty(metadata.get("content_metadata"))
@@ -356,7 +341,7 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
     record_metadata = dict(metadata)
     if embedding is not None:
         record_metadata["embedding"] = embedding
-    record_metadata["content"] = text
+    record_metadata["content"] = "" if text is None else text
     record_metadata["content_metadata"] = content_metadata
     record_metadata["source_metadata"] = source_metadata
 
@@ -369,7 +354,7 @@ def _row_has_uploadable_content_without_embedding(row: dict[str, Any]) -> bool:
     metadata = _dict_or_empty(row.get("metadata"))
     if _embedding_from_graph_row(row, metadata) is not None:
         return False
-    if _text_from_graph_row(row, metadata):
+    if _text_from_graph_row(row) is not None:
         return True
     if _first_str(row.get("_image_b64")):
         return True

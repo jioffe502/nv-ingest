@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from nemo_retriever.common.modality.txt.tokenizer_provider import (
 from nemo_retriever.common.schemas.embedding import (
     SelectedEmbeddingText,
     embedding_split_metadata,
+    format_embedding_input,
     requires_text_admission,
     select_embedding_text,
 )
@@ -114,8 +116,29 @@ class EmbeddingPreparationResult:
 
 
 @dataclass(frozen=True)
+class EmbeddingSplitChild:
+    """One exact contiguous range in a pure embedding-input split plan."""
+
+    content: str
+    start_token: int
+    end_token: int
+
+
+@dataclass(frozen=True)
+class EmbeddingSplitPlan:
+    """Pure admission result for one input string."""
+
+    formatted_tokens: int
+    children: tuple[EmbeddingSplitChild, ...] = ()
+
+    @property
+    def requires_split(self) -> bool:
+        return bool(self.children)
+
+
+@dataclass(frozen=True)
 class EmbeddingInputPolicy:
-    """Prepare text rows so every formatted prompt fits the model input limit."""
+    """Plan text inputs so every formatted prompt fits the model input limit."""
 
     tokenizer: ChunkTokenizer
     max_tokens: int
@@ -126,13 +149,9 @@ class EmbeddingInputPolicy:
         if self.max_tokens <= 0:
             raise ValueError("Embedding input max_tokens must be positive")
 
-    def _format(self, text: str) -> str:
-        if self.prefix_if_missing and text.lower().startswith(self.prefix.lower()):
-            return text
-        return f"{self.prefix}{text}"
-
     def _formatted_token_count(self, text: str) -> int:
-        return len(self.tokenizer.encode(self._format(text), add_special_tokens=True))
+        formatted = format_embedding_input(text, self.prefix, prefix_if_missing=self.prefix_if_missing)
+        return len(self.tokenizer.encode(formatted, add_special_tokens=True))
 
     def _formatted_token_counts(self, texts: list[str]) -> list[int]:
         encode_batch = getattr(self.tokenizer, "encode_batch", None)
@@ -140,7 +159,10 @@ class EmbeddingInputPolicy:
             return [
                 len(token_ids)
                 for token_ids in encode_batch(
-                    [self._format(text) for text in texts],
+                    [
+                        format_embedding_input(text, self.prefix, prefix_if_missing=self.prefix_if_missing)
+                        for text in texts
+                    ],
                     add_special_tokens=True,
                 )
             ]
@@ -164,9 +186,9 @@ class EmbeddingInputPolicy:
             )
         return best
 
-    def _split(self, text: str) -> list[tuple[str, int, int]]:
+    def _split(self, text: str) -> tuple[EmbeddingSplitChild, ...]:
         token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-        chunks: list[tuple[str, int, int]] = []
+        children: list[EmbeddingSplitChild] = []
         start = 0
         while start < len(token_ids):
             end = self._largest_fitting_end(token_ids, start)
@@ -176,110 +198,124 @@ class EmbeddingInputPolicy:
                     "Embedding input cannot be split without changing its token sequence; "
                     "use the exact reversible tokenizer for this embedding model."
                 )
-            chunks.append((chunk, start, end))
+            children.append(EmbeddingSplitChild(content=chunk, start_token=start, end_token=end))
             start = end
-        if "".join(chunk for chunk, _, _ in chunks) != text:
+        if "".join(child.content for child in children) != text:
             raise ValueError(
                 "Embedding input cannot be split without changing its source text; "
                 "use the exact reversible tokenizer for this embedding model."
             )
-        return chunks
+        return tuple(children)
 
-    def _expand_row(
-        self,
-        row: pd.Series,
-        selected: SelectedEmbeddingText | None,
-        parent_tokens: int | None,
-    ) -> list[dict[str, Any]]:
-        row_copy = _deep_copy_row(row)
-        if selected is None or parent_tokens is None or parent_tokens <= self.max_tokens:
-            return [row_copy]
-
-        selected_column, text = selected.column, selected.content
-        chunks = self._split(text)
-        parent_id = _parent_id(row_copy, text)
-        expanded: list[dict[str, Any]] = []
-        for chunk_index, (chunk, start, end) in enumerate(chunks):
-            child = copy.deepcopy(row_copy)
-            child[selected_column] = chunk
-            if selected_column == "text" and "content" in child:
-                child["content"] = chunk
-            metadata = child.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-                child["metadata"] = metadata
-            chunk_id = hashlib.sha256(f"{parent_id}\0{start}\0{end}".encode("utf-8")).hexdigest()
-            metadata.update(
-                embedding_split_metadata(
-                    content=chunk,
-                    parent_id=parent_id,
-                    chunk_id=chunk_id,
-                    chunk_index=chunk_index,
-                    chunk_count=len(chunks),
-                    start_token=start,
-                    end_token=end,
-                )
+    def plan(self, texts: Sequence[str]) -> tuple[EmbeddingSplitPlan, ...]:
+        """Return deterministic, side-effect-free admission plans for exact input strings."""
+        inputs = list(texts)
+        counts = self._formatted_token_counts(inputs)
+        return tuple(
+            EmbeddingSplitPlan(
+                formatted_tokens=token_count,
+                children=self._split(text) if token_count > self.max_tokens else (),
             )
-            expanded.append(child)
-        return expanded
-
-    def prepare(
-        self,
-        frame: pd.DataFrame,
-        *,
-        text_column: str = "text",
-        default_modality: str = "text",
-    ) -> EmbeddingPreparationResult:
-        """Prepare rows and report only split events created by this invocation."""
-
-        def unchanged() -> EmbeddingPreparationResult:
-            return EmbeddingPreparationResult(
-                frame=frame.copy(),
-                split_child_positions=frozenset(),
-                split_parent_positions=frozenset(),
-            )
-
-        if frame.empty:
-            return unchanged()
-
-        rows = [row for _, row in frame.iterrows()]
-        text_admission = [requires_text_admission(row, default_modality=default_modality) for row in rows]
-        if not any(text_admission):
-            return unchanged()
-
-        selected_inputs: list[SelectedEmbeddingText | None] = []
-        text_positions: list[int] = []
-        texts: list[str] = []
-        for position, (row, needs_text_admission) in enumerate(zip(rows, text_admission)):
-            selected = select_embedding_text(row, text_column=text_column) if needs_text_admission else None
-            selected_inputs.append(selected)
-            if selected is not None:
-                text_positions.append(position)
-                texts.append(selected.content)
-
-        parent_token_counts: list[int | None] = [None] * len(rows)
-        for position, token_count in zip(text_positions, self._formatted_token_counts(texts)):
-            parent_token_counts[position] = token_count
-
-        if not any(token_count is not None and token_count > self.max_tokens for token_count in parent_token_counts):
-            return unchanged()
-
-        prepared: list[dict[str, Any]] = []
-        split_child_positions: set[int] = set()
-        split_parent_positions: set[int] = set()
-        for row, selected, parent_tokens in zip(rows, selected_inputs, parent_token_counts):
-            first_output_position = len(prepared)
-            expanded = self._expand_row(row, selected, parent_tokens)
-            prepared.extend(expanded)
-            if parent_tokens is not None and parent_tokens > self.max_tokens:
-                split_parent_positions.add(first_output_position)
-                split_child_positions.update(range(first_output_position, first_output_position + len(expanded)))
-
-        return EmbeddingPreparationResult(
-            frame=pd.DataFrame(prepared).reset_index(drop=True),
-            split_child_positions=frozenset(split_child_positions),
-            split_parent_positions=frozenset(split_parent_positions),
+            for text, token_count in zip(inputs, counts)
         )
+
+
+def _expand_row(
+    row: pd.Series,
+    selected: SelectedEmbeddingText | None,
+    plan: EmbeddingSplitPlan | None,
+) -> list[dict[str, Any]]:
+    row_copy = _deep_copy_row(row)
+    if selected is None or plan is None or not plan.requires_split:
+        return [row_copy]
+
+    selected_column, text = selected.column, selected.content
+    parent_id = _parent_id(row_copy, text)
+    expanded: list[dict[str, Any]] = []
+    for chunk_index, split_child in enumerate(plan.children):
+        child = copy.deepcopy(row_copy)
+        child[selected_column] = split_child.content
+        if selected_column == "text" and "content" in child:
+            child["content"] = split_child.content
+        metadata = child.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            child["metadata"] = metadata
+        chunk_id = hashlib.sha256(
+            f"{parent_id}\0{split_child.start_token}\0{split_child.end_token}".encode("utf-8")
+        ).hexdigest()
+        metadata.update(
+            embedding_split_metadata(
+                content=split_child.content,
+                parent_id=parent_id,
+                chunk_id=chunk_id,
+                chunk_index=chunk_index,
+                chunk_count=len(plan.children),
+                start_token=split_child.start_token,
+                end_token=split_child.end_token,
+            )
+        )
+        expanded.append(child)
+    return expanded
+
+
+def prepare_embedding_inputs(
+    frame: pd.DataFrame,
+    *,
+    policy: EmbeddingInputPolicy,
+    text_column: str = "text",
+    default_modality: str = "text",
+) -> EmbeddingPreparationResult:
+    """Apply pure admission plans to a DataFrame and attach child provenance."""
+
+    def unchanged() -> EmbeddingPreparationResult:
+        return EmbeddingPreparationResult(
+            frame=frame.copy(),
+            split_child_positions=frozenset(),
+            split_parent_positions=frozenset(),
+        )
+
+    if frame.empty:
+        return unchanged()
+
+    rows = [row for _, row in frame.iterrows()]
+    text_admission = [requires_text_admission(row, default_modality=default_modality) for row in rows]
+    if not any(text_admission):
+        return unchanged()
+
+    selected_inputs: list[SelectedEmbeddingText | None] = []
+    text_positions: list[int] = []
+    texts: list[str] = []
+    for position, (row, needs_text_admission) in enumerate(zip(rows, text_admission)):
+        selected = select_embedding_text(row, text_column=text_column) if needs_text_admission else None
+        selected_inputs.append(selected)
+        if selected is not None:
+            text_positions.append(position)
+            texts.append(selected.content)
+
+    plans: list[EmbeddingSplitPlan | None] = [None] * len(rows)
+    for position, plan in zip(text_positions, policy.plan(texts)):
+        plans[position] = plan
+
+    if not any(plan is not None and plan.requires_split for plan in plans):
+        return unchanged()
+
+    prepared: list[dict[str, Any]] = []
+    split_child_positions: set[int] = set()
+    split_parent_positions: set[int] = set()
+    for row, selected, plan in zip(rows, selected_inputs, plans):
+        first_output_position = len(prepared)
+        expanded = _expand_row(row, selected, plan)
+        prepared.extend(expanded)
+        if plan is not None and plan.requires_split:
+            split_parent_positions.add(first_output_position)
+            split_child_positions.update(range(first_output_position, first_output_position + len(expanded)))
+
+    return EmbeddingPreparationResult(
+        frame=pd.DataFrame(prepared).reset_index(drop=True),
+        split_child_positions=frozenset(split_child_positions),
+        split_parent_positions=frozenset(split_parent_positions),
+    )
 
 
 def resolve_embedding_input_policy(
@@ -367,7 +403,10 @@ def ensure_embedding_input_policy_for_batch(kwargs: dict[str, Any], frame: Any) 
 __all__ = [
     "EmbeddingInputPolicy",
     "EmbeddingPreparationResult",
+    "EmbeddingSplitChild",
+    "EmbeddingSplitPlan",
     "configure_embedding_input_policy",
     "ensure_embedding_input_policy_for_batch",
+    "prepare_embedding_inputs",
     "resolve_embedding_input_policy",
 ]

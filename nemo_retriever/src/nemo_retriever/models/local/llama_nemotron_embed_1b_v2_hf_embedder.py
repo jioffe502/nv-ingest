@@ -13,8 +13,9 @@ from typing import List, Optional, Sequence
 
 import torch
 
-from nemo_retriever.models.hf_cache import configure_global_hf_cache_base
+from nemo_retriever.common.schemas.embedding import format_embedding_input
 from nemo_retriever.models.embed_model_spec import resolve_embed_model_revision
+from nemo_retriever.models.hf_cache import configure_global_hf_cache_base
 
 logger = logging.getLogger(__name__)
 
@@ -127,13 +128,7 @@ class LlamaNemotronEmbed1BV2HFEmbedder:
     @staticmethod
     def _prepare_texts(texts: Sequence[str], prefix: str) -> List[str]:
         """Apply *prefix* to every input while preserving batch cardinality."""
-        prepared: List[str] = []
-        for text in texts:
-            raw = str(text)
-            if prefix and not raw.lower().startswith(prefix.lower()):
-                raw = prefix + raw
-            prepared.append(raw)
-        return prepared
+        return [format_embedding_input(text, prefix, prefix_if_missing=True) for text in texts]
 
     def embed(self, texts: Sequence[str], *, batch_size: int = 64) -> torch.Tensor:
         """Embed documents after applying the checkpoint-declared prefix."""

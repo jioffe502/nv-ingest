@@ -12,14 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-EMBEDDING_SPLIT_METADATA_KEYS = (
-    "embedding_parent_id",
-    "embedding_chunk_id",
-    "embedding_chunk_index",
-    "embedding_chunk_count",
-    "embedding_chunk_start_token",
-    "embedding_chunk_end_token",
-)
+EMBEDDING_SPLIT_METADATA_KEY = "embedding_split"
 
 
 def embedding_split_metadata(
@@ -34,14 +27,24 @@ def embedding_split_metadata(
 ) -> dict[str, Any]:
     """Return canonical metadata for one lossless split child."""
     return {
-        "content": content,
-        "embedding_parent_id": parent_id,
-        "embedding_chunk_id": chunk_id,
-        "embedding_chunk_index": chunk_index,
-        "embedding_chunk_count": chunk_count,
-        "embedding_chunk_start_token": start_token,
-        "embedding_chunk_end_token": end_token,
+        EMBEDDING_SPLIT_METADATA_KEY: {
+            "content": content,
+            "parent_id": parent_id,
+            "chunk_id": chunk_id,
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+            "start_token": start_token,
+            "end_token": end_token,
+        }
     }
+
+
+def format_embedding_input(text: Any, prefix: str, *, prefix_if_missing: bool = False) -> str:
+    """Apply the exact prefix rule shared by admission and local inference."""
+    raw = str(text)
+    if prefix_if_missing and prefix and raw.lower().startswith(prefix.lower()):
+        return raw
+    return f"{prefix}{raw}"
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,19 @@ def embedding_text_input(
     return selected.content.strip()
 
 
+def embedding_record_content(row: Mapping[str, Any], *, text_column: str = "text") -> str | None:
+    """Return exact searchable text without exposing split metadata layout to callers."""
+    selected = select_embedding_text(row, text_column=text_column)
+    if selected is not None:
+        return selected.content
+    metadata = row.get("metadata")
+    if isinstance(metadata, Mapping):
+        content = metadata.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+    return None
+
+
 def embedding_runtime_modality(row: Mapping[str, Any], *, default_modality: str = "text") -> str:
     """Resolve the requested runtime modality, inheriting the default only for nulls."""
     value = row.get("_embed_modality")
@@ -110,8 +126,11 @@ def embedding_split_content(metadata: Any) -> str | None:
     """Return the exact child text when *metadata* identifies a split child."""
     if not isinstance(metadata, Mapping):
         return None
-    chunk_id = metadata.get("embedding_chunk_id")
-    content = metadata.get("content")
+    split = metadata.get(EMBEDDING_SPLIT_METADATA_KEY)
+    if not isinstance(split, Mapping):
+        return None
+    chunk_id = split.get("chunk_id")
+    content = split.get("content")
     if isinstance(chunk_id, str) and chunk_id.strip() and isinstance(content, str):
         return content
     return None
@@ -121,18 +140,23 @@ def embedding_split_id(metadata: Any) -> str | None:
     """Return the canonical child ID when present."""
     if not isinstance(metadata, Mapping):
         return None
-    chunk_id = metadata.get("embedding_chunk_id")
+    split = metadata.get(EMBEDDING_SPLIT_METADATA_KEY)
+    if not isinstance(split, Mapping):
+        return None
+    chunk_id = split.get("chunk_id")
     return chunk_id if isinstance(chunk_id, str) and chunk_id.strip() else None
 
 
 __all__ = [
-    "EMBEDDING_SPLIT_METADATA_KEYS",
+    "EMBEDDING_SPLIT_METADATA_KEY",
     "SelectedEmbeddingText",
+    "embedding_record_content",
     "embedding_runtime_modality",
     "embedding_split_metadata",
     "embedding_text_input",
     "embedding_split_content",
     "embedding_split_id",
+    "format_embedding_input",
     "requires_text_admission",
     "select_embedding_text",
 ]

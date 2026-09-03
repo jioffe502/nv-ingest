@@ -14,9 +14,10 @@ import pandas as pd
 from nemo_retriever.common.params.models import IMAGE_MODALITIES
 from nemo_retriever.common.schemas.embedding import (
     embedding_runtime_modality,
+    format_embedding_input,
 )
 from nemo_retriever.models import VL_EMBED_MODEL, resolve_embed_model
-from nemo_retriever.models.inference.embedding_input import EmbeddingInputPolicy
+from nemo_retriever.models.inference.embedding_input import EmbeddingInputPolicy, prepare_embedding_inputs
 from nemo_retriever.models.inference.main_text_embed import TextEmbeddingConfig, create_text_embeddings_for_df
 from nemo_retriever.models.nim.error_reporter import report_error
 
@@ -54,7 +55,7 @@ def _embed_group(
                 if str(input_type).strip().lower() == "query" and skip_prefix:
                     vectors = model.embed_queries(texts, batch_size=int(inference_batch_size))
                 else:
-                    batch = texts if skip_prefix else [f"passage: {text}" for text in texts]
+                    batch = texts if skip_prefix else [format_embedding_input(text, "passage: ") for text in texts]
                     vectors = model.embed(batch, batch_size=int(inference_batch_size))
                 tolist = getattr(vectors, "tolist", None)
                 if callable(tolist):
@@ -141,8 +142,9 @@ def embed_text_main_text_embed(
     resolved_model_name = resolve_embed_model(model_name)
 
     if embedding_input_policy is not None:
-        preparation = embedding_input_policy.prepare(
+        preparation = prepare_embedding_inputs(
             batch_df,
+            policy=embedding_input_policy,
             text_column=text_column,
             default_modality=embed_modality,
         )

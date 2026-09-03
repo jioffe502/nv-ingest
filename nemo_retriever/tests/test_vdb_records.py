@@ -166,12 +166,15 @@ def test_graph_record_conversion_preserves_service_provenance() -> None:
                 "metadata": {
                     "chunk_index": 4,
                     "chunk_count": 9,
-                    "embedding_parent_id": "parent-1",
-                    "embedding_chunk_id": "child-2",
-                    "embedding_chunk_index": 2,
-                    "embedding_chunk_count": 3,
-                    "embedding_chunk_start_token": 200,
-                    "embedding_chunk_end_token": 400,
+                    "embedding_split": {
+                        "content": "table content",
+                        "parent_id": "parent-1",
+                        "chunk_id": "child-2",
+                        "chunk_index": 2,
+                        "chunk_count": 3,
+                        "start_token": 200,
+                        "end_token": 400,
+                    },
                     "segment_start_seconds": 1.5,
                     "frame_timestamp_seconds": 2.5,
                     "content_metadata": {"page_number": 1},
@@ -187,6 +190,15 @@ def test_graph_record_conversion_preserves_service_provenance() -> None:
         "source_id": "/tmp/source.pdf",
         "source_name": "source.pdf",
     }
+    assert metadata["embedding_split"] == {
+        "content": "table content",
+        "parent_id": "parent-1",
+        "chunk_id": "child-2",
+        "chunk_index": 2,
+        "chunk_count": 3,
+        "start_token": 200,
+        "end_token": 400,
+    }
     assert metadata["content_metadata"] == {
         "page_number": 7,
         "type": "table",
@@ -199,12 +211,6 @@ def test_graph_record_conversion_preserves_service_provenance() -> None:
         "ocr_table_detections": 2,
         "chunk_index": 4,
         "chunk_count": 9,
-        "embedding_parent_id": "parent-1",
-        "embedding_chunk_id": "child-2",
-        "embedding_chunk_index": 2,
-        "embedding_chunk_count": 3,
-        "embedding_chunk_start_token": 200,
-        "embedding_chunk_end_token": 400,
         "segment_start_seconds": 1.5,
         "frame_timestamp_seconds": 2.5,
     }
@@ -317,7 +323,7 @@ def test_dense_record_conversion_rejects_partial_canonical_embedding_coverage() 
                 "metadata": {
                     "content": "embedded child",
                     "embedding": [0.1, 0.2],
-                    "content_metadata": {"embedding_chunk_id": "child-0"},
+                    "embedding_split": {"chunk_id": "child-0", "content": "embedded child"},
                 },
             },
             {
@@ -325,7 +331,7 @@ def test_dense_record_conversion_rejects_partial_canonical_embedding_coverage() 
                 "metadata": {
                     "content": "missing child",
                     "embedding": [],
-                    "content_metadata": {"embedding_chunk_id": "child-1"},
+                    "embedding_split": {"chunk_id": "child-1", "content": "missing child"},
                 },
             },
         ]
@@ -341,14 +347,16 @@ def test_dense_record_conversion_preserves_whitespace_only_embedding_child() -> 
         {
             "text": "  ",
             "metadata": {
-                "content": "  ",
                 "embedding": [0.3, 0.4],
-                "embedding_parent_id": "parent",
-                "embedding_chunk_id": "child-1",
-                "embedding_chunk_index": 1,
-                "embedding_chunk_count": 2,
-                "embedding_chunk_start_token": 8187,
-                "embedding_chunk_end_token": 8188,
+                "embedding_split": {
+                    "content": "  ",
+                    "parent_id": "parent",
+                    "chunk_id": "child-1",
+                    "chunk_index": 1,
+                    "chunk_count": 2,
+                    "start_token": 8187,
+                    "end_token": 8188,
+                },
             },
         },
     ]
@@ -365,14 +373,16 @@ def test_dense_record_conversion_rejects_missing_whitespace_only_child_embedding
         {
             "text": "  ",
             "metadata": {
-                "content": "  ",
                 "embedding": None,
-                "embedding_parent_id": "parent",
-                "embedding_chunk_id": "child-1",
-                "embedding_chunk_index": 1,
-                "embedding_chunk_count": 2,
-                "embedding_chunk_start_token": 8187,
-                "embedding_chunk_end_token": 8188,
+                "embedding_split": {
+                    "content": "  ",
+                    "parent_id": "parent",
+                    "chunk_id": "child-1",
+                    "chunk_index": 1,
+                    "chunk_count": 2,
+                    "start_token": 8187,
+                    "end_token": 8188,
+                },
             },
         },
     ]
@@ -391,13 +401,14 @@ def test_canonical_record_rejects_missing_whitespace_only_child_embedding() -> N
                 "document_type": "text",
                 "metadata": {
                     "content": "  ",
-                    "content_metadata": {
-                        "embedding_parent_id": "parent",
-                        "embedding_chunk_id": "child-1",
-                        "embedding_chunk_index": 1,
-                        "embedding_chunk_count": 2,
-                        "embedding_chunk_start_token": 8187,
-                        "embedding_chunk_end_token": 8188,
+                    "embedding_split": {
+                        "content": "  ",
+                        "parent_id": "parent",
+                        "chunk_id": "child-1",
+                        "chunk_index": 1,
+                        "chunk_count": 2,
+                        "start_token": 8187,
+                        "end_token": 8188,
                     },
                 },
             }
