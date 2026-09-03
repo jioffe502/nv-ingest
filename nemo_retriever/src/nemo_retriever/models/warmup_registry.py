@@ -31,13 +31,10 @@ def is_warmup_active() -> bool:
 
 
 def get_warmed_model(key: str, *, expected_identity: Any | None = None) -> Any | None:
-    """Return a pre-loaded model, rejecting an incompatible expected identity."""
+    """Return a pre-loaded model when its identity matches the request."""
     model = _REGISTRY.get(key)
     if model is not None and expected_identity is not None and _IDENTITIES.get(key) != expected_identity:
-        raise RuntimeError(
-            f"The warmed embedder identity for {key!r} does not match this request; "
-            "restart with matching immutable model settings instead of reusing different weights or configuration."
-        )
+        return None
     return model
 
 

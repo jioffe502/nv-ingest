@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from nemo_retriever.models.embed_model_spec import EmbedModelSpec
 from nemo_retriever.models.local_embedder_spec import LocalEmbedderSpec
 from nemo_retriever.models.warmup_registry import (
@@ -156,7 +154,7 @@ def test_warm_local_models_forwards_embed_model_revision() -> None:
     clear_warmed_models()
 
 
-def test_gpu_actor_rejects_warmed_embedder_revision_mismatch() -> None:
+def test_gpu_actor_loads_requested_embedder_when_warmed_identity_differs() -> None:
     from nemo_retriever.common.params import EmbedParams
     from nemo_retriever.operators.embed import gpu_operator
 
@@ -176,17 +174,23 @@ def test_gpu_actor_rejects_warmed_embedder_revision_mismatch() -> None:
             }
         )
 
+    requested = MagicMock(name="requested_revision_b")
     with (
         patch("nemo_retriever.models.embed_model_spec.resolve_embed_model_spec", side_effect=_checkpoint),
-        pytest.raises(RuntimeError, match=r"warmed embedder identity"),
+        patch("nemo_retriever.models.create_local_embedder", return_value=requested) as create_local_embedder,
     ):
-        gpu_operator._BatchEmbedActor(
+        actor = gpu_operator._BatchEmbedActor(
             params=EmbedParams(
                 model_name="acme/embed-model",
                 embed_model_revision="b" * 40,
                 local_ingest_embed_backend="hf",
             )
         )
+
+    assert actor._model is requested
+    assert actor._model is not warmed
+    create_local_embedder.assert_called_once()
+    assert create_local_embedder.call_args.kwargs["revision"] == "b" * 40
 
     clear_warmed_models()
 
