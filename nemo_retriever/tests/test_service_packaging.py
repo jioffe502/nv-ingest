@@ -46,3 +46,15 @@ def test_service_images_precache_all_embedding_input_admission_assets() -> None:
 
     assert dockerfile.count("resolve_embedding_input_policy(DEFAULT_TOKENIZER_MODEL_ID") == 2
     assert dockerfile.count("configured_max_tokens=8192, input_type='passage'") == 2
+
+
+def test_platform_classifiers_describe_supported_operating_systems() -> None:
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    classifiers = set(pyproject["project"]["classifiers"])
+
+    assert "Operating System :: OS Independent" not in classifiers
+    assert {
+        "Operating System :: POSIX :: Linux",
+        "Operating System :: Microsoft :: Windows",
+        "Operating System :: MacOS",
+    } <= classifiers
