@@ -107,7 +107,6 @@ Graph ingest returns a pandas `DataFrame` of flat rows. Use the following input 
 - `LanceDB.run()` does not accept the graph `DataFrame` or a flat `list` of dictionaries from `DataFrame.to_dict("records")`.
 - `LanceDB.retrieval()` takes precomputed query vectors. Pass a `list` of embedding vectors whose length matches `vector_dim`. For query strings, use [`Retriever.query`](nemo-retriever-api-reference.md).
 - A direct `IngestVdbOperator` call accepts the same flat `DataFrame` or graph rows. It converts them with `to_client_vdb_records()` and then calls `run()`.
-- `RayDataExecutor.ingest()` can instead use a backend's optional `stream_ingest()` capability. `IngestVdbOperator` still performs canonical conversion, so no Ray, pandas, Arrow, or LanceDB objects cross the `VDB` interface.
 
 The following example uses a two-dimensional fixture so you can copy it without a GPU or embedding NIM:
 
@@ -217,20 +216,17 @@ NeMo Retriever graph operators [`IngestVdbOperator`](https://github.com/NVIDIA/N
 To integrate another vector database, subclass [`VDB`](https://github.com/NVIDIA/NeMo-Retriever/blob/26.08.1/nemo_retriever/src/nemo_retriever/common/vdb/adt_vdb.py) and pass your operator instance as `vdb` (refer to [Build a Custom Vector Database Operator](https://github.com/NVIDIA/NeMo-Retriever/blob/26.08.1/examples/building_vdb_operator.ipynb)).
 
 `VDB.stream_ingest(records)` is an optional, non-abstract batch-ingest
-capability. Override it to receive a lazy iterable of canonical NeMo Retriever
-Library record dictionaries. Consume that single-pass iterable synchronously
-and to exhaustion before returning, and do not retain it. Existing custom
-backends do not need to implement the method. When a backend inherits the default unsupported implementation,
-`RayDataExecutor.ingest()` retains the global-batch `VDB.run(records)` path.
+capability. Backends opt in by setting `supports_stream_ingest = True` and
+implementing `stream_ingest(records)`. The method receives a lazy, single-pass
+iterable of canonical NeMo Retriever Library record dictionaries. It must
+consume the iterable synchronously and to exhaustion, and must not retain it.
+Ray, pandas, Arrow, and backend-specific objects do not cross this interface.
 
-LanceDB implements bounded Arrow packing, table mutation, retries, validation,
-indexing, and optimization behind this capability. `RayDataExecutor` owns Ray
-iteration, prefetch, cleanup, result retention, and ordering. `PutVdbOperator`
-does not use streaming ingest.
-
-The bounded path applies to scheme-less local LanceDB paths and authority-free
-`file:///` URIs, where backend instances and processes share a crash-released
-table lock. Other URIs retain the existing global-batch path.
+Existing custom backends retain the global-batch `VDB.run(records)` path unless
+they opt in. For LanceDB, ordinary fixed-table configurations with scheme-less
+local paths or authority-free `file:///` URIs use bounded Arrow batches. Remote
+stores and private service schemas retain the
+global-batch path. `PutVdbOperator` does not use streaming ingest.
 
 For Ray batch ingestion, configure LanceDB streaming behavior in the LanceDB
 `vdb_kwargs`:
@@ -239,18 +235,35 @@ For Ray batch ingestion, configure LanceDB streaming behavior in the LanceDB
 | --- | --- |
 | `stream_batch_bytes` | Maximum Arrow bytes in one packed batch. The default is 256 MiB. |
 | `stream_optimize` | Runs LanceDB optimization after a successful streamed write. The default is `False`. |
-| `stream_operation_id` | Uses a stable retry identity. Omit it for an ID that the backend retains across a failed same-instance retry, or set it explicitly to resume after reconstructing the backend or restarting the process. |
+| `stream_operation_id` | Enables durable retries for one caller-persisted operation ID. The identity covers stored rows after configured filtering and table-result settings. The default is `None`. |
 
-These LanceDB settings apply only to `LanceDB.stream_ingest()`, which
-`RayDataExecutor.ingest()` selects automatically for an eligible backend.
-Legacy `run()` and `put()` calls reject non-default streaming settings
-instead of ignoring them.
+Without `stream_operation_id`, LanceDB keeps bounded Arrow packing and applies
+the records with one table mutation. This default stores no durable idempotency
+history, so retries have the same scope as legacy `run()`.
+
+When you set `stream_operation_id`, persist it before the first attempt and
+reuse it for every retry that produces the same stored rows and table-result
+settings. Records dropped by configured filtering are not part of this
+identity. LanceDB retains the success marker indefinitely so a reconstructed
+backend can recognize the completed operation.
+
+If an explicit append commits but its durable data marker is not recorded,
+LanceDB fails closed. Do not replay the append. Inspect the committed version
+named in the error, confirm that it contains the intended rows, complete the
+configured index and optimization maintenance, and then delete the named
+pending tag only after reconciliation.
+
+Retry an overwrite, create, or other recoverable finalization failure only when
+the exception instructs you to resume with the original explicit
+`stream_operation_id`. If the original attempt did not set an ID, do not replay
+records after a known commit and finalization failure.
+
+These settings apply only to `LanceDB.stream_ingest()`. Legacy `run()` and
+`put()` calls reject non-default streaming settings instead of ignoring them.
 
 `RayDataExecutor.build_dataset()` remains lazy and builds the complete legacy
 graph, including the global VDB stage. In-process and service execution do not
-select this streaming path. They continue through the existing VDB operator
-dispatch. Streaming is an automatic backend capability check, not a generic
-ingest or service setting.
+select streaming ingest and retain their existing VDB dispatch.
 
 ### RAG Blueprint and partner vector stores { #rag-blueprint-and-partner-vector-stores }
 

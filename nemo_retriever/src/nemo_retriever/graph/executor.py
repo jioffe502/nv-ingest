@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 import math
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Set
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 # Reuses the same baseline constant as the batch ingest mode.
 _DEFAULT_GPU_OPERATOR_NUM_GPUS = OCR_GPUS_PER_ACTOR
 _STREAM_INGEST_PREFETCH_BATCHES = 1
+_DatasetSegment = Literal["all", "before_stream_ingest", "after_stream_ingest"]
 
 
 def _contains_null_arrow_child(data_type: Any) -> bool:
@@ -567,7 +569,7 @@ class RayDataExecutor(AbstractExecutor):
         positions = [
             index
             for index, node in enumerate(nodes)
-            if isinstance(node.operator, IngestVdbOperator) and node.operator.supports_stream_ingest()
+            if isinstance(node.operator, IngestVdbOperator) and node.operator._supports_stream_ingest()
         ]
         return positions[0] if len(positions) == 1 else None
 
@@ -588,7 +590,7 @@ class RayDataExecutor(AbstractExecutor):
 
         dataset = self._build_dataset(
             data,
-            stop_before_stream_ingest=True,
+            segment="before_stream_ingest",
         )
 
         terminal_frames: list[pd.DataFrame] = []
@@ -600,13 +602,14 @@ class RayDataExecutor(AbstractExecutor):
             )
         )
 
-        def retained_batches() -> Any:
+        def retained_batches() -> Iterator[pd.DataFrame]:
             for block in batch_iterator:
-                terminal_frames.append(arrow_table_to_pandas(block))
-                yield block
+                frame = arrow_table_to_pandas(block)
+                terminal_frames.append(frame)
+                yield frame
 
         try:
-            sink_operator.stream_ingest(retained_batches())
+            sink_operator._stream_ingest(retained_batches())
         finally:
             close = getattr(batch_iterator, "close", None)
             if callable(close):
@@ -623,7 +626,7 @@ class RayDataExecutor(AbstractExecutor):
                 continuation_input = rd.from_pandas(pd.DataFrame(columns=list(names) if names is not None else None))
             downstream = self._build_dataset(
                 continuation_input,
-                start_after_stream_ingest=True,
+                segment="after_stream_ingest",
                 input_preserves_pandas_output=True,
             )
             return ray_dataset_to_pandas(downstream)
@@ -657,14 +660,11 @@ class RayDataExecutor(AbstractExecutor):
         self,
         data: Any,
         *,
-        stop_before_stream_ingest: bool = False,
-        start_after_stream_ingest: bool = False,
+        segment: _DatasetSegment = "all",
         input_preserves_pandas_output: bool = False,
     ) -> Any:
         """Build the complete graph or one private streaming-ingest segment."""
 
-        stop_before_sink = stop_before_stream_ingest
-        start_after_sink = start_after_stream_ingest
         ray = ensure_local_ray_runtime(self._ray_address)
         import ray.data as rd
 
@@ -702,13 +702,10 @@ class RayDataExecutor(AbstractExecutor):
         resolved_graph = resolve_graph(self.graph, cluster)
         all_nodes = self._linearize(resolved_graph)
         sink_index = self._stream_ingest_index(all_nodes)
-        if stop_before_sink and start_after_sink:
-            raise ValueError("Cannot request both sides of streaming VDB ingest.")
-        if sink_index is not None and (stop_before_sink or start_after_sink):
-            if stop_before_sink:
-                nodes = all_nodes[:sink_index]
-            else:
-                nodes = all_nodes[sink_index + 1 :]
+        if sink_index is not None and segment == "before_stream_ingest":
+            nodes = all_nodes[:sink_index]
+        elif sink_index is not None and segment == "after_stream_ingest":
+            nodes = all_nodes[sink_index + 1 :]
         else:
             nodes = all_nodes
         requires_stable_pandas_blocks = input_preserves_pandas_output or _requires_stable_pandas_blocks(nodes)

@@ -389,7 +389,7 @@ def _raise_for_empty_vdb_conversion(
     )
 
 
-def iter_client_vdb_records(rows: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+def _iter_client_vdb_records(rows: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     """Lazily convert graph rows into individual canonical NRL records.
 
     Invalid rows are skipped when at least one row converts, matching
@@ -453,7 +453,7 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
         rows = rows.to_pandas()
     if hasattr(rows, "to_dict"):
         rows = rows.to_dict("records")
-    inner = list(iter_client_vdb_records(rows or []))
+    inner = list(_iter_client_vdb_records(rows or []))
     # Preserve legacy contract: no uploadable rows → [], not [[]].
     return [inner] if inner else []
 

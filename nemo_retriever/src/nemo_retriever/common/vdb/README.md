@@ -26,15 +26,12 @@ physical names, schemas, native ranking fields, locks, and persistence. LanceDB
 initializes its private collection catalog lazily, so ordinary fixed-table
 construction and the existing CLI paths do not create collection metadata.
 
-`VDB.stream_ingest(records)` is an optional, non-abstract capability for batch
-ingest. It receives a lazy iterable of canonical NeMo Retriever Library record
-dictionaries. The iterable does not contain Ray, pandas, Arrow, or
-backend-specific objects. An implementation must consume it exactly once,
-synchronously, and to exhaustion before returning; it must not retain the
-iterable.
-Existing `VDB` subclasses remain compatible because the inherited method raises
-`UnsupportedVDBOperation`. `IngestVdbOperator` detects whether a backend
-overrides the method before selecting the streaming path.
+`VDB.stream_ingest(records)` is an optional, non-abstract batch-ingest
+capability. A backend opts in by setting `supports_stream_ingest = True` and
+implementing `stream_ingest(records)`. The method accepts a lazy, single-pass
+iterable of canonical record dictionaries and returns after consuming it to
+exhaustion. The default flag is `False`, so existing subclasses retain the
+`VDB.run(records)` path. Overriding the method alone does not enable streaming.
 
 ---
 
@@ -50,17 +47,16 @@ Flow (see `operators/vdb.py` and `common/vdb/records.py`):
 2. Optional **sidecar metadata** — if `vdb_kwargs` contains `meta_dataframe` / `meta_source_field` / `meta_fields`, those keys are stripped for the concrete DB constructor and merged onto records via `sidecar_metadata.py`.
 3. **Explicit dispatch** — calls `VDB.run(records)` for fixed-table ingestion or `VDB.write_collection(records, context=...)` for a scoped collection.
 
-For streaming batch ingest, `IngestVdbOperator.stream_ingest(batches)` converts
-each graph row lazily, applies the same sidecar metadata, and delegates one
-canonical record iterable to `VDB.stream_ingest(records)`. Canonical conversion
-stays in the operator, while the backend owns its write lifecycle.
+For streaming batch ingest, `IngestVdbOperator` converts each graph row lazily,
+applies the same sidecar metadata, and delegates one canonical record iterable
+to `VDB.stream_ingest(records)`.
 
 ### Ray batch pipelines (`RayDataExecutor`)
 
 Graph ingestion with `run_mode=batch` uses **`RayDataExecutor`**
 (`nemo_retriever/graph/executor.py`). `RayDataExecutor.ingest()` selects the
 streaming path when the graph has one eligible `IngestVdbOperator` whose backend
-overrides `VDB.stream_ingest()`.
+sets `supports_stream_ingest = True`.
 
 On that path, the executor owns Ray batch iteration, prefetch, iterator cleanup,
 retention of the historical pandas result, and downstream ordering. The
@@ -68,11 +64,11 @@ operator converts those batches into canonical records before the backend sees
 them. The executor does not import LanceDB or pass Ray objects across the VDB
 interface.
 
-Backends that inherit the default `VDB.stream_ingest()` implementation retain
-the historical global-batch path. `IngestVdbOperator.REQUIRES_GLOBAL_BATCH`
-causes the complete dataset to be repartitioned to one block before
-`VDB.run(records)` executes. `PutVdbOperator` explicitly opts out of streaming
-so its update-only semantics remain on that path.
+Backends with `supports_stream_ingest = False` retain the historical
+global-batch path. `IngestVdbOperator.REQUIRES_GLOBAL_BATCH` causes the complete
+dataset to be repartitioned to one block before `VDB.run(records)` executes.
+`PutVdbOperator` explicitly opts out of streaming so its update-only semantics
+remain on that path.
 
 The public `RayDataExecutor.build_dataset()` method also retains its historical
 behavior. It returns the full lazy graph, including the global VDB stage, and
@@ -126,12 +122,22 @@ legacy-fallback fixed-table ingestion path. It orchestrates:
 2. **`write_to_index`** — builds the **vector index** (e.g. IVF/HNSW) and optionally an **FTS/BM25** index over the ingested `text` column when `hybrid=True`.
 
 `LanceDB.stream_ingest` is the first-class bounded implementation of the
-optional VDB capability. It receives canonical record dictionaries and owns
-Arrow packing and schemas, the byte limit, one table mutation, durable operation
-tags, retry and version validation, index coverage, and optional optimization.
+optional VDB capability. It owns Arrow packing and schemas, the byte limit, one
+table mutation, validation, index coverage, and optional optimization. Without
+`stream_operation_id`, it stores no durable idempotency history, and retry scope
+matches legacy fixed-table ingestion.
+
+An explicit `stream_operation_id` enables durable request, stored-row, version,
+and finalization checks. Its identity covers the rows produced after configured
+bad-vector filtering and the table-result settings. Dropped input records are
+not part of the identity. LanceDB retains each success marker indefinitely so a
+reconstructed backend can recognize a completed operation.
+
 Ray remains responsible only for producing and retaining ordered input batches.
-Scheme-less local paths and authority-free `file:///` URIs also share a
-crash-released table lock across backend instances and processes; other URIs
+LanceDB sets `supports_stream_ingest = True` for scheme-less local paths and
+authority-free `file:///` URIs unless the instance uses a private service
+schema. These local configurations also share a crash-released table lock across
+backend instances and processes. Remote stores and private service schemas
 retain the legacy global-batch path.
 
 Common constructor arguments include:
@@ -147,7 +153,18 @@ Common constructor arguments include:
 | `on_bad_vectors`| `drop`, `fill`, `null`, or `error` |
 | `stream_batch_bytes` | Maximum Arrow bytes per packed streaming batch (default 256 MiB) |
 | `stream_optimize` | Run LanceDB optimization after a streaming write (default `False`) |
-| `stream_operation_id` | Optional stable operation ID; generated and retained for failed same-instance retries when omitted; set explicitly for backend reconstruction or process restart |
+| `stream_operation_id` | Optional caller-persisted ID for durable retries; binds stored rows after configured filtering and table-result settings; the default `None` stores no durable idempotency history |
+
+Persist an explicit operation ID before the first attempt. If an append commits
+but its durable data marker is not recorded, do not replay it. Inspect the
+committed version named in the error, confirm its stored rows, complete the
+configured index and optimization maintenance, and delete the named pending tag
+only after reconciliation.
+
+Retry an overwrite, create, or other recoverable finalization failure only when
+the exception instructs you to use the original explicit ID. If the original
+attempt did not set an ID, do not replay records after a known commit and
+finalization failure.
 
 ---
 
@@ -326,4 +343,6 @@ flowchart LR
 - **Ingest**: flat rows → canonical records → **`LanceDB.run`** or **`LanceDB.stream_ingest`** → table + indexes.
 - **Retrieve**: strings → vectors → **`RetrieveVdbOperator`** → **`LanceDB.retrieval`** → hit lists.
 
-For implementation details, see `operators/vdb.py`, `adt_vdb.py`, `lancedb.py`, `sink.py`, `records.py`, `factory.py`, and `retriever.py`.
+For implementation details, refer to `operators/vdb.py`, `adt_vdb.py`,
+`lancedb.py`, `_lancedb_stream.py`, `_lancedb_stream_state.py`, `records.py`,
+`factory.py`, and `retriever.py`.

@@ -6,27 +6,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import pandas as pd
 
 from nemo_retriever.common.vdb.adt_vdb import CollectionWriteContext, UnsupportedVDBOperation, VDB
 from nemo_retriever.common.vdb.factory import get_vdb_op_cls
-
-from nemo_retriever.operators.abstract_operator import AbstractOperator
 from nemo_retriever.common.vdb.records import (
-    iter_client_vdb_records,
+    _iter_client_vdb_records,
     normalize_retrieval_results,
     to_client_vdb_records,
     validate_collection_retrieval_results,
 )
 from nemo_retriever.common.vdb.sidecar_metadata import (
+    _apply_sidecar_metadata_to_client_record,
     apply_sidecar_metadata_to_client_batches,
     build_sidecar_lookup,
     materialize_sidecar_dataframe,
     split_sidecar_from_vdb_kwargs,
 )
+from nemo_retriever.operators.abstract_operator import AbstractOperator
 
 
 def _construct_vdb(
@@ -43,37 +43,11 @@ def _construct_vdb(
     return vdb if vdb is not None else get_vdb_op_cls(str(vdb_op))(**dict(vdb_kwargs or {}))
 
 
-def _iter_batch_rows(batches: Iterable[Any]) -> Iterator[dict[str, Any]]:
-    """Yield Python-owned graph rows from native executor batches one at a time."""
+def _iter_batch_rows(batches: Iterable[pd.DataFrame]) -> Iterator[dict[str, Any]]:
+    """Yield graph rows from the executor's retained pandas batches."""
 
     for batch in batches:
-        num_rows = getattr(batch, "num_rows", None)
-        slice_rows = getattr(batch, "slice", None)
-        to_pylist = getattr(batch, "to_pylist", None)
-        if isinstance(num_rows, int) and callable(slice_rows) and callable(to_pylist):
-            for row_index in range(num_rows):
-                rows = slice_rows(row_index, 1).to_pylist()
-                if rows and isinstance(rows[0], dict):
-                    yield rows[0]
-            continue
-
-        columns = getattr(batch, "columns", None)
-        itertuples = getattr(batch, "itertuples", None)
-        if columns is not None and callable(itertuples):
-            names = list(columns)
-            for values in itertuples(index=False, name=None):
-                yield dict(zip(names, values))
-            continue
-
-        if isinstance(batch, Mapping):
-            yield dict(batch)
-            continue
-
-        if batch is None:
-            continue
-        for row in batch:
-            if isinstance(row, Mapping):
-                yield dict(row)
+        yield from batch.to_dict(orient="records")
 
 
 def _coerce_embedding_vector(value: Any) -> list[float] | None:
@@ -194,31 +168,29 @@ class IngestVdbOperator(AbstractOperator):
             self._vdb.run(records)
         return data
 
-    def supports_stream_ingest(self) -> bool:
+    def _supports_stream_ingest(self) -> bool:
         """Return whether the configured VDB opts into canonical record streaming."""
 
-        implementation = getattr(self._vdb.stream_ingest, "__func__", self._vdb.stream_ingest)
-        return implementation is not VDB.stream_ingest
+        return self._vdb.supports_stream_ingest
 
-    def stream_ingest(self, batches: Iterable[Any]) -> Any:
+    def _stream_ingest(self, batches: Iterable[pd.DataFrame]) -> None:
         """Lazily convert executor batches and delegate one backend stream."""
 
-        if not self.supports_stream_ingest():
+        if not self._supports_stream_ingest():
             raise UnsupportedVDBOperation(f"{type(self._vdb).__name__} does not implement stream_ingest()")
 
-        records: Iterable[dict[str, Any]] = iter_client_vdb_records(_iter_batch_rows(batches))
+        records: Iterable[dict[str, Any]] = _iter_client_vdb_records(_iter_batch_rows(batches))
         if self._sidecar_spec is not None and self._sidecar_lookup is not None:
             undecorated_records = records
 
             def with_sidecar() -> Iterator[dict[str, Any]]:
                 for record in undecorated_records:
-                    decorated = apply_sidecar_metadata_to_client_batches(
-                        [[record]],
+                    yield _apply_sidecar_metadata_to_client_record(
+                        record,
                         lookup=self._sidecar_lookup,
                         meta_fields=self._sidecar_spec["meta_fields"],
                         join_key=self._sidecar_spec["meta_join_key"],
                     )
-                    yield from decorated[0]
 
             records = with_sidecar()
 
@@ -230,12 +202,11 @@ class IngestVdbOperator(AbstractOperator):
             yield from record_stream
             exhausted = True
 
-        result = self._vdb.stream_ingest(required_records())
+        self._vdb.stream_ingest(required_records())
         if not exhausted:
             raise RuntimeError(
                 f"{type(self._vdb).__name__}.stream_ingest() returned before consuming the record stream"
             )
-        return result
 
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data
@@ -294,7 +265,7 @@ class PutVdbOperator(IngestVdbOperator):
             self._vdb.put(records, table_name=self._table_name, key=self._key)
         return data
 
-    def supports_stream_ingest(self) -> bool:
+    def _supports_stream_ingest(self) -> bool:
         """Keep update-only put semantics on the historical global-batch path."""
 
         return False

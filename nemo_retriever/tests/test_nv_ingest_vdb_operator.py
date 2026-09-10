@@ -17,8 +17,6 @@ from nemo_retriever.common.vdb.adt_vdb import (
     VDB,
 )
 from nemo_retriever.common.vdb.records import RetrievalContractError, VdbUploadError
-from nemo_retriever.graph.executor import RayDataExecutor
-from nemo_retriever.graph.pipeline_graph import Graph
 from nemo_retriever.operators.vdb import IngestVdbOperator, RetrieveVdbOperator
 from nemo_retriever.operators import vdb as vdb_operator_module
 from nemo_retriever.operators.vdb import PutVdbOperator
@@ -623,23 +621,26 @@ def test_custom_vdb_stream_capability_and_legacy_fallback() -> None:
     pulls: list[int] = []
 
     class StreamingFakeVDB(FakeVDB):
+        supports_stream_ingest = True
+
         def __init__(self) -> None:
             super().__init__()
             self.stream_records: list[dict[str, Any]] = []
 
-        def stream_ingest(self, records, **kwargs):
+        def stream_ingest(self, records) -> None:
             assert pulls == []
             assert not isinstance(records, (list, tuple, pd.DataFrame))
             self.stream_records = list(records)
-            return {"written": len(self.stream_records)}
 
-    class EarlyReturningVDB(FakeVDB):
-        def stream_ingest(self, records, **kwargs):
+    class EarlyReturningVDB(StreamingFakeVDB):
+        def stream_ingest(self, records) -> None:
             next(iter(records))
 
     def batches():
         pulls.append(0)
-        yield pd.DataFrame([_graph_rows()[0]])
+        first = pd.DataFrame([_graph_rows()[0]])
+        first["document_type"] = pd.Series([None], dtype="string[pyarrow]")
+        yield first
         pulls.append(1)
         yield pd.DataFrame([_graph_rows()[1]])
 
@@ -649,15 +650,7 @@ def test_custom_vdb_stream_capability_and_legacy_fallback() -> None:
     legacy = IngestVdbOperator(vdb=legacy_vdb)
     put = PutVdbOperator(vdb=streaming_vdb)
 
-    assert streaming.supports_stream_ingest() is True
-    assert RayDataExecutor._stream_ingest_index(RayDataExecutor._linearize(Graph() >> streaming)) == 0
-    assert legacy.supports_stream_ingest() is False
-    assert legacy.REQUIRES_GLOBAL_BATCH is True
-    assert RayDataExecutor._stream_ingest_index(RayDataExecutor._linearize(Graph() >> legacy)) is None
-    assert put.supports_stream_ingest() is False
-    assert RayDataExecutor._stream_ingest_index(RayDataExecutor._linearize(Graph() >> put)) is None
-
-    assert streaming.stream_ingest(batches()) == {"written": 2}
+    assert streaming._stream_ingest(batches()) is None
     assert pulls == [0, 1]
     assert streaming_vdb.run_calls == []
     assert [record["document_type"] for record in streaming_vdb.stream_records] == ["text", "text"]
@@ -669,9 +662,12 @@ def test_custom_vdb_stream_capability_and_legacy_fallback() -> None:
     legacy.process(pd.DataFrame(_graph_rows()))
     assert len(legacy_vdb.run_calls) == 1
     with pytest.raises(UnsupportedVDBOperation, match="does not implement stream_ingest"):
-        legacy.stream_ingest(batches())
+        legacy._stream_ingest(batches())
+    with pytest.raises(UnsupportedVDBOperation, match="does not implement stream_ingest"):
+        put._stream_ingest(batches())
     with pytest.raises(RuntimeError, match="returned before consuming the record stream"):
-        IngestVdbOperator(vdb=EarlyReturningVDB()).stream_ingest([pd.DataFrame(_graph_rows())])
+        operator = IngestVdbOperator(vdb=EarlyReturningVDB())
+        operator._stream_ingest([pd.DataFrame(_graph_rows())])
 
 
 def test_put_operator_merges_sidecar_metadata_into_records_before_put() -> None:

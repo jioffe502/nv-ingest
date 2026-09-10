@@ -5,13 +5,12 @@
 import hashlib
 import json
 import logging
-import math
 import os
 import threading
 import time
-import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, FrozenSet
@@ -33,6 +32,29 @@ from nemo_retriever.common.schemas.collections import (
     DocumentInfo,
     DocumentPage,
 )
+from nemo_retriever.common.vdb._lancedb_stream import (
+    DataCommittedFinalizationError,
+    VdbWriteNotFinalized,
+    _apply_deferred_bad_vector_policy,
+    _assert_lancedb_table_ready,
+    _bounded_create_is_finalized,
+    _checked_batches,
+    _infer_vector_dim_with_spooled_prefix,
+    _inspect_vector,
+    _matches_create_identity,
+    _reject_empty_operation_bypass,
+    _rows_at_version,
+    _schemas_have_same_fields,
+    _StreamStats,
+    _table_content_identity,
+    _validate_index_coverage,
+    _with_create_identity,
+)
+from nemo_retriever.common.vdb._lancedb_stream_state import (
+    CommitOutcomeUnknown,
+    SinkOperationMarkers,
+    VdbOperationConflict,
+)
 from nemo_retriever.common.vdb.adt_vdb import (
     VDB,
     CollectionWriteContext,
@@ -44,6 +66,7 @@ from nemo_retriever.common.vdb.hybrid_fusion import (
     WeightedRRFReranker,
 )
 from nemo_retriever.common.vdb.lancedb_capabilities import (
+    _table_schema,
     inspect_lancedb_table_object,
     wait_for_column_index,
 )
@@ -165,21 +188,11 @@ def _stabilize_fill_vectors(
     replacement = [float(fill_value)] * int(vector_dim)
     stabilized: list[dict[str, Any]] = []
     for row in rows:
-        vector = row.get("vector")
-        try:
-            wrong_dim = len(vector) != vector_dim
-        except TypeError:
-            wrong_dim = True
-
-        has_nan = False
-        if not wrong_dim:
-            try:
-                has_nan = any(value is not None and math.isnan(float(value)) for value in vector)
-            except (TypeError, ValueError):
-                stabilized.append(row)
-                continue
-
-        stabilized.append({**row, "vector": list(replacement)} if wrong_dim or has_nan else row)
+        status, _ = _inspect_vector(row.get("vector"), vector_dim)
+        if status == "uncoercible":
+            stabilized.append(row)
+        else:
+            stabilized.append({**row, "vector": list(replacement)} if status != "valid" else row)
     return stabilized
 
 
@@ -301,11 +314,6 @@ def _sparse_lancedb_arrow_schema(*, retrieval_mode: str | None = "sparse") -> pa
         ]
     )
     return _with_retrieval_mode_metadata(schema, retrieval_mode)
-
-
-def _table_schema(table: Any) -> pa.Schema:
-    schema = table.schema
-    return schema() if callable(schema) else schema
 
 
 def _schema_vector_dim(schema: pa.Schema) -> int | None:
@@ -439,6 +447,76 @@ def _get_text_for_element(element):
         return metadata.get("content")
 
 
+def _create_lancedb_result(
+    element: dict[str, Any],
+    *,
+    expected_dim: int | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Project one canonical NRL record, returning its drop reason if rejected."""
+
+    metadata = element.get("metadata", {})
+    doc_type = element.get("document_type")
+    embedding = metadata.get("embedding")
+    if embedding is None:
+        return None, "dropped_no_embedding"
+
+    if expected_dim is not None and (not isinstance(embedding, (list, tuple)) or len(embedding) != expected_dim):
+        got_len: Any = len(embedding) if hasattr(embedding, "__len__") else "n/a"
+        logger.debug(
+            "Dropping row with bad embedding (got_len=%s, expected=%d, doc_type=%s)",
+            got_len,
+            expected_dim,
+            doc_type,
+        )
+        return None, "dropped_bad_length"
+
+    content_meta = metadata.get("content_metadata", {})
+    text = _get_text_for_element(element)
+    if not isinstance(text, str) or not text.strip():
+        is_canonical_image = (
+            doc_type == "image" and isinstance(content_meta, dict) and content_meta.get("type") == "image"
+        )
+        if not is_canonical_image:
+            source_name = metadata.get("source_metadata", {}).get("source_name", "unknown")
+            page_number = content_meta.get("page_number") if isinstance(content_meta, dict) else None
+            logger.debug(
+                "No text found for entity: %s page: %s type: %s",
+                source_name,
+                page_number,
+                doc_type,
+            )
+            return None, "dropped_no_text"
+        text = ""
+
+    row_id = content_meta.get("id") if isinstance(content_meta, dict) else None
+    if row_id is None and isinstance(metadata, dict):
+        row_id = metadata.get("id")
+    return (
+        {
+            "vector": embedding,
+            "text": text,
+            "metadata": _json_str(content_meta),
+            "source": _json_str(metadata.get("source_metadata", {})),
+            "id": str(row_id) if row_id is not None else "",
+        },
+        None,
+    )
+
+
+def _log_lancedb_result_counts(counts: dict[str, int], *, expected_dim: int | None) -> None:
+    if not any(counts[key] for key in ("dropped_no_embedding", "dropped_bad_length", "dropped_no_text")):
+        return
+    logger.warning(
+        "_create_lancedb_results: accepted=%d dropped_no_embedding=%d "
+        "dropped_bad_length=%d dropped_no_text=%d expected_dim=%s",
+        counts["accepted"],
+        counts["dropped_no_embedding"],
+        counts["dropped_bad_length"],
+        counts["dropped_no_text"],
+        expected_dim,
+    )
+
+
 def _create_lancedb_results(
     results,
     *,
@@ -476,184 +554,132 @@ def _create_lancedb_results(
         ``dropped_no_embedding``, ``dropped_bad_length``, and
         ``dropped_no_text`` keys.
     """
-    lancedb_rows: list = []
-    accepted = 0
-    dropped_no_embedding = 0
-    dropped_bad_length = 0
-    dropped_no_text = 0
-
-    enforce_length = expected_dim is not None
-    expected_dim_int = int(expected_dim) if enforce_length else None
-
+    lancedb_rows: list[dict[str, Any]] = []
+    expected_dim_int = int(expected_dim) if expected_dim is not None else None
+    counts = {
+        "accepted": 0,
+        "dropped_no_embedding": 0,
+        "dropped_bad_length": 0,
+        "dropped_no_text": 0,
+    }
     for result in results:
         for element in result:
-            metadata = element.get("metadata", {})
-            doc_type = element.get("document_type")
-
-            embedding = metadata.get("embedding")
-            if embedding is None:
-                dropped_no_embedding += 1
+            row, drop_reason = _create_lancedb_result(element, expected_dim=expected_dim_int)
+            if drop_reason is not None:
+                counts[drop_reason] += 1
                 continue
+            if row is not None:
+                lancedb_rows.append(row)
+                counts["accepted"] += 1
 
-            if enforce_length and (not isinstance(embedding, (list, tuple)) or len(embedding) != expected_dim_int):
-                dropped_bad_length += 1
-                got_len: Any = len(embedding) if hasattr(embedding, "__len__") else "n/a"
-                logger.debug(
-                    "Dropping row with bad embedding (got_len=%s, expected=%d, doc_type=%s)",
-                    got_len,
-                    expected_dim_int,
-                    doc_type,
-                )
-                continue
-
-            content_meta = metadata.get("content_metadata", {})
-
-            text = _get_text_for_element(element)
-
-            if not isinstance(text, str) or not text.strip():
-                is_canonical_image = (
-                    doc_type == "image" and isinstance(content_meta, dict) and content_meta.get("type") == "image"
-                )
-                if not is_canonical_image:
-                    dropped_no_text += 1
-                    source_name = metadata.get("source_metadata", {}).get("source_name", "unknown")
-                    pg_num = content_meta.get("page_number")
-                    logger.debug(f"No text found for entity: {source_name} page: {pg_num} type: {doc_type}")
-                    continue
-                text = ""
-
-            row_id = content_meta.get("id") if isinstance(content_meta, dict) else None
-            if row_id is None and isinstance(metadata, dict):
-                row_id = metadata.get("id")
-            row_id_str = str(row_id) if row_id is not None else ""
-
-            lancedb_rows.append(
-                {
-                    "vector": embedding,
-                    "text": text,
-                    "metadata": _json_str(content_meta),
-                    "source": _json_str(metadata.get("source_metadata", {})),
-                    "id": row_id_str,
-                }
-            )
-            accepted += 1
-
-    counts: dict[str, int] = {
-        "accepted": accepted,
-        "dropped_no_embedding": dropped_no_embedding,
-        "dropped_bad_length": dropped_bad_length,
-        "dropped_no_text": dropped_no_text,
-    }
-
-    if dropped_no_embedding or dropped_bad_length or dropped_no_text:
-        expected_dim_repr = expected_dim_int if enforce_length else "None"
-        logger.warning(
-            "_create_lancedb_results: accepted=%d dropped_no_embedding=%d "
-            "dropped_bad_length=%d dropped_no_text=%d expected_dim=%s",
-            accepted,
-            dropped_no_embedding,
-            dropped_bad_length,
-            dropped_no_text,
-            expected_dim_repr,
-        )
-
+    _log_lancedb_result_counts(counts, expected_dim=expected_dim_int)
     return lancedb_rows, counts
+
+
+def _to_service_lancedb_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Adapt one canonical dense row to the established service table schema."""
+
+    content_metadata = _maybe_parse_json(row.get("metadata"))
+    if not isinstance(content_metadata, dict):
+        content_metadata = {}
+    source_metadata = _maybe_parse_json(row.get("source"))
+    if not isinstance(source_metadata, dict):
+        source_metadata = {}
+    source_id = next(
+        (
+            str(value).strip()
+            for value in (
+                source_metadata.get("source_id"),
+                source_metadata.get("source_name"),
+            )
+            if isinstance(value, str) and value.strip()
+        ),
+        "",
+    )
+    content_type = normalize_content_type(content_metadata.get("type") or content_metadata.get("_content_type"))
+    if content_type:
+        content_metadata = dict(content_metadata)
+        content_metadata["type"] = content_type
+        content_metadata["_content_type"] = content_type
+    wide_row = build_lancedb_row(
+        SimpleNamespace(
+            metadata={
+                "embedding": row.get("vector"),
+                "source_path": source_id,
+                "content_metadata": content_metadata,
+            },
+            path=source_id,
+            page_number=content_metadata.get("page_number"),
+            text=row.get("text") or "",
+            _stored_image_uri=content_metadata.get("stored_image_uri"),
+            _content_type=content_type,
+            _bbox_xyxy_norm=content_metadata.get("bbox_xyxy_norm"),
+        )
+    )
+    if wide_row is None:
+        return None
+    wide_row["metadata"] = _json_str(content_metadata)
+    wide_row["source"] = _json_str(source_metadata)
+    wide_row["content_type"] = content_type or ""
+    return wide_row
 
 
 def _to_service_lancedb_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Adapt canonical dense rows to the established service table schema."""
-    wide_rows: list[dict[str, Any]] = []
+
+    wide_rows = []
     for row in rows:
-        content_metadata = _maybe_parse_json(row.get("metadata"))
-        if not isinstance(content_metadata, dict):
-            content_metadata = {}
-        source_metadata = _maybe_parse_json(row.get("source"))
-        if not isinstance(source_metadata, dict):
-            source_metadata = {}
-        source_id = next(
-            (
-                str(value).strip()
-                for value in (
-                    source_metadata.get("source_id"),
-                    source_metadata.get("source_name"),
-                )
-                if isinstance(value, str) and value.strip()
-            ),
-            "",
-        )
-        content_type = normalize_content_type(content_metadata.get("type") or content_metadata.get("_content_type"))
-        if content_type:
-            content_metadata = dict(content_metadata)
-            content_metadata["type"] = content_type
-            content_metadata["_content_type"] = content_type
-        wide_row = build_lancedb_row(
-            SimpleNamespace(
-                metadata={
-                    "embedding": row.get("vector"),
-                    "source_path": source_id,
-                    "content_metadata": content_metadata,
-                },
-                path=source_id,
-                page_number=content_metadata.get("page_number"),
-                text=row.get("text") or "",
-                _stored_image_uri=content_metadata.get("stored_image_uri"),
-                _content_type=content_type,
-                _bbox_xyxy_norm=content_metadata.get("bbox_xyxy_norm"),
-            )
-        )
-        if wide_row is None:
-            continue
-        wide_row["metadata"] = _json_str(content_metadata)
-        wide_row["source"] = _json_str(source_metadata)
-        wide_row["content_type"] = content_type or ""
-        wide_rows.append(wide_row)
+        wide_row = _to_service_lancedb_row(row)
+        if wide_row is not None:
+            wide_rows.append(wide_row)
     return wide_rows
+
+
+def _create_sparse_lancedb_result(element: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = element.get("metadata", {})
+    content_meta = metadata.get("content_metadata", {})
+    text = _get_text_for_element(element)
+    if not isinstance(text, str) or not text.strip():
+        source_name = metadata.get("source_metadata", {}).get("source_name", "unknown")
+        page_number = content_meta.get("page_number") if isinstance(content_meta, dict) else None
+        logger.debug("No text found for sparse entity: %s page: %s", source_name, page_number)
+        return None
+
+    row_id = content_meta.get("id") if isinstance(content_meta, dict) else None
+    if row_id is None and isinstance(metadata, dict):
+        row_id = metadata.get("id")
+    return {
+        "text": text,
+        "metadata": _json_str(content_meta),
+        "source": _json_str(metadata.get("source_metadata", {})),
+        "id": str(row_id) if row_id is not None else "",
+    }
+
+
+def _log_sparse_result_counts(counts: dict[str, int]) -> None:
+    if counts["dropped_no_text"]:
+        logger.warning(
+            "_create_sparse_lancedb_results: accepted=%d dropped_no_text=%d",
+            counts["accepted"],
+            counts["dropped_no_text"],
+        )
 
 
 def _create_sparse_lancedb_results(results) -> tuple[list, dict[str, int]]:
     """Transform NRL records into LanceDB rows for FTS-only sparse retrieval."""
-    lancedb_rows: list = []
-    accepted = 0
-    dropped_no_text = 0
 
+    lancedb_rows: list[dict[str, Any]] = []
+    counts = {"accepted": 0, "dropped_no_text": 0}
     for result in results:
         for element in result:
-            metadata = element.get("metadata", {})
-            content_meta = metadata.get("content_metadata", {})
-            text = _get_text_for_element(element)
-
-            if not isinstance(text, str) or not text.strip():
-                dropped_no_text += 1
-                source_name = metadata.get("source_metadata", {}).get("source_name", "unknown")
-                pg_num = content_meta.get("page_number") if isinstance(content_meta, dict) else None
-                logger.debug("No text found for sparse entity: %s page: %s", source_name, pg_num)
+            row = _create_sparse_lancedb_result(element)
+            if row is None:
+                counts["dropped_no_text"] += 1
                 continue
+            lancedb_rows.append(row)
+            counts["accepted"] += 1
 
-            row_id = content_meta.get("id") if isinstance(content_meta, dict) else None
-            if row_id is None and isinstance(metadata, dict):
-                row_id = metadata.get("id")
-            row_id_str = str(row_id) if row_id is not None else ""
-
-            lancedb_rows.append(
-                {
-                    "text": text,
-                    "metadata": _json_str(content_meta),
-                    "source": _json_str(metadata.get("source_metadata", {})),
-                    "id": row_id_str,
-                }
-            )
-            accepted += 1
-
-    counts: dict[str, int] = {
-        "accepted": accepted,
-        "dropped_no_text": dropped_no_text,
-    }
-    if dropped_no_text:
-        logger.warning(
-            "_create_sparse_lancedb_results: accepted=%d dropped_no_text=%d",
-            accepted,
-            dropped_no_text,
-        )
+    _log_sparse_result_counts(counts)
     return lancedb_rows, counts
 
 
@@ -700,7 +726,7 @@ class LanceDB(VDB):
         if isinstance(stream_batch_bytes, bool) or not isinstance(stream_batch_bytes, int) or stream_batch_bytes <= 0:
             raise ValueError("stream_batch_bytes must be a positive integer")
         if not isinstance(stream_optimize, bool):
-            raise ValueError("stream_optimize must be a boolean")
+            raise TypeError("stream_optimize must be a boolean")
         if stream_operation_id is not None:
             if not isinstance(stream_operation_id, str) or not stream_operation_id.strip():
                 raise ValueError("stream_operation_id must be a non-empty string or None")
@@ -726,11 +752,10 @@ class LanceDB(VDB):
         self.stream_batch_bytes = stream_batch_bytes
         self.stream_optimize = stream_optimize
         self.stream_operation_id = stream_operation_id
-        # Remote object stores do not expose an equivalent conditional-append
-        # primitive in LanceDB. Bind the inherited unsupported hook so the
-        # operator selects the historical global-batch path for those URIs.
-        if not _is_filesystem_lancedb_uri(self.uri) and type(self).stream_ingest is LanceDB.stream_ingest:
-            self.stream_ingest = VDB.stream_ingest.__get__(self, type(self))
+        # Remote stores and private service schemas retain the legacy path.
+        self.supports_stream_ingest = (
+            _is_filesystem_lancedb_uri(self.uri) and not service_table_schema and service_index_mode is None
+        )
         self._service_table_schema = service_table_schema
         self._service_index_mode = str(service_index_mode) if service_index_mode is not None else None
         self._writes_since_optimize = 0
@@ -753,11 +778,9 @@ class LanceDB(VDB):
         # Row admission is serialized on its own short-lived lock so a caller
         # never waits on index maintenance to get its rows committed.
         self._write_lock = threading.Lock()
-        # A generated operation ID stays bound to a failed stream until that
-        # same instance completes its retry. The separate lock is required
-        # because write_lancedb_records acquires the non-reentrant write lock.
+        # Serialize the complete streaming lifecycle within this instance;
+        # the filesystem lock coordinates other local instances and processes.
         self._stream_lock = threading.Lock()
-        self._pending_stream_operation_id: str | None = None
         # LanceDB treats competing index commits as a conflict, so only one
         # rebuild may run at a time. Rebuilds are coalesced by generation:
         # a rebuild that starts after a batch was committed also covers it.
@@ -1339,7 +1362,484 @@ class LanceDB(VDB):
             wait_for_column_index(table, "text", covered_rows=num_rows)
             _record_timing("lancedb.fts_index_ready", time.perf_counter() - fts_index_start)
 
-    def stream_ingest(self, records: Iterable[dict[str, Any]], **kwargs: Any) -> None:
+    def _iter_stream_rows(
+        self,
+        records: Iterable[dict[str, Any]],
+        stats: _StreamStats,
+    ) -> Iterator[dict[str, Any]]:
+        """Project canonical NRL records one at a time for LanceDB storage."""
+
+        dense_counts = {
+            "accepted": 0,
+            "dropped_no_embedding": 0,
+            "dropped_bad_length": 0,
+            "dropped_no_text": 0,
+        }
+        sparse_counts = {"accepted": 0, "dropped_no_text": 0}
+        for record in records:
+            stats.client_records += 1
+
+            if self.sparse:
+                row = _create_sparse_lancedb_result(record)
+                if row is None:
+                    sparse_counts["dropped_no_text"] += 1
+                    continue
+                sparse_counts["accepted"] += 1
+                yield row
+                continue
+
+            enforce_dim = self.validate_vector_length and self.on_bad_vectors != "error"
+            expected_dim = stats.vector_dim if enforce_dim else None
+            row, drop_reason = _create_lancedb_result(record, expected_dim=expected_dim)
+            if drop_reason is not None:
+                dense_counts[drop_reason] += 1
+                continue
+            if row is None:
+                continue
+            dense_counts["accepted"] += 1
+            yield row
+
+        if self.sparse:
+            _log_sparse_result_counts(sparse_counts)
+        else:
+            _log_lancedb_result_counts(dense_counts, expected_dim=stats.vector_dim)
+
+    def _stream_schema(self, vector_dim: int | None) -> pa.Schema:
+        if self.sparse:
+            return _sparse_lancedb_arrow_schema()
+        if vector_dim is None:
+            raise ValueError("Cannot infer LanceDB vector_dim because no non-empty embedding was produced.")
+
+        retrieval_mode = "hybrid" if self.hybrid else "dense"
+        return _lancedb_arrow_schema(
+            vector_dim,
+            retrieval_mode=retrieval_mode,
+            embedding_model_name=self.embedding_model_name,
+            embedding_model_revision=self.embedding_model_revision,
+        )
+
+    def _stream_request_fingerprint(self, schema: pa.Schema, *, mode: str) -> str:
+        """Identify settings that affect the durable table result."""
+
+        return json.dumps(
+            {
+                "table": self.table_name,
+                "mode": mode,
+                "schema": schema.to_string(show_schema_metadata=True),
+                "build_index": self.build_index,
+                "index_type": str(self.index_type),
+                "metric": str(self.metric),
+                "num_partitions": int(self.num_partitions),
+                "num_sub_vectors": int(self.num_sub_vectors),
+                "fts_language": str(self.fts_language),
+                "hybrid": self.hybrid,
+                "sparse": self.sparse,
+                "on_bad_vectors": self.on_bad_vectors,
+                "fill_value": self.fill_value,
+                "validate_vector_length": self.validate_vector_length,
+                "optimize": self.stream_optimize,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _mutate_stream_data(
+        self,
+        *,
+        db: Any,
+        existing_table: Any | None,
+        markers: SinkOperationMarkers | None,
+        mode: str,
+        base_version: int | None,
+        schema: pa.Schema,
+        batches: Iterable[pa.RecordBatch],
+        stats: _StreamStats,
+    ) -> int:
+        """Perform or recover the single Lance data mutation."""
+
+        if markers is not None and markers.state == "data":
+            return int(markers.recorded_version)
+
+        if existing_table is not None and mode == "append" and stats.rows_written == 0:
+            # Legacy append does not create a table version when every client
+            # record is dropped, but still finalizes the operation.
+            existing_table.checkout_latest()
+            data_version = int(existing_table.version)
+            if markers is not None:
+                markers.mark_data(existing_table, version=data_version, rows=0, digest=stats.digest)
+            return data_version
+
+        write_kwargs: dict[str, Any] = {"on_bad_vectors": self.on_bad_vectors}
+        if self.on_bad_vectors == "fill":
+            write_kwargs["fill_value"] = self.fill_value
+        reader = pa.RecordBatchReader.from_batches(schema, batches)
+        try:
+            if existing_table is None:
+                table = db.create_table(
+                    self.table_name,
+                    data=reader,
+                    schema=schema,
+                    mode="create",
+                    **write_kwargs,
+                )
+                data_version = int(table.version)
+            else:
+                add_result = existing_table.add(reader, mode=mode, **write_kwargs)
+                table = existing_table
+                table.checkout_latest()
+                data_version = int(add_result.version)
+        except (OSError, RuntimeError, ValueError, pa.ArrowException) as exc:
+            if markers is not None:
+                markers.abort_if_unchanged(existing_table)
+            if existing_table is None:
+                created_table = None
+                try:
+                    created_table = lancedb.connect(uri=self.uri).open_table(self.table_name)
+                except ValueError as open_exc:
+                    if not _is_missing_lancedb_table_error(open_exc):
+                        raise
+                if created_table is not None:
+                    created_table.checkout_latest()
+                    created_version = int(created_table.version)
+                    if markers is not None and _matches_create_identity(
+                        created_table,
+                        operation_id=markers.operation_id,
+                        request_fingerprint=markers.request_fingerprint,
+                    ):
+                        raise DataCommittedFinalizationError(
+                            self.table_name,
+                            created_version,
+                            retry_operation_id=markers.operation_id,
+                        ) from exc
+                    raise CommitOutcomeUnknown(
+                        f"LanceDB table creation may have committed at version {created_version}. "
+                        "Do not replay these records; reconcile the table before another write."
+                    ) from exc
+            elif base_version is not None and mode == "append":
+                latest = lancedb.connect(uri=self.uri).open_table(self.table_name)
+                latest.checkout_latest()
+                latest_version = int(latest.version)
+                if latest_version != base_version:
+                    operation = f" operation_id {markers.operation_id!r}" if markers is not None else ""
+                    raise CommitOutcomeUnknown(
+                        f"LanceDB append{operation} may have committed while the table advanced "
+                        f"from version {base_version} to {latest_version}. Do not replay these records; "
+                        "reconcile the table before another write."
+                    ) from exc
+            raise
+
+        if markers is not None:
+            try:
+                markers.mark_data(
+                    table,
+                    version=data_version,
+                    rows=stats.rows_written,
+                    digest=stats.digest,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                retry_operation_id = markers.operation_id if existing_table is None or mode == "overwrite" else None
+                recovery_action = None
+                if retry_operation_id is None:
+                    recovery_action = (
+                        "The durable data marker was not recorded. Do not replay this append. "
+                        f"Inspect committed version {data_version}, complete the configured index and optimization "
+                        f"maintenance, then delete pending Lance tag {markers.pending_tag!r} only after confirming "
+                        "that the version contains the intended rows."
+                    )
+                raise DataCommittedFinalizationError(
+                    self.table_name,
+                    data_version,
+                    retry_operation_id=retry_operation_id,
+                    recovery_action=recovery_action,
+                ) from exc
+        return data_version
+
+    def _finalize_stream_write(
+        self,
+        *,
+        markers: SinkOperationMarkers | None,
+        data_version: int,
+        expected_schema: pa.Schema,
+        expected_rows: int,
+        stats: _StreamStats,
+    ) -> None:
+        """Validate data and indexes before recording durable success."""
+
+        fresh_table = lancedb.connect(uri=self.uri).open_table(self.table_name)
+        if self.build_index:
+            self._maintain_indexes(None, fresh_table)
+        if self.stream_optimize:
+            with self._index_lock:
+                fresh_table.checkout_latest()
+                fresh_table.optimize()
+
+        fresh_table.checkout_latest()
+        if not _schemas_have_same_fields(_table_schema(fresh_table), expected_schema):
+            raise RuntimeError(f"LanceDB schema validation failed for table {self.table_name!r}")
+        final_rows = int(fresh_table.count_rows())
+        if final_rows != expected_rows:
+            raise RuntimeError(
+                f"LanceDB row-count validation failed for table {self.table_name!r}: "
+                f"expected {expected_rows}, got {final_rows}."
+            )
+        if self.build_index:
+            vector_index_expected = not self.sparse and not (_is_ivf_vector_index(self.index_type) and final_rows < 2)
+            _validate_index_coverage(
+                fresh_table,
+                rows=final_rows,
+                vector_index_expected=vector_index_expected,
+                text_index_expected=self.sparse or self.hybrid,
+            )
+
+        final_version = int(fresh_table.version)
+        if final_version < data_version:
+            raise RuntimeError(
+                f"LanceDB version validation failed for table {self.table_name!r}: "
+                f"data_version={data_version}, final_version={final_version}."
+            )
+        if markers is not None:
+            markers.mark_success(
+                fresh_table,
+                version=final_version,
+                rows=stats.rows_written,
+                digest=stats.digest,
+            )
+        self._remember_table(self.table_name, fresh_table)
+
+    def _durable_stream_schema(
+        self,
+        *,
+        existing_table: Any | None,
+        base_schema: pa.Schema,
+        operation_id: str,
+        mode: str,
+    ) -> tuple[pa.Schema, str, bool]:
+        """Bind a caller-owned operation ID to the requested table result."""
+
+        request_fingerprint = self._stream_request_fingerprint(base_schema, mode=mode)
+        recovered_create = bool(
+            existing_table is not None
+            and _matches_create_identity(
+                existing_table,
+                operation_id=operation_id,
+                request_fingerprint=request_fingerprint,
+            )
+        )
+        if existing_table is not None and not recovered_create and not _bounded_create_is_finalized(existing_table):
+            raise VdbWriteNotFinalized(
+                f"LanceDB table {self.table_name!r} has an unfinished create operation; "
+                "retry the original operation with its original stream_operation_id before starting another write."
+            )
+        schema = (
+            _with_create_identity(
+                base_schema,
+                operation_id=operation_id,
+                request_fingerprint=request_fingerprint,
+            )
+            if existing_table is None
+            else base_schema
+        )
+        return schema, request_fingerprint, recovered_create
+
+    def _prepare_durable_stream_recovery(
+        self,
+        *,
+        existing_table: Any | None,
+        operation_id: str,
+        request_fingerprint: str,
+        mode: str,
+        recovered_create: bool,
+        arrow_batches: Iterator[pa.RecordBatch],
+        base_schema: pa.Schema,
+        stats: _StreamStats,
+    ) -> SinkOperationMarkers | None:
+        """Prepare or resume the explicit durable-retry state machine."""
+
+        markers = SinkOperationMarkers.prepare(
+            existing_table,
+            operation_id=operation_id,
+            request_fingerprint=request_fingerprint,
+            mode=mode,
+        )
+        if recovered_create or markers.state in {"data", "success"}:
+            try:
+                for _ in arrow_batches:
+                    pass
+            except (OSError, RuntimeError, TypeError, ValueError, pa.ArrowException):
+                if markers.state == "write":
+                    markers.abort_if_unchanged(existing_table)
+                raise
+
+        if recovered_create and markers.state == "write":
+            stored_rows, stored_digest = _table_content_identity(existing_table, base_schema)
+            if stored_rows != stats.rows_written or stored_digest != stats.digest:
+                raise VdbOperationConflict(
+                    f"VDB sink operation_id {operation_id!r} found a created table with different stored content."
+                )
+            existing_table.checkout_latest()
+            markers.mark_data(
+                existing_table,
+                version=int(existing_table.version),
+                rows=stats.rows_written,
+                digest=stats.digest,
+            )
+        elif markers.state in {"data", "success"}:
+            markers.verify_input(rows=stats.rows_written, digest=stats.digest)
+
+        if markers.state != "success":
+            return markers
+
+        markers.cleanup_after_success(existing_table)
+        _assert_lancedb_table_ready(existing_table)
+        self._remember_table(self.table_name, existing_table)
+        return None
+
+    def _write_stream_records(self, records: Iterable[dict[str, Any]], *, operation_id: str | None) -> None:
+        """Consume canonical NRL records through one coordinated LanceDB mutation."""
+
+        stats = _StreamStats(vector_dim=self.vector_dim)
+        with self._write_lock:
+            db = lancedb.connect(uri=self.uri)
+            try:
+                existing_table = db.open_table(self.table_name)
+            except ValueError as exc:
+                if not _is_missing_lancedb_table_error(exc):
+                    raise
+                existing_table = None
+            table_exists = existing_table is not None
+            base_version: int | None = None
+            base_rows = 0
+            if existing_table is not None:
+                existing_table.checkout_latest()
+                base_version = int(existing_table.version)
+                if not self.overwrite:
+                    base_rows = int(existing_table.count_rows())
+                if operation_id is None:
+                    _assert_lancedb_table_ready(existing_table)
+
+            if stats.vector_dim is None and existing_table is not None and not self.overwrite and not self.sparse:
+                stats.vector_dim = _schema_vector_dim(_table_schema(existing_table))
+
+            canonical_rows = self._iter_stream_rows(records, stats)
+            missing = object()
+            first_canonical_row = next(canonical_rows, missing)
+            if first_canonical_row is missing:
+                if stats.client_records == 0:
+                    if operation_id is not None:
+                        _reject_empty_operation_bypass(existing_table, operation_id=operation_id)
+                    if existing_table is not None:
+                        self._remember_table(self.table_name, existing_table)
+                    return
+
+            canonical_row_stream = chain(
+                () if first_canonical_row is missing else (first_canonical_row,),
+                canonical_rows,
+            )
+            if stats.vector_dim is None and not self.sparse:
+                stats.vector_dim, canonical_row_stream = _infer_vector_dim_with_spooled_prefix(
+                    canonical_row_stream,
+                    validate_vector_length=self.validate_vector_length,
+                    on_bad_vectors=self.on_bad_vectors,
+                )
+
+            policy_rows = _apply_deferred_bad_vector_policy(
+                canonical_row_stream,
+                vector_dim=int(stats.vector_dim or 0),
+                sparse=self.sparse,
+                on_bad_vectors=self.on_bad_vectors,
+                fill_value=self.fill_value,
+            )
+
+            base_schema = self._stream_schema(stats.vector_dim)
+            mode = "overwrite" if self.overwrite else "append"
+            if operation_id is None:
+                schema = base_schema
+                request_fingerprint = None
+                recovered_create = False
+            else:
+                schema, request_fingerprint, recovered_create = self._durable_stream_schema(
+                    existing_table=existing_table,
+                    base_schema=base_schema,
+                    operation_id=operation_id,
+                    mode=mode,
+                )
+
+            expected_schema = base_schema
+            if existing_table is not None and not self.overwrite:
+                _validate_append_schema(existing_table, schema, table_name=self.table_name, uri=self.uri)
+                _validate_append_embedding_model(
+                    existing_table,
+                    self.embedding_model_name,
+                    self.embedding_model_revision,
+                    table_name=self.table_name,
+                    uri=self.uri,
+                )
+                expected_schema = _table_schema(existing_table)
+
+            arrow_batches = _checked_batches(
+                policy_rows,
+                schema=schema,
+                max_batch_bytes=self.stream_batch_bytes,
+                stats=stats,
+                include_digest=operation_id is not None,
+            )
+            first_batch = next(arrow_batches, None)
+            if operation_id is None:
+                markers = None
+                mutation_base_version = base_version
+            else:
+                markers = self._prepare_durable_stream_recovery(
+                    existing_table=existing_table,
+                    operation_id=operation_id,
+                    request_fingerprint=request_fingerprint,
+                    mode=mode,
+                    recovered_create=recovered_create,
+                    arrow_batches=arrow_batches,
+                    base_schema=base_schema,
+                    stats=stats,
+                )
+                if markers is None:
+                    return
+                mutation_base_version = markers.base_version
+
+            initial_batches = (
+                (pa.RecordBatch.from_pylist([], schema=schema),) if first_batch is None else (first_batch,)
+            )
+
+            data_version = self._mutate_stream_data(
+                db=db,
+                existing_table=existing_table,
+                markers=markers,
+                mode=mode,
+                base_version=mutation_base_version,
+                schema=schema,
+                batches=chain(initial_batches, arrow_batches),
+                stats=stats,
+            )
+            created_from_absent = not table_exists or recovered_create
+            if self.overwrite or created_from_absent:
+                expected_rows = stats.rows_written
+            else:
+                append_base_rows = (
+                    base_rows if markers is None else _rows_at_version(self.uri, self.table_name, mutation_base_version)
+                )
+                expected_rows = append_base_rows + stats.rows_written
+            try:
+                self._finalize_stream_write(
+                    markers=markers,
+                    data_version=data_version,
+                    expected_schema=expected_schema,
+                    expected_rows=expected_rows,
+                    stats=stats,
+                )
+            except (OSError, RuntimeError, ValueError, pa.ArrowException) as exc:
+                raise DataCommittedFinalizationError(
+                    self.table_name,
+                    data_version,
+                    retry_operation_id=operation_id,
+                ) from exc
+
+    def stream_ingest(self, records: Iterable[dict[str, Any]]) -> None:
         """Ingest canonical records through one bounded LanceDB lifecycle.
 
         Parameters
@@ -1347,8 +1847,6 @@ class LanceDB(VDB):
         records
             A single-pass iterable of canonical NeMo Retriever record
             dictionaries. It is consumed synchronously and to exhaustion.
-        **kwargs
-            Reserved for interface compatibility. Any supplied key is rejected.
 
         Returns
         -------
@@ -1358,47 +1856,21 @@ class LanceDB(VDB):
         ------
         UnsupportedVDBOperation
             If the LanceDB URI is not backed by the local filesystem.
-        TypeError
-            If an unsupported keyword setting is supplied.
+        CommitOutcomeUnknown
+            If LanceDB may have committed an append but did not acknowledge it.
+        DataCommittedFinalizationError
+            If data committed but validation, indexing, or optimization failed.
         ValueError
             If records or configured streaming controls are invalid.
         RuntimeError
             If mutation, recovery, validation, indexing, or optimization fails.
         """
 
-        if kwargs:
-            unsupported = ", ".join(sorted(kwargs))
-            raise TypeError(f"Unsupported LanceDB stream_ingest setting(s): {unsupported}")
-        if not _is_filesystem_lancedb_uri(self.uri):
-            raise UnsupportedVDBOperation(
-                "LanceDB.stream_ingest() requires a filesystem-backed URI so writers can share "
-                "a crash-released table lock. Non-filesystem URIs retain the legacy global-batch path."
-            )
+        if not self.supports_stream_ingest:
+            raise UnsupportedVDBOperation("LanceDB.stream_ingest() is unavailable; use the legacy global-batch path.")
 
-        from nemo_retriever.common.vdb.sink import write_lancedb_records
-
-        with self._stream_lock:
-            with FileLock(_stream_lock_path(self.uri, self.table_name)):
-                generated_operation_id = self.stream_operation_id is None
-                if generated_operation_id and self._pending_stream_operation_id is None:
-                    self._pending_stream_operation_id = str(uuid.uuid4())
-                operation_id = self.stream_operation_id or self._pending_stream_operation_id
-                assert operation_id is not None
-
-                try:
-                    write_lancedb_records(
-                        self,
-                        records,
-                        operation_id=operation_id,
-                        max_batch_bytes=self.stream_batch_bytes,
-                        optimize=self.stream_optimize,
-                    )
-                except Exception as exc:
-                    exc.add_note(f"LanceDB stream operation_id: {operation_id}")
-                    raise
-                else:
-                    if generated_operation_id:
-                        self._pending_stream_operation_id = None
+        with self._stream_lock, FileLock(_stream_lock_path(self.uri, self.table_name)):
+            self._write_stream_records(records, operation_id=self.stream_operation_id)
 
     def _reject_stream_controls_for_legacy_operation(self, operation: str) -> None:
         active_controls = []
@@ -1408,20 +1880,15 @@ class LanceDB(VDB):
             active_controls.append("stream_optimize=True")
         if self.stream_operation_id is not None:
             active_controls.append("stream_operation_id")
-        if self._pending_stream_operation_id is not None:
-            active_controls.append("pending stream recovery")
         if active_controls:
             controls = ", ".join(active_controls)
             raise ValueError(
                 f"LanceDB.{operation}() cannot use {controls}; these controls require "
-                "LanceDB.stream_ingest() through the streaming-ingest path. Retry any pending stream "
-                "through that path before using legacy mutations."
+                "LanceDB.stream_ingest() through the streaming-ingest path."
             )
 
     def _assert_legacy_table_ready(self, table_name: str) -> None:
         """Refresh and reject a target with durable unfinished stream state."""
-
-        from nemo_retriever.common.vdb.sink import assert_lancedb_table_ready
 
         try:
             table = self._connect().open_table(table_name)
@@ -1429,7 +1896,7 @@ class LanceDB(VDB):
             if _is_missing_lancedb_table_error(exc):
                 return
             raise
-        assert_lancedb_table_ready(table)
+        _assert_lancedb_table_ready(table)
         self._remember_table(table_name, table)
 
     def run(self, records):
@@ -1669,9 +2136,7 @@ class LanceDB(VDB):
 
         table = self._open_table(table_name, uri=table_path)
         self._checkout_latest(table)
-        from nemo_retriever.common.vdb.sink import assert_lancedb_table_ready
-
-        assert_lancedb_table_ready(table)
+        _assert_lancedb_table_ready(table)
 
         search_results = []
         for query_text in query_texts:
@@ -1767,9 +2232,7 @@ class LanceDB(VDB):
 
         table = self._open_table(table_name, uri=table_path)
         self._checkout_latest(table)
-        from nemo_retriever.common.vdb.sink import assert_lancedb_table_ready
-
-        assert_lancedb_table_ready(table)
+        _assert_lancedb_table_ready(table)
 
         if hybrid:
             vectors_for_search = list(vectors)

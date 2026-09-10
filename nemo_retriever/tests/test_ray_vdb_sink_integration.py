@@ -7,10 +7,8 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
 from typing import Any
 
-import pandas as pd
 import pyarrow as pa
 import pytest
 
@@ -77,21 +75,10 @@ def _source_table(block_id: int) -> pa.Table:
     )
 
 
-def _observe_lance_batches(data: Any, *, pulled_rows: list[int]) -> Iterable[pa.RecordBatch]:
-    """Observe the real RecordBatch stream without replacing LanceDB mutation."""
-
-    assert not isinstance(data, (list, tuple, pd.DataFrame, pa.Table))
-    for batch in data:
-        assert isinstance(batch, pa.RecordBatch)
-        pulled_rows.append(batch.num_rows)
-        yield batch
-
-
 @pytest.mark.integration
 def test_ray_streams_three_blocks_into_real_lancedb_and_preserves_contract(tmp_path, monkeypatch) -> None:
     """Streaming ingest avoids the global sink barrier and executes in order once."""
 
-    assert ray.__version__ == "2.56.1"
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.setenv("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
 
@@ -153,7 +140,6 @@ def test_ray_streams_three_blocks_into_real_lancedb_and_preserves_contract(tmp_p
                     "overwrite": True,
                     "build_index": False,
                     "stream_batch_bytes": 512,
-                    "stream_operation_id": "ray-three-blocks",
                 },
             )
             >> RequireFinalizedWrite()
@@ -174,62 +160,19 @@ def test_ray_streams_three_blocks_into_real_lancedb_and_preserves_contract(tmp_p
 
         monkeypatch.setattr(ray.data.Dataset, "repartition", reject_global_repartition)
 
-        original_iter_batches = ray.data.Dataset.iter_batches
-        prefetch_calls: list[int | None] = []
-        iterator_closed = False
-
-        class ClosingIterator:
-            def __init__(self, inner) -> None:
-                self._inner = iter(inner)
-
-            def __iter__(self):
-                return self
-
-            def __next__(self):
-                return next(self._inner)
-
-            def close(self) -> None:
-                nonlocal iterator_closed
-                iterator_closed = True
-                close = getattr(self._inner, "close", None)
-                if callable(close):
-                    close()
-
-        def observe_first_iter_batches(self, *args, **kwargs):
-            iterator = original_iter_batches(self, *args, **kwargs)
-            if not prefetch_calls:
-                prefetch_calls.append(kwargs.get("prefetch_batches"))
-                return ClosingIterator(iterator)
-            return iterator
-
-        monkeypatch.setattr(ray.data.Dataset, "iter_batches", observe_first_iter_batches)
-
-        connection_type = type(lancedb.connect(str(tmp_path)))
-        original_create_table = connection_type.create_table
-        pulled_rows: list[int] = []
-
-        def observed_create_table(self, name, data=None, *args, **kwargs):
-            if name == "chunks" and data is not None:
-                data = _observe_lance_batches(data, pulled_rows=pulled_rows)
-            return original_create_table(self, name, data, *args, **kwargs)
-
-        monkeypatch.setattr(connection_type, "create_table", observed_create_table)
-
         result = executor.ingest(dataset)
 
         assert Counter(ray.get(completed.completed_blocks.remote())) == Counter({0: 1, 1: 1, 2: 1})
-        assert prefetch_calls == [1]
-        assert iterator_closed is True
-        assert sum(pulled_rows) == 6
 
-        result = result.sort_values("page_number", ignore_index=True)
         assert result["page_number"].tolist() == list(range(6))
         assert result["text"].tolist() == [f"chunk-{row_id}" for row_id in range(6)]
         assert result["result_only"].tolist() == [f"not-stored-{row_id}" for row_id in range(6)]
         assert result["after_sink"].tolist() == [True] * 6
 
-        stored = lancedb.connect(str(tmp_path)).open_table("chunks").to_arrow().sort_by("id")
+        stored_table = lancedb.connect(str(tmp_path)).open_table("chunks")
+        stored = stored_table.to_arrow().sort_by("id")
         assert stored.column_names == ["vector", "text", "metadata", "source", "id"]
         assert stored.column("id").to_pylist() == [f"row-{row_id}" for row_id in range(6)]
+        assert not [name for name in stored_table.tags.list() if name.startswith("nemo_sink_")]
     finally:
         ray.shutdown()

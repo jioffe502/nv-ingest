@@ -15,11 +15,17 @@ import pytest
 
 lancedb = pytest.importorskip("lancedb", minversion="0.34.0")
 
+from nemo_retriever.common.vdb._lancedb_stream import (
+    DataCommittedFinalizationError,
+    OversizedVdbRowError,
+    VdbWriteNotFinalized,
+)
+from nemo_retriever.common.vdb._lancedb_stream_state import (
+    CommitOutcomeUnknown,
+    VdbOperationConflict,
+)
 from nemo_retriever.common.vdb.adt_vdb import UnsupportedVDBOperation
 from nemo_retriever.common.vdb.lancedb import LanceDB
-from nemo_retriever.common.vdb.sink import OversizedVdbRowError, VdbWriteNotFinalized
-from nemo_retriever.common.vdb.sink_operation import CommitOutcomeUnknown, VdbOperationConflict
-from nemo_retriever.operators.vdb import IngestVdbOperator
 
 
 def _record(
@@ -120,7 +126,6 @@ def _backend(uri: Path, **overrides: Any) -> LanceDB:
         "vector_dim": 2,
         "overwrite": True,
         "build_index": False,
-        "stream_batch_bytes": 256 << 20,
     }
     kwargs.update(overrides)
     return LanceDB(**kwargs)
@@ -159,7 +164,6 @@ def test_stream_ingest_is_lazy_and_byte_bounded_with_legacy_query_parity(
     streaming = _backend(
         tmp_path / "streaming",
         stream_batch_bytes=1024,
-        stream_operation_id="indexed-overwrite",
         **common,
     )
     records = _records(0, 16, padding=200)
@@ -167,7 +171,6 @@ def test_stream_ingest_is_lazy_and_byte_bounded_with_legacy_query_parity(
 
     pulls: list[int] = []
     observed_batch_bytes: list[int] = []
-    finalized_row_counts: list[int] = []
 
     connection_type = type(lancedb.connect(str(tmp_path / "streaming")))
     original_create_table = connection_type.create_table
@@ -185,16 +188,9 @@ def test_stream_ingest_is_lazy_and_byte_bounded_with_legacy_query_parity(
                     yield batch
 
             data = pa.RecordBatchReader.from_batches(original_reader.schema, observed_batches())
-        return original_create_table(self, name, data=data, *args, **kwargs)
+        return original_create_table(self, name, *args, data=data, **kwargs)
 
     monkeypatch.setattr(connection_type, "create_table", observed_create_table)
-    original_maintain_indexes = streaming._maintain_indexes
-
-    def observe_finalization(records, table):
-        finalized_row_counts.append(int(table.count_rows()))
-        return original_maintain_indexes(records, table)
-
-    monkeypatch.setattr(streaming, "_maintain_indexes", observe_finalization)
 
     def record_stream() -> Iterator[dict[str, Any]]:
         for row_index, record in enumerate(records):
@@ -206,7 +202,6 @@ def test_stream_ingest_is_lazy_and_byte_bounded_with_legacy_query_parity(
     assert pulls == list(range(len(records)))
     assert len(observed_batch_bytes) > 1
     assert max(observed_batch_bytes) <= 1024
-    assert finalized_row_counts == [len(records)]
 
     legacy_table = _table(tmp_path / "legacy")
     streaming_table = _table(tmp_path / "streaming")
@@ -258,6 +253,28 @@ def test_stream_controls_are_rejected_by_legacy_mutations(tmp_path: Path, contro
         backend.put([])
 
 
+def test_stream_optimize_runs_after_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _backend(tmp_path, stream_operation_id="seed").stream_ingest([_record(0)])
+    table_type = type(_table(tmp_path))
+    original_optimize = table_type.optimize
+    optimized_row_counts: list[int] = []
+
+    def observed_optimize(table, *args, **kwargs):
+        optimized_row_counts.append(int(table.count_rows()))
+        return original_optimize(table, *args, **kwargs)
+
+    monkeypatch.setattr(table_type, "optimize", observed_optimize)
+    _backend(
+        tmp_path,
+        overwrite=False,
+        stream_optimize=True,
+        stream_operation_id="optimized-append",
+    ).stream_ingest([_record(1)])
+
+    assert optimized_row_counts == [2]
+    assert _table(tmp_path).count_rows() == 2
+
+
 def test_stream_refreshes_cached_table_for_legacy_mutations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -292,6 +309,7 @@ def test_stream_refreshes_cached_table_for_legacy_mutations(
     [
         pytest.param("drop", [1.0], [], id="drop-wrong-width"),
         pytest.param("fill", [1.0], [[-3.5, -3.5]], id="fill-wrong-width"),
+        pytest.param("fill", ["not-a-number"], [[-3.5, -3.5]], id="fill-wrong-width-nonnumeric"),
         pytest.param("fill", [1.0, float("nan")], [[-3.5, -3.5]], id="fill-nan"),
         pytest.param("null", [1.0], [None], id="null-wrong-width"),
     ],
@@ -299,7 +317,7 @@ def test_stream_refreshes_cached_table_for_legacy_mutations(
 def test_bad_vector_policies_match_legacy(
     tmp_path: Path,
     policy: str,
-    embedding: list[float],
+    embedding: list[Any],
     expected_vectors: list[list[float] | None],
 ) -> None:
     common = {
@@ -320,6 +338,20 @@ def test_bad_vector_policies_match_legacy(
     legacy_vectors = _table(tmp_path / "legacy").to_arrow()["vector"].to_pylist()
     streaming_vectors = _table(tmp_path / "streaming").to_arrow()["vector"].to_pylist()
     assert streaming_vectors == legacy_vectors == expected_vectors
+
+
+@pytest.mark.parametrize(
+    ("embedding", "message"),
+    [
+        pytest.param([1.0], "expected dimension 2", id="wrong-width"),
+        pytest.param([1.0, float("nan")], "contains NaN", id="nan"),
+    ],
+)
+def test_bad_vector_error_is_adapter_owned(tmp_path: Path, embedding: list[float], message: str) -> None:
+    backend = _backend(tmp_path, validate_vector_length=False, on_bad_vectors="error")
+
+    with pytest.raises(ValueError, match=message):
+        backend.stream_ingest([_record(0, embedding=embedding)])
 
 
 def test_deferred_dimension_inference_after_invalid_prefix_matches_legacy(tmp_path: Path) -> None:
@@ -398,21 +430,26 @@ def _fail_after_first_arrow_batch() -> Iterator[dict[str, Any]]:
     raise RuntimeError("injected source failure")
 
 
-@pytest.mark.parametrize("overwrite", [True, False], ids=["overwrite", "append"])
-def test_midstream_failure_preserves_target_and_retry_is_exactly_once(
+@pytest.mark.parametrize(
+    ("overwrite", "operation_id"),
+    [
+        pytest.param(False, None, id="default-append"),
+        pytest.param(False, "durable-append", id="durable-append"),
+        pytest.param(True, "durable-overwrite", id="durable-overwrite"),
+    ],
+)
+def test_midstream_precommit_failure_preserves_target_and_is_retryable(
     tmp_path: Path,
     overwrite: bool,
+    operation_id: str | None,
 ) -> None:
-    _backend(
-        tmp_path,
-        stream_operation_id="seed",
-    ).stream_ingest(_records(0, 2))
+    _backend(tmp_path).stream_ingest(_records(0, 2))
     before = _state(tmp_path)
     backend = _backend(
         tmp_path,
         overwrite=overwrite,
         stream_batch_bytes=512,
-        stream_operation_id=f"write-{overwrite}",
+        stream_operation_id=operation_id,
     )
 
     with pytest.raises(RuntimeError, match="injected source failure"):
@@ -438,80 +475,107 @@ def test_acknowledged_append_retry_is_a_noop_and_changed_content_conflicts(tmp_p
     backend = _backend(
         tmp_path,
         overwrite=False,
+        stream_batch_bytes=512,
         stream_operation_id="append-10-14",
     )
-    backend.stream_ingest(_records(10, 14))
+    records = _records(10, 14, padding=64)
+    backend.stream_ingest(records)
     after_first = _state(tmp_path)
+    success_tags = sorted(name for name in _table(tmp_path).tags.list() if name.startswith("nemo_sink_success_"))
+    assert len(success_tags) == 2
 
-    backend.stream_ingest(iter(_records(10, 14)))
+    retry_backend = _backend(
+        tmp_path,
+        overwrite=False,
+        stream_batch_bytes=2048,
+        stream_operation_id="append-10-14",
+    )
+    retry_backend.stream_ingest(iter(records))
+    assert _state(tmp_path) == after_first
+    assert (
+        sorted(name for name in _table(tmp_path).tags.list() if name.startswith("nemo_sink_success_")) == success_tags
+    )
+
+    with pytest.raises(VdbOperationConflict, match="different stored content"):
+        retry_backend.stream_ingest(_records(10, 14, text_prefix="changed", padding=64))
     assert _state(tmp_path) == after_first
 
-    with pytest.raises(VdbOperationConflict, match="different canonical content"):
-        backend.stream_ingest(_records(10, 14, text_prefix="changed"))
-    assert _state(tmp_path) == after_first
 
-
-def test_default_operation_id_recovers_finalization_and_clears_after_success(
+def test_default_finalization_failure_reports_committed_version_without_durable_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _backend(
-        tmp_path,
-        stream_operation_id="seed",
-    ).stream_ingest(_records(0, 2))
+    _backend(tmp_path).stream_ingest(_records(0, 2))
     backend = _backend(
         tmp_path,
         overwrite=False,
         build_index=True,
         index_type="IVF_FLAT",
         num_partitions=2,
+        stream_batch_bytes=512,
     )
-    original_write_to_index = backend.write_to_index
+    retry_records = _records(10, 14, padding=64)
 
     def fail_index(*args, **kwargs):
         raise RuntimeError("injected index failure")
 
     monkeypatch.setattr(backend, "write_to_index", fail_index)
-    with pytest.raises(RuntimeError, match="injected index failure") as failure:
-        backend.stream_ingest(_records(10, 14))
-    assert any("LanceDB stream operation_id:" in note for note in failure.value.__notes__)
-    with pytest.raises(ValueError, match="pending stream recovery"):
-        backend.run([])
-    with pytest.raises(ValueError, match="pending stream recovery"):
-        backend.put([])
+    with pytest.raises(DataCommittedFinalizationError, match="Do not replay these records") as failure:
+        backend.stream_ingest(retry_records)
+    committed_ids = [
+        "row-0",
+        "row-1",
+        "row-10",
+        "row-11",
+        "row-12",
+        "row-13",
+    ]
+    assert failure.value.data_version == _table(tmp_path).version
+    assert _state(tmp_path)[0] == committed_ids
+    assert not [name for name in _table(tmp_path).tags.list() if name.startswith("nemo_sink_")]
 
     reconstructed = _backend(tmp_path, overwrite=False)
-    with pytest.raises(VdbWriteNotFinalized, match="original stream_operation_id"):
-        reconstructed.run([])
-    with pytest.raises(VdbWriteNotFinalized, match="original stream_operation_id"):
-        reconstructed.put([])
+    assert reconstructed.retrieval([[0.0, 1.0]], top_k=10)
+    reconstructed.stream_ingest(_records(20, 22))
+    assert _state(tmp_path)[0] == committed_ids + ["row-20", "row-21"]
 
-    assert _state(tmp_path)[0] == [
-        "row-0",
-        "row-1",
-        "row-10",
-        "row-11",
-        "row-12",
-        "row-13",
-    ]
+
+def test_explicit_operation_id_resumes_finalization_after_reconstruction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _backend(tmp_path).stream_ingest(_records(0, 2))
+    records = _records(10, 14, padding=64)
+    backend = _backend(
+        tmp_path,
+        overwrite=False,
+        build_index=True,
+        index_type="IVF_FLAT",
+        num_partitions=2,
+        stream_batch_bytes=512,
+        stream_operation_id="durable-finalization",
+    )
+
+    def fail_index(*args, **kwargs):
+        raise RuntimeError("injected index failure")
+
+    monkeypatch.setattr(backend, "write_to_index", fail_index)
+    with pytest.raises(DataCommittedFinalizationError, match="durable-finalization") as failure:
+        backend.stream_ingest(records)
+    assert failure.value.data_version == _table(tmp_path).version
     with pytest.raises(VdbWriteNotFinalized, match="not finalized"):
         backend.retrieval([[0.0, 1.0]], top_k=10)
-    with pytest.raises(VdbOperationConflict, match="unfinished bounded-sink operation"):
-        _backend(
-            tmp_path,
-            overwrite=False,
-            stream_operation_id="different-append",
-        ).stream_ingest(_records(20, 22))
 
-    monkeypatch.setattr(backend, "write_to_index", original_write_to_index)
-    table_type = type(_table(tmp_path))
-    original_add = table_type.add
-
-    def unexpected_add(*args, **kwargs):
-        pytest.fail("retry re-added rows after the data mutation was acknowledged")
-
-    monkeypatch.setattr(table_type, "add", unexpected_add)
-    backend.stream_ingest(iter(_records(10, 14)))
+    reconstructed = _backend(
+        tmp_path,
+        overwrite=False,
+        build_index=True,
+        index_type="IVF_FLAT",
+        num_partitions=2,
+        stream_batch_bytes=2048,
+        stream_operation_id="durable-finalization",
+    )
+    reconstructed.stream_ingest(iter(records))
 
     assert _state(tmp_path)[0] == [
         "row-0",
@@ -521,11 +585,10 @@ def test_default_operation_id_recovers_finalization_and_clears_after_success(
         "row-12",
         "row-13",
     ]
-    assert backend.retrieval([[0.0, 1.0]], top_k=10)
-
-    monkeypatch.setattr(table_type, "add", original_add)
-    backend.stream_ingest(_records(20, 22))
-    assert _state(tmp_path)[0][-2:] == ["row-20", "row-21"]
+    assert reconstructed.retrieval([[0.0, 1.0]], top_k=10)
+    tags = _table(tmp_path).tags.list()
+    assert len([name for name in tags if name.startswith("nemo_sink_success_")]) == 1
+    assert not [name for name in tags if name.startswith(("nemo_sink_pending_", "nemo_sink_data_"))]
 
 
 def test_same_operation_is_exactly_once_across_concurrent_backend_instances(
@@ -592,7 +655,7 @@ def test_same_operation_is_exactly_once_across_concurrent_backend_instances(
 )
 def test_nonfilesystem_lancedb_retains_fallback_without_consuming_stream(uri: str) -> None:
     backend = LanceDB(uri=uri, table_name="chunks")
-    assert not IngestVdbOperator(vdb=backend).supports_stream_ingest()
+    assert not backend.supports_stream_ingest
     pulled = False
 
     def records() -> Iterator[dict[str, Any]]:
@@ -600,15 +663,9 @@ def test_nonfilesystem_lancedb_retains_fallback_without_consuming_stream(uri: st
         pulled = True
         yield _record(0)
 
-    with pytest.raises(UnsupportedVDBOperation, match="not supported by this VDB backend"):
+    with pytest.raises(UnsupportedVDBOperation, match="unavailable"):
         backend.stream_ingest(records())
     assert not pulled
-
-    class RemoteCapableLanceDB(LanceDB):
-        def stream_ingest(self, records: Iterator[dict[str, Any]], **kwargs: Any) -> None:
-            list(records)
-
-    assert IngestVdbOperator(vdb=RemoteCapableLanceDB(uri=uri, table_name="chunks")).supports_stream_ingest()
 
 
 def test_file_uri_uses_the_bounded_streaming_path(tmp_path: Path) -> None:
@@ -621,7 +678,9 @@ def test_file_uri_uses_the_bounded_streaming_path(tmp_path: Path) -> None:
         stream_operation_id="file-uri",
     )
 
-    assert IngestVdbOperator(vdb=backend).supports_stream_ingest()
+    assert backend.supports_stream_ingest
+    service_backend = LanceDB(uri=uri, table_name="service", _service_table_schema=True)
+    assert not service_backend.supports_stream_ingest
     backend.stream_ingest(_records(0, 2))
     assert sorted(lancedb.connect(uri).open_table("chunks").to_arrow().column("id").to_pylist()) == [
         "row-0",
@@ -651,11 +710,101 @@ def test_lost_append_commit_acknowledgement_fails_closed(
         original_create(self, tag, version)
 
     monkeypatch.setattr(tags_type, "create", fail_data_marker)
-    with pytest.raises(RuntimeError, match="injected lost acknowledgement"):
+    with pytest.raises(DataCommittedFinalizationError, match="delete pending Lance tag") as failure:
         backend.stream_ingest(_records(10, 14))
+    assert failure.value.data_version == _table(tmp_path).version
+    assert "nemo_sink_pending_" in str(failure.value)
     after_commit = _state(tmp_path)
     monkeypatch.setattr(tags_type, "create", original_create)
 
-    with pytest.raises(CommitOutcomeUnknown, match="refusing to replay append"):
+    with pytest.raises(CommitOutcomeUnknown, match="Do not replay these records"):
         backend.stream_ingest(_records(10, 14))
     assert _state(tmp_path) == after_commit
+
+
+def test_explicit_overwrite_retries_after_data_marker_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _backend(tmp_path).stream_ingest(_records(0, 2))
+    backend = _backend(
+        tmp_path,
+        overwrite=True,
+        stream_operation_id="overwrite-marker-failure",
+    )
+    tags_type = type(_table(tmp_path).tags)
+    original_create = tags_type.create
+
+    def fail_data_marker(self, tag: str, version: int) -> None:
+        if tag.startswith("nemo_sink_data_"):
+            raise RuntimeError("injected data marker failure")
+        original_create(self, tag, version)
+
+    monkeypatch.setattr(tags_type, "create", fail_data_marker)
+    with pytest.raises(
+        DataCommittedFinalizationError,
+        match="Retry with stream_operation_id='overwrite-marker-failure'",
+    ):
+        backend.stream_ingest(_records(10, 14))
+    monkeypatch.setattr(tags_type, "create", original_create)
+
+    reconstructed = _backend(
+        tmp_path,
+        overwrite=True,
+        stream_operation_id="overwrite-marker-failure",
+    )
+    reconstructed.stream_ingest(_records(10, 14))
+
+    assert _state(tmp_path)[0] == ["row-10", "row-11", "row-12", "row-13"]
+    tags = _table(tmp_path).tags.list()
+    assert len([name for name in tags if name.startswith("nemo_sink_success_")]) == 1
+    assert not [name for name in tags if name.startswith(("nemo_sink_pending_", "nemo_sink_data_"))]
+
+
+def test_default_lost_append_acknowledgement_fails_closed_without_durable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _backend(tmp_path).stream_ingest(_records(0, 2))
+    backend = _backend(tmp_path, overwrite=False)
+    table_type = type(_table(tmp_path))
+    original_add = table_type.add
+
+    def add_then_lose_acknowledgement(self, *args, **kwargs):
+        original_add(self, *args, **kwargs)
+        raise RuntimeError("injected lost append acknowledgement")
+
+    monkeypatch.setattr(table_type, "add", add_then_lose_acknowledgement)
+    with pytest.raises(CommitOutcomeUnknown, match="Do not replay these records"):
+        backend.stream_ingest(_records(10, 14))
+
+    assert _state(tmp_path)[0] == [
+        "row-0",
+        "row-1",
+        "row-10",
+        "row-11",
+        "row-12",
+        "row-13",
+    ]
+    assert not [name for name in _table(tmp_path).tags.list() if name.startswith("nemo_sink_")]
+    assert _backend(tmp_path, overwrite=False).retrieval([[0.0, 1.0]], top_k=10)
+
+
+def test_default_lost_create_acknowledgement_fails_closed_without_durable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _backend(tmp_path, overwrite=False)
+    connection_type = type(lancedb.connect(str(tmp_path)))
+    original_create_table = connection_type.create_table
+
+    def create_then_lose_acknowledgement(self, *args, **kwargs):
+        original_create_table(self, *args, **kwargs)
+        raise RuntimeError("injected lost create acknowledgement")
+
+    monkeypatch.setattr(connection_type, "create_table", create_then_lose_acknowledgement)
+    with pytest.raises(CommitOutcomeUnknown, match="Do not replay these records"):
+        backend.stream_ingest(_records(0, 2))
+
+    assert _state(tmp_path)[0] == ["row-0", "row-1"]
+    assert not [name for name in _table(tmp_path).tags.list() if name.startswith("nemo_sink_")]
