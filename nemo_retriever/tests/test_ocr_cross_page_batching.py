@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 import pytest
 from PIL import Image
+from requests import ConnectionError, HTTPError, Response, Timeout
 
 from nemo_retriever.common.params import BatchTuningParams, ExtractParams, RemoteRetryParams
 from nemo_retriever.graph.ingestor_runtime import build_graph
@@ -160,7 +161,9 @@ class _FallbackIsolationNIMClient(_RecordingNIMClient):
         response = super().invoke_image_inference_batches(**kwargs)
         crop_ids = self.calls[-1]["crop_ids"]
         if len(crop_ids) > 1:
-            raise RuntimeError("force per-page fallback")
+            rejected = Response()
+            rejected.status_code = 400
+            raise HTTPError("invalid crop in combined request", response=rejected)
         if crop_ids[0] == self.failing_crop_id:
             raise ValueError(f"bad crop {self.failing_crop_id}")
         return response
@@ -336,9 +339,13 @@ def test_multi_type_forwards_ocr_batch_and_retry_settings(monkeypatch, ocr_batch
     )
     calls = []
 
+    class PassThrough:
+        def run(self, data):
+            return data
+
     def instantiate(cls, **kwargs):
         calls.append((cls, kwargs))
-        return type("PassThrough", (), {"run": lambda self, data: data})()
+        return PassThrough()
 
     monkeypatch.setattr(operator, "_instantiate_resolved", instantiate)
     operator._run_detection_pipeline(pd.DataFrame())
@@ -363,14 +370,19 @@ def test_remote_actor_bounds_pending_crops_and_preserves_empty_pages():
     assert [call["crop_ids"] for call in client.calls] == [[1, 1, 1, 2], [2, 2, 3, 3], [3, 4, 4, 4]]
 
 
-def test_remote_wrong_count_falls_back_without_losing_or_duplicating_regions():
-    class WrongCountClient(_RecordingNIMClient):
+def test_remote_failure_discards_earlier_windows_but_preserves_other_pages():
+    class LateFailureClient(_RecordingNIMClient):
         def invoke_image_inference_batches(self, **kwargs):
             response = super().invoke_image_inference_batches(**kwargs)
-            return response[:1] if len(response) > 2 else response
+            if len(self.calls) == 2:
+                rejected = Response()
+                rejected.status_code = 400
+                raise HTTPError("bad second crop", response=rejected)
+            return response
 
-    client = WrongCountClient()
-    actor = _remote_actor(client, inference_batch_size=2)
+    client = LateFailureClient()
+    actor = _remote_actor(client, inference_batch_size=1)
+    actor._remote_retry = RemoteRetryParams(remote_max_pool_workers=1)
     actor.ocr_kwargs.update(extract_tables=True, extract_infographics=True)
     bbox = [0.0, 0.0, 1.0, 1.0]
     pages = pd.DataFrame(
@@ -380,17 +392,27 @@ def test_remote_wrong_count_falls_back_without_losing_or_duplicating_regions():
         ]
     )
     result = actor(pages)
-    assert [call["crop_ids"] for call in client.calls] == [[11, 11, 22], [11, 11], [22]]
-    assert [len(items) for items in result.table] == [1, 0]
-    assert [len(items) for items in result.chart] == [1, 0]
+    assert [call["crop_ids"] for call in client.calls] == [[11], [11], [22]]
+    assert [len(items) for items in result.table] == [0, 0]
+    assert [len(items) for items in result.chart] == [0, 0]
     assert [len(items) for items in result.infographic] == [0, 1]
-    assert all(item["error"] is None for item in result.ocr)
+    assert result.iloc[0].ocr["error"]["type"] == "HTTPError"
+    assert result.iloc[0].ocr["num_detections"] == 0
+    assert result.iloc[1].ocr["error"] is None
 
 
 @pytest.fixture
 def remote_ocr_http_server():
     """Exercise the actual HTTP client, including auth, ordering, and pool bounds."""
-    state = {"active": 0, "peak": 0, "calls": [], "fail": False}
+    state = {
+        "active": 0,
+        "peak": 0,
+        "calls": [],
+        "bad_crop_status": 0,
+        "status": 200,
+        "truncate": False,
+        "barrier": False,
+    }
     lock = threading.Lock()
     both_started = threading.Event()
 
@@ -410,13 +432,17 @@ def remote_ocr_http_server():
                 state["peak"] = max(state["peak"], state["active"])
                 if state["active"] == 2:
                     both_started.set()
-            both_started.wait(timeout=5)
+            if state["barrier"]:
+                both_started.wait(timeout=5)
             time.sleep(0.08 if ids[0] == 11 else 0.01)
-            failed = state["fail"] and ids[0] == 22
-            body = json.dumps({"data": [{"text_detections": _ocr_prediction(i)} for i in ids]}).encode()
+            failed = state["bad_crop_status"] and 22 in ids
+            predictions = [{"text_detections": _ocr_prediction(i)} for i in ids]
+            if state["truncate"]:
+                predictions = predictions[:-1]
+            body = json.dumps({"data": predictions}).encode()
             with lock:
                 state["active"] -= 1
-            self.send_response(400 if failed else 200)
+            self.send_response(state["bad_crop_status"] if failed else state["status"])
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -436,6 +462,7 @@ def remote_ocr_http_server():
 @pytest.mark.parametrize("batch_size", [1, 2])
 def test_remote_http_overlap_auth_chunking_and_output_order(remote_ocr_http_server, batch_size):
     url, state = remote_ocr_http_server
+    state["barrier"] = True
     client = NIMClient(max_pool_workers=2)
     try:
         actor = _remote_actor(client, inference_batch_size=batch_size)
@@ -455,10 +482,11 @@ def test_remote_http_overlap_auth_chunking_and_output_order(remote_ocr_http_serv
 
 def test_remote_http_failure_drains_running_requests_before_return(remote_ocr_http_server):
     url, state = remote_ocr_http_server
-    state["fail"] = True
+    state["bad_crop_status"] = 400
+    state["barrier"] = True
     client = NIMClient(max_pool_workers=2)
     try:
-        with pytest.raises(Exception, match="HTTP 400"):
+        with pytest.raises(HTTPError, match="HTTP 400"):
             client.invoke_image_inference_batches(
                 invoke_url=url,
                 image_b64_list=[_page_png_b64(11), _page_png_b64(22)],
@@ -466,6 +494,113 @@ def test_remote_http_failure_drains_running_requests_before_return(remote_ocr_ht
                 max_retries=1,
             )
         assert state["active"] == 0
+    finally:
+        client.shutdown()
+
+
+@pytest.fixture
+def remote_http_actor(remote_ocr_http_server):
+    url, state = remote_ocr_http_server
+    actor = OCRCPUActor(
+        invoke_url=url,
+        extract_charts=True,
+        inference_batch_size=8,
+        remote_max_pool_workers=2,
+        remote_max_retries=1,
+        remote_max_429_retries=1,
+    )
+    bbox = [0.0, 0.0, 1.0, 1.0]
+    pages = pd.DataFrame([_page(str(i), i, [_detection(str(i), "chart", bbox)]) for i in (11, 22, 33, 44)])
+    try:
+        yield actor, state, pages
+    finally:
+        actor._nim_client.shutdown()
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500, 503])
+def test_remote_http_terminal_errors_do_not_retry_per_page(remote_http_actor, status):
+    actor, state, pages = remote_http_actor
+    state["status"] = status
+
+    result = actor(pages)
+
+    assert [ids for ids, _ in state["calls"]] == [[11, 22, 33, 44]]
+    assert all(not items for items in result.chart)
+    assert all(item["error"]["type"] == "HTTPError" for item in result.ocr)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_remote_http_retry_budget_is_not_restarted_by_page_fallback(remote_http_actor, monkeypatch, status):
+    actor, state, pages = remote_http_actor
+    state["status"] = status
+    actor._remote_retry = RemoteRetryParams(remote_max_pool_workers=2, remote_max_retries=2, remote_max_429_retries=2)
+    monkeypatch.setattr("nemo_retriever.models.nim.nim.time.sleep", lambda _: None)
+
+    result = actor(pages)
+
+    assert [ids for ids, _ in state["calls"]] == [[11, 22, 33, 44]] * 2
+    assert all(item["error"]["type"] == "HTTPError" for item in result.ocr)
+
+
+@pytest.mark.parametrize("error_type", [Timeout, ConnectionError])
+def test_remote_transport_errors_do_not_retry_per_page(remote_http_actor, monkeypatch, error_type):
+    actor, _, pages = remote_http_actor
+    calls = []
+
+    def fail_request(*args, **kwargs):
+        calls.append(kwargs["json"])
+        raise error_type("test transport failure")
+
+    monkeypatch.setattr("nemo_retriever.models.nim.nim.requests.post", fail_request)
+    result = actor(pages)
+
+    assert len(calls) == 1
+    assert all(not items for items in result.chart)
+    assert all(item["error"] is not None for item in result.ocr)
+
+
+def test_remote_wrong_response_count_is_reported_without_page_retries(remote_http_actor):
+    actor, state, pages = remote_http_actor
+    state["truncate"] = True
+
+    result = actor(pages)
+
+    assert len(state["calls"]) == 1
+    assert all(not items for items in result.chart)
+    assert all("response count mismatch" in item["error"]["message"] for item in result.ocr)
+
+
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_remote_input_rejection_isolates_bad_page(remote_http_actor, status):
+    actor, state, pages = remote_http_actor
+    state["bad_crop_status"] = status
+
+    result = actor(pages)
+
+    assert [ids for ids, _ in state["calls"]] == [[11, 22, 33, 44], [11], [22], [33], [44]]
+    assert [len(items) for items in result.chart] == [1, 0, 1, 1]
+    assert [item["error"] is None for item in result.ocr] == [True, False, True, True]
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_nim_client_does_not_drain_requests_on_interruption(monkeypatch, interrupt):
+    from nemo_retriever.models.nim import nim
+
+    def interrupted(_):
+        raise interrupt()
+
+    def unexpected_wait(_):
+        pytest.fail("Interruption must not wait for HTTP retry exhaustion")
+
+    monkeypatch.setattr(nim, "as_completed", interrupted)
+    monkeypatch.setattr(nim, "wait", unexpected_wait)
+    monkeypatch.setattr(nim, "_post_with_retries", lambda **_: {"data": [{}]})
+    client = NIMClient(max_pool_workers=1)
+    try:
+        with pytest.raises(interrupt):
+            client.invoke_image_inference_batches(
+                invoke_url="http://test.invalid/ocr", image_b64_list=[_page_png_b64(11)]
+            )
     finally:
         client.shutdown()
 

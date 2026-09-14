@@ -25,6 +25,7 @@ _logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
+from requests import HTTPError
 from nemo_retriever.common.params import RemoteRetryParams
 from nemo_retriever.models.nim.nim import NIMClient, invoke_image_inference_batches
 from nemo_retriever.common.modality.table_and_chart import join_table_structure_and_ocr_output
@@ -845,8 +846,6 @@ def _run_remote_ocr(
                 **invoke_kwargs,
                 max_pool_workers=int(retry.remote_max_pool_workers),
             )
-        if len(response_items) != len(jobs):
-            raise RuntimeError(f"Expected {len(jobs)} OCR responses, got {len(response_items)}")
         return response_items
 
     def _stitch(jobs: List[_RemoteOCRCropJob], response_items: List[Any]) -> None:
@@ -865,8 +864,14 @@ def _run_remote_ocr(
                     crop_hw=crop_hw,
                     use_table_structure=use_table_structure,
                 )
-            except BaseException as exc:
+            except Exception as exc:
                 _record_ocr_error(row_results[job.row_index], exc)
+
+    def _fail_page(row_index: int, exc: Exception) -> None:
+        # A page can span windows. A failed remote call must not publish
+        # successful fragments from earlier windows as partial page output.
+        row_results[row_index] = _OCRRowResult()
+        _record_ocr_error(row_results[row_index], exc)
 
     def _flush(jobs: List[_RemoteOCRCropJob]) -> None:
         jobs = [job for job in jobs if row_results[job.row_index].error is None]
@@ -874,17 +879,26 @@ def _run_remote_ocr(
             return
         try:
             response_items = _invoke(jobs)
-        except Exception:
-            # The client drains failed calls before returning, so retries do
-            # not race requests from the failed window. Isolate errors by page.
+        except Exception as exc:
             jobs_by_page: Dict[int, List[_RemoteOCRCropJob]] = {}
             for job in jobs:
                 jobs_by_page.setdefault(job.row_index, []).append(job)
+            # Only input/payload rejections can benefit from splitting a
+            # multi-page call. Transport retries belong to the NIM client.
+            isolate_pages = (
+                len(jobs_by_page) > 1
+                and isinstance(exc, HTTPError)
+                and exc.response is not None
+                and exc.response.status_code in (400, 413, 422)
+            )
             for row_index, page_jobs in jobs_by_page.items():
+                if not isolate_pages:
+                    _fail_page(row_index, exc)
+                    continue
                 try:
                     _stitch(page_jobs, _invoke(page_jobs))
-                except Exception as exc:
-                    _record_ocr_error(row_results[row_index], exc)
+                except Exception as page_exc:
+                    _fail_page(row_index, page_exc)
             return
         _stitch(jobs, response_items)
 

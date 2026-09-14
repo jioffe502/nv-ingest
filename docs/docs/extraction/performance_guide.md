@@ -77,7 +77,9 @@ Remote OCR batches cropped regions across the page rows supplied to one OCR acto
 
 For in-process and batch ingestion, set `BatchTuningParams.ocr_inference_batch_size` through `.extract(batch_tuning=...)` to limit the cropped regions in each OCR HTTP request. This value takes precedence over `ExtractParams.inference_batch_size` for OCR. When you do not set it, OCR uses `ExtractParams.inference_batch_size`, which defaults to `8`.
 
-Set `ExtractParams.remote_retry.remote_max_pool_workers` through `.extract(remote_retry=...)` to cap concurrent remote requests per actor. Each submitted group contains at most `ocr_inference_batch_size * remote_max_pool_workers` cropped regions, using the effective OCR batch size. Requests for different pages can overlap when a group contains multiple requests. A combined-call failure triggers page-level retries to preserve failure isolation.
+Set `ExtractParams.remote_retry.remote_max_pool_workers` through `.extract(remote_retry=...)` to cap concurrent remote requests per actor. Each submitted group contains at most `ocr_inference_batch_size * remote_max_pool_workers` cropped regions, using the effective OCR batch size. Requests for different pages can overlap when a group contains multiple requests.
+
+The NIM HTTP client applies the configured retry policy. If a group spanning multiple pages fails with HTTP `400`, `413`, or `422`, OCR retries each page separately to isolate input-specific failures. Authentication failures, exhausted rate-limit retries, transport failures, and invalid response counts do not trigger page-level retries. If a remote request fails a page, OCR discards that page's results, including results from earlier groups, and reports the page error.
 
 The execution mode determines how page rows reach the OCR actor and how many actors can submit requests.
 

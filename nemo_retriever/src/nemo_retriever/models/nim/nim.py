@@ -351,7 +351,7 @@ class NIMClient:
                     raise RuntimeError("Internal batch ordering mismatch.")
                 for i, item in enumerate(per_image):
                     flattened[start + i] = item
-        except BaseException:
+        except Exception:
             # Do not leave a failed call running while its caller retries or
             # releases the input batch. Running requests retain their timeouts.
             for future in futures:
