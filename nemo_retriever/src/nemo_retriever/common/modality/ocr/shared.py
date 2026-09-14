@@ -671,6 +671,17 @@ class _OCRCropJob:
     crop_array: np.ndarray
 
 
+@dataclass(frozen=True)
+class _RemoteOCRCropJob:
+    """One remote crop plus the address needed to stitch its result."""
+
+    row_index: int
+    row: Any
+    label_name: str
+    bbox: List[float]
+    crop_b64: str
+
+
 def _record_ocr_error(row_result: _OCRRowResult, exc: BaseException) -> None:
     print(f"Warning: OCR failed: {type(exc).__name__}: {exc}")
     row_result.error = {
@@ -809,10 +820,10 @@ def _run_remote_ocr(
     nim_client: NIMClient | None,
     use_table_structure: bool,
 ) -> None:
-    """Invoke the existing per-page remote OCR path and stitch its results."""
+    """Batch remote crops across pages, retaining per-page failure isolation."""
 
+    jobs_by_page: List[List[_RemoteOCRCropJob]] = []
     for prepared in prepared_rows:
-        row_result = row_results[prepared.row_index]
         try:
             crops = _crop_all_from_page(
                 prepared.page_image_b64,
@@ -820,44 +831,80 @@ def _run_remote_ocr(
                 prepared.wanted_labels,
                 as_b64=True,
             )
-            crop_b64s: List[str] = [crop_b64 for _label, _bbox, crop_b64 in crops]
-            crop_metadata: List[Tuple[str, List[float]]] = [(label_name, bbox) for label_name, bbox, _crop_b64 in crops]
-            if not crop_b64s:
-                continue
-
-            invoke_kwargs = dict(
-                invoke_url=invoke_url,
-                image_b64_list=crop_b64s,
-                api_key=api_key,
-                timeout_s=float(request_timeout_s),
-                max_batch_size=max_batch_size,
-                max_retries=int(retry.remote_max_retries),
-                max_429_retries=int(retry.remote_max_429_retries),
+            jobs_by_page.append(
+                [
+                    _RemoteOCRCropJob(
+                        row_index=prepared.row_index,
+                        row=prepared.row,
+                        label_name=label_name,
+                        bbox=bbox,
+                        crop_b64=crop_b64,
+                    )
+                    for label_name, bbox, crop_b64 in crops
+                ]
             )
-            if nim_client is not None:
-                response_items = nim_client.invoke_image_inference_batches(**invoke_kwargs)
-            else:
-                response_items = invoke_image_inference_batches(
-                    **invoke_kwargs,
-                    max_pool_workers=int(retry.remote_max_pool_workers),
-                )
-            if len(response_items) != len(crop_metadata):
-                raise RuntimeError(f"Expected {len(crop_metadata)} OCR responses, got {len(response_items)}")
+        except BaseException as exc:
+            jobs_by_page.append([])
+            _record_ocr_error(row_results[prepared.row_index], exc)
 
-            for index, (label_name, bbox) in enumerate(crop_metadata):
-                preds = _extract_remote_ocr_item(response_items[index])
-                crop_hw = _remote_crop_shape(crop_b64s[index]) if label_name == "table" else (0, 0)
+    all_jobs = [job for page_jobs in jobs_by_page for job in page_jobs]
+    if not all_jobs:
+        return
+
+    def _invoke(jobs: List[_RemoteOCRCropJob]) -> List[Any]:
+        invoke_kwargs = dict(
+            invoke_url=invoke_url,
+            image_b64_list=[job.crop_b64 for job in jobs],
+            api_key=api_key,
+            timeout_s=float(request_timeout_s),
+            max_batch_size=max_batch_size,
+            max_retries=int(retry.remote_max_retries),
+            max_429_retries=int(retry.remote_max_429_retries),
+        )
+        if nim_client is not None:
+            response_items = nim_client.invoke_image_inference_batches(**invoke_kwargs)
+        else:
+            response_items = invoke_image_inference_batches(
+                **invoke_kwargs,
+                max_pool_workers=int(retry.remote_max_pool_workers),
+            )
+        if len(response_items) != len(jobs):
+            raise RuntimeError(f"Expected {len(jobs)} OCR responses, got {len(response_items)}")
+        return response_items
+
+    def _stitch(jobs: List[_RemoteOCRCropJob], response_items: List[Any]) -> None:
+        for job, response_item in zip(jobs, response_items):
+            try:
+                preds = _extract_remote_ocr_item(response_item)
+                crop_hw = _remote_crop_shape(job.crop_b64) if job.label_name == "table" else (0, 0)
                 _append_ocr_prediction(
-                    row_result,
-                    row=prepared.row,
-                    label_name=label_name,
-                    bbox=bbox,
+                    row_results[job.row_index],
+                    row=job.row,
+                    label_name=job.label_name,
+                    bbox=job.bbox,
                     preds=preds,
                     crop_hw=crop_hw,
                     use_table_structure=use_table_structure,
                 )
-        except BaseException as exc:
-            _record_ocr_error(row_result, exc)
+            except BaseException as exc:
+                _record_ocr_error(row_results[job.row_index], exc)
+
+    try:
+        response_items = _invoke(all_jobs)
+    except BaseException:
+        # Preserve the old page-level error contract if the cross-page call
+        # fails or returns the wrong cardinality. The NIM client's executor
+        # still bounds the number of in-flight HTTP requests.
+        for page_jobs in jobs_by_page:
+            if not page_jobs:
+                continue
+            try:
+                _stitch(page_jobs, _invoke(page_jobs))
+            except BaseException as exc:
+                _record_ocr_error(row_results[page_jobs[0].row_index], exc)
+        return
+
+    _stitch(all_jobs, response_items)
 
 
 def _collect_local_crop_jobs(
@@ -1092,9 +1139,7 @@ def ocr_page_elements(
             invoke_url=invoke_url,
             api_key=api_key,
             request_timeout_s=request_timeout_s,
-            # Preserve the existing remote behavior. The named
-            # inference_batch_size parameter is local policy in this path.
-            max_batch_size=int(kwargs.get("inference_batch_size", 8)),
+            max_batch_size=int(inference_batch_size),
             retry=retry,
             nim_client=nim_client,
             use_table_structure=use_table_structure,

@@ -55,6 +55,7 @@ chunks = (
             pdf_extract_workers=4,
             page_elements_workers=3,
             ocr_workers=3,
+            ocr_inference_batch_size=8,
         )
     )
     .embed(
@@ -69,6 +70,16 @@ chunks = (
 Related batch-size, CPU, and GPU-per-actor flags are documented in the [CLI ingest options](https://github.com/NVIDIA/NeMo-Retriever/blob/26.08.1/nemo_retriever/docs/cli/README.md).
 
 Use the Ray dashboard to verify the available-resource snapshot and the planned worker allocation when you tune throughput.
+
+### Tune remote OCR request batching
+
+`BatchTuningParams.ocr_inference_batch_size` sets the OCR-specific actor batch size. For a remote OCR NIM, it also sets the maximum number of cropped regions in each HTTP request. This value takes precedence over `ExtractParams.inference_batch_size` for OCR. When you do not set it, OCR uses `ExtractParams.inference_batch_size`, which defaults to `8`.
+
+Within one OCR actor call, the library collects regions from all page rows before it splits them into NIM requests. Requests for different pages of one document can therefore overlap. The library preserves the page and region output order.
+
+`ocr_workers` controls the number of Ray OCR actors. It does not control the number of HTTP requests within each actor. `ExtractParams.remote_retry.remote_max_pool_workers` caps concurrent remote requests per actor.
+
+A smaller OCR inference batch size creates more, smaller requests and can increase request overlap. A larger value creates fewer, larger requests. Benchmark both latency and throughput with representative documents, and monitor NIM GPU memory, HTTP `429` responses, errors, and output counts.
 
 ## Shared preflight for custom Ray Data graphs
 

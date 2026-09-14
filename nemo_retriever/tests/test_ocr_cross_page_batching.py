@@ -2,7 +2,7 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Correctness tests for local OCR crop batching across page rows."""
+"""Correctness tests for OCR crop batching across page rows."""
 
 from __future__ import annotations
 
@@ -11,10 +11,14 @@ import io
 from typing import Any
 
 import pandas as pd
+import pytest
 from PIL import Image
 
-from nemo_retriever.common.params import RemoteRetryParams
+from nemo_retriever.common.params import BatchTuningParams, ExtractParams, RemoteRetryParams
+from nemo_retriever.graph.ingestor_runtime import build_graph
+from nemo_retriever.operators.extract.ocr.cpu_ocr import OCRCPUActor
 from nemo_retriever.operators.extract.ocr.gpu_ocr import OCRActor
+from nemo_retriever.operators.extract.ocr.ocr import OCRActor as OCRArchetype
 
 
 def _page_png_b64(crop_id: int) -> str:
@@ -119,6 +123,43 @@ class _WrongCountFallbackModel:
         return _ocr_prediction(crop_ids[0])
 
 
+class _RecordingNIMClient:
+    """Record the cross-page list submitted to the remote OCR client."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def invoke_image_inference_batches(self, **kwargs: Any) -> list[dict[str, Any]]:
+        crop_ids = []
+        for encoded in kwargs["image_b64_list"]:
+            with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+                crop_ids.append(image.convert("RGB").getpixel((0, 0))[0])
+        self.calls.append(
+            {
+                "crop_ids": crop_ids,
+                "max_batch_size": kwargs["max_batch_size"],
+            }
+        )
+        return [{"text_detections": _ocr_prediction(crop_id)} for crop_id in crop_ids]
+
+
+class _FallbackIsolationNIMClient(_RecordingNIMClient):
+    """Reject the combined call, then fail only one page during fallback."""
+
+    def __init__(self, failing_crop_id: int) -> None:
+        super().__init__()
+        self.failing_crop_id = failing_crop_id
+
+    def invoke_image_inference_batches(self, **kwargs: Any) -> list[dict[str, Any]]:
+        response = super().invoke_image_inference_batches(**kwargs)
+        crop_ids = self.calls[-1]["crop_ids"]
+        if len(crop_ids) > 1:
+            raise RuntimeError("force per-page fallback")
+        if crop_ids[0] == self.failing_crop_id:
+            raise ValueError(f"bad crop {self.failing_crop_id}")
+        return response
+
+
 def _local_actor(
     model: Any,
     *,
@@ -142,6 +183,30 @@ def _local_actor(
     actor._remote_retry = RemoteRetryParams()
     actor._model = model
     actor._nim_client = None
+    return actor
+
+
+def _remote_actor(
+    client: Any,
+    *,
+    inference_batch_size: int,
+    extract_charts: bool = True,
+) -> OCRCPUActor:
+    actor = object.__new__(OCRCPUActor)
+    actor._graph_init_kwargs = {}
+    actor.ocr_kwargs = {
+        "invoke_url": "http://ocr.example/v1/ocr",
+        "extract_text": False,
+        "extract_tables": False,
+        "extract_charts": extract_charts,
+        "extract_infographics": False,
+        "use_table_structure": False,
+        "request_timeout_s": 120.0,
+        "inference_batch_size": inference_batch_size,
+    }
+    actor._remote_retry = RemoteRetryParams(remote_max_retries=1, remote_max_429_retries=1)
+    actor._model = None
+    actor._nim_client = client
     return actor
 
 
@@ -180,6 +245,74 @@ def test_local_actor_batches_compatible_crops_across_page_rows() -> None:
             },
         ],
     }
+
+
+def test_remote_actor_batches_crops_across_page_rows() -> None:
+    client = _RecordingNIMClient()
+    actor = _remote_actor(client, inference_batch_size=1)
+    bbox = [0.0, 0.0, 1.0, 1.0]
+    batch = pd.DataFrame(
+        [
+            _page("page-A", 11, [_detection("chart-A", "chart", bbox)]),
+            _page("page-B", 22, [_detection("chart-B", "chart", bbox)]),
+        ]
+    )
+
+    result = actor(batch)
+
+    assert client.calls == [{"crop_ids": [11, 22], "max_batch_size": 1}]
+    assert [row.page_id for row in result.itertuples(index=False)] == ["page-A", "page-B"]
+    assert [row.chart[0]["text"] for row in result.itertuples(index=False)] == ["crop-11", "crop-22"]
+    assert [row.ocr["error"] for row in result.itertuples(index=False)] == [None, None]
+
+
+def test_remote_actor_falls_back_per_page_and_isolates_errors() -> None:
+    client = _FallbackIsolationNIMClient(failing_crop_id=22)
+    actor = _remote_actor(client, inference_batch_size=2)
+    bbox = [0.0, 0.0, 1.0, 1.0]
+    batch = pd.DataFrame(
+        [
+            _page("page-A", 11, [_detection("chart-A", "chart", bbox)]),
+            _page("page-B", 22, [_detection("chart-B", "chart", bbox)]),
+            _page("page-C", 33, [_detection("chart-C", "chart", bbox)]),
+        ]
+    )
+
+    result = actor(batch)
+
+    assert [call["crop_ids"] for call in client.calls] == [[11, 22, 33], [11], [22], [33]]
+    assert [len(chart) for chart in result["chart"]] == [1, 0, 1]
+    assert [metadata["error"] is None for metadata in result["ocr"]] == [True, False, True]
+    assert result.at[1, "ocr"]["error"]["type"] == "ValueError"
+
+
+@pytest.mark.parametrize(
+    ("inference_batch_size", "ocr_inference_batch_size", "expected"),
+    [(3, None, 3), (3, 5, 5)],
+)
+def test_pdf_graph_forwards_effective_remote_ocr_batch_size(
+    inference_batch_size: int,
+    ocr_inference_batch_size: int | None,
+    expected: int,
+) -> None:
+    graph = build_graph(
+        extraction_mode="pdf",
+        extract_params=ExtractParams(
+            method="ocr",
+            extract_text=True,
+            extract_tables=False,
+            extract_charts=False,
+            extract_infographics=False,
+            ocr_invoke_url="http://ocr.example/v1/ocr",
+            inference_batch_size=inference_batch_size,
+            batch_tuning=BatchTuningParams(ocr_inference_batch_size=ocr_inference_batch_size),
+        ),
+    )
+    node = graph.roots[0]
+    while node.operator_class is not OCRArchetype:
+        node = node.children[0]
+
+    assert node.operator_kwargs["inference_batch_size"] == expected
 
 
 def test_local_actor_separates_merge_levels_chunks_and_preserves_detection_order() -> None:
