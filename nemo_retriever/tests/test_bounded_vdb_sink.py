@@ -74,16 +74,19 @@ def _records(
     ]
 
 
-def _stream_writer_process(
+def _writer_process(
     uri: str,
     records: list[dict[str, Any]],
     *,
+    operation: str = "stream",
+    operation_id: str | None = "shared-append",
     block_in_add: bool,
     add_entered: Any,
+    started: Any | None = None,
     lock_attempted: Any | None = None,
     lock_acquired: Any | None = None,
 ) -> None:
-    """Run one real LanceDB stream write in a spawned process."""
+    """Run one real LanceDB write in a spawned process."""
 
     if lock_attempted is not None:
         assert lock_acquired is not None
@@ -109,14 +112,22 @@ def _stream_writer_process(
         return original_add(self, *args, **kwargs)
 
     table_type.add = observed_add
-    LanceDB(
+    backend = LanceDB(
         uri=uri,
         table_name="chunks",
         vector_dim=2,
         overwrite=False,
         build_index=False,
-        stream_operation_id="shared-append",
-    ).stream_ingest(records)
+        stream_operation_id=operation_id,
+    )
+    if started is not None:
+        started.set()
+    if operation == "stream":
+        backend.stream_ingest(records)
+    elif operation == "run":
+        backend.run([records])
+    else:
+        raise ValueError(f"Unknown operation: {operation}")
 
 
 def _backend(uri: Path, **overrides: Any) -> LanceDB:
@@ -601,7 +612,7 @@ def test_same_operation_is_exactly_once_across_concurrent_backend_instances(
     second_lock_attempted = context.Event()
     second_lock_acquired = context.Event()
     first = context.Process(
-        target=_stream_writer_process,
+        target=_writer_process,
         args=(str(tmp_path), _records(10, 14)),
         kwargs={
             "block_in_add": True,
@@ -609,7 +620,7 @@ def test_same_operation_is_exactly_once_across_concurrent_backend_instances(
         },
     )
     second = context.Process(
-        target=_stream_writer_process,
+        target=_writer_process,
         args=(str(tmp_path), _records(10, 14)),
         kwargs={
             "block_in_add": False,
@@ -646,6 +657,61 @@ def test_same_operation_is_exactly_once_across_concurrent_backend_instances(
         "row-11",
         "row-12",
         "row-13",
+    ]
+
+
+def test_stream_and_legacy_writes_are_serialized_across_processes(tmp_path: Path) -> None:
+    _backend(tmp_path).stream_ingest(_records(0, 2))
+    context = mp.get_context("spawn")
+    stream_add_entered = context.Event()
+    legacy_started = context.Event()
+    legacy_add_entered = context.Event()
+    streaming = context.Process(
+        target=_writer_process,
+        args=(str(tmp_path), _records(10, 14)),
+        kwargs={
+            "operation_id": None,
+            "block_in_add": True,
+            "add_entered": stream_add_entered,
+        },
+    )
+    legacy = context.Process(
+        target=_writer_process,
+        args=(str(tmp_path), _records(20, 24)),
+        kwargs={
+            "operation": "run",
+            "operation_id": None,
+            "block_in_add": False,
+            "add_entered": legacy_add_entered,
+            "started": legacy_started,
+        },
+    )
+    streaming.start()
+    try:
+        assert stream_add_entered.wait(timeout=30)
+        legacy.start()
+        assert legacy_started.wait(timeout=30)
+        assert not legacy_add_entered.wait(timeout=1)
+        streaming.terminate()
+        streaming.join(timeout=10)
+        assert not streaming.is_alive()
+        assert legacy_add_entered.wait(timeout=30)
+        legacy.join(timeout=30)
+        assert not legacy.is_alive()
+        assert legacy.exitcode == 0
+    finally:
+        for process in (streaming, legacy):
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=10)
+
+    assert _state(tmp_path)[0] == [
+        "row-0",
+        "row-1",
+        "row-20",
+        "row-21",
+        "row-22",
+        "row-23",
     ]
 
 

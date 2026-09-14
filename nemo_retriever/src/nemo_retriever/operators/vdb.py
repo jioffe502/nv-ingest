@@ -171,7 +171,7 @@ class IngestVdbOperator(AbstractOperator):
     def _supports_stream_ingest(self) -> bool:
         """Return whether the configured VDB opts into canonical record streaming."""
 
-        return self._vdb.supports_stream_ingest
+        return bool(getattr(self._vdb, "supports_stream_ingest", False))
 
     def _stream_ingest(self, batches: Iterable[pd.DataFrame]) -> None:
         """Lazily convert executor batches and delegate one backend stream."""

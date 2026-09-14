@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from collections.abc import Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
@@ -114,17 +115,17 @@ def _is_filesystem_lancedb_uri(uri: str) -> bool:
     return _filesystem_lancedb_path(uri) is not None
 
 
-def _stream_lock_path(uri: str, table_name: str) -> Path:
-    """Return one process-shared lock file for a local LanceDB table."""
+def _table_mutation_lock(uri: str, table_name: str) -> AbstractContextManager[Any]:
+    """Return the process-shared mutation lock for a local LanceDB table."""
 
     root = _filesystem_lancedb_path(uri)
     if root is None:
-        raise ValueError("A process-shared stream lock requires a filesystem-backed LanceDB URI")
+        return nullcontext()
     root = root.expanduser().resolve()
     lock_dir = root / ".nemo-retriever-locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     table_token = hashlib.sha256(table_name.encode("utf-8")).hexdigest()[:24]
-    return lock_dir / f"stream-{table_token}.lock"
+    return FileLock(lock_dir / f"table-{table_token}.lock")
 
 
 def _without_fts_phrase_syntax(query_text: str) -> str:
@@ -1869,7 +1870,7 @@ class LanceDB(VDB):
         if not self.supports_stream_ingest:
             raise UnsupportedVDBOperation("LanceDB.stream_ingest() is unavailable; use the legacy global-batch path.")
 
-        with self._stream_lock, FileLock(_stream_lock_path(self.uri, self.table_name)):
+        with self._stream_lock, _table_mutation_lock(self.uri, self.table_name):
             self._write_stream_records(records, operation_id=self.stream_operation_id)
 
     def _reject_stream_controls_for_legacy_operation(self, operation: str) -> None:
@@ -1907,7 +1908,7 @@ class LanceDB(VDB):
         """
         self._reject_stream_controls_for_legacy_operation("run")
         service_write = self._service_index_mode is not None
-        with self._write_lock:
+        with _table_mutation_lock(self.uri, self.table_name), self._write_lock:
             self._assert_legacy_table_ready(self.table_name)
             table_existed = False
             if service_write:
@@ -2023,8 +2024,8 @@ class LanceDB(VDB):
         plus: ``put``.
         """
         self._reject_stream_controls_for_legacy_operation("put")
-        with self._write_lock:
-            target_name = table_name or self.table_name
+        target_name = table_name or self.table_name
+        with _table_mutation_lock(self.uri, target_name), self._write_lock:
             self._assert_legacy_table_ready(target_name)
             return self._put(records, table_name=target_name, key=key)
 

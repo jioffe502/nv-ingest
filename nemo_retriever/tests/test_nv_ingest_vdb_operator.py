@@ -620,6 +620,10 @@ def test_put_operator_delegates_records_with_configured_key_and_table_name() -> 
 def test_custom_vdb_stream_capability_and_legacy_fallback() -> None:
     pulls: list[int] = []
 
+    class LegacyDuckVDB:
+        def run(self, records) -> None:
+            pass
+
     class StreamingFakeVDB(FakeVDB):
         supports_stream_ingest = True
 
@@ -648,6 +652,7 @@ def test_custom_vdb_stream_capability_and_legacy_fallback() -> None:
     streaming = IngestVdbOperator(vdb=streaming_vdb)
     legacy_vdb = FakeVDB()
     legacy = IngestVdbOperator(vdb=legacy_vdb)
+    legacy_duck = IngestVdbOperator(vdb=LegacyDuckVDB())
     put = PutVdbOperator(vdb=streaming_vdb)
 
     assert streaming._stream_ingest(batches()) is None
@@ -663,6 +668,8 @@ def test_custom_vdb_stream_capability_and_legacy_fallback() -> None:
     assert len(legacy_vdb.run_calls) == 1
     with pytest.raises(UnsupportedVDBOperation, match="does not implement stream_ingest"):
         legacy._stream_ingest(batches())
+    with pytest.raises(UnsupportedVDBOperation, match="does not implement stream_ingest"):
+        legacy_duck._stream_ingest(batches())
     with pytest.raises(UnsupportedVDBOperation, match="does not implement stream_ingest"):
         put._stream_ingest(batches())
     with pytest.raises(RuntimeError, match="returned before consuming the record stream"):
