@@ -822,34 +822,11 @@ def _run_remote_ocr(
 ) -> None:
     """Batch remote crops across pages, retaining per-page failure isolation."""
 
-    jobs_by_page: List[List[_RemoteOCRCropJob]] = []
-    for prepared in prepared_rows:
-        try:
-            crops = _crop_all_from_page(
-                prepared.page_image_b64,
-                prepared.detections,
-                prepared.wanted_labels,
-                as_b64=True,
-            )
-            jobs_by_page.append(
-                [
-                    _RemoteOCRCropJob(
-                        row_index=prepared.row_index,
-                        row=prepared.row,
-                        label_name=label_name,
-                        bbox=bbox,
-                        crop_b64=crop_b64,
-                    )
-                    for label_name, bbox, crop_b64 in crops
-                ]
-            )
-        except BaseException as exc:
-            jobs_by_page.append([])
-            _record_ocr_error(row_results[prepared.row_index], exc)
-
-    all_jobs = [job for page_jobs in jobs_by_page for job in page_jobs]
-    if not all_jobs:
-        return
+    if max_batch_size < 1:
+        raise ValueError("inference_batch_size must be positive")
+    # Bound queued requests and retained encoded crops as well as active HTTP
+    # workers. Crop preparation retains at most this window plus one page.
+    window_size = max_batch_size * max(1, int(retry.remote_max_pool_workers))
 
     def _invoke(jobs: List[_RemoteOCRCropJob]) -> List[Any]:
         invoke_kwargs = dict(
@@ -874,6 +851,8 @@ def _run_remote_ocr(
 
     def _stitch(jobs: List[_RemoteOCRCropJob], response_items: List[Any]) -> None:
         for job, response_item in zip(jobs, response_items):
+            if row_results[job.row_index].error is not None:
+                continue
             try:
                 preds = _extract_remote_ocr_item(response_item)
                 crop_hw = _remote_crop_shape(job.crop_b64) if job.label_name == "table" else (0, 0)
@@ -889,22 +868,45 @@ def _run_remote_ocr(
             except BaseException as exc:
                 _record_ocr_error(row_results[job.row_index], exc)
 
-    try:
-        response_items = _invoke(all_jobs)
-    except BaseException:
-        # Preserve the old page-level error contract if the cross-page call
-        # fails or returns the wrong cardinality. The NIM client's executor
-        # still bounds the number of in-flight HTTP requests.
-        for page_jobs in jobs_by_page:
-            if not page_jobs:
-                continue
-            try:
-                _stitch(page_jobs, _invoke(page_jobs))
-            except BaseException as exc:
-                _record_ocr_error(row_results[page_jobs[0].row_index], exc)
-        return
+    def _flush(jobs: List[_RemoteOCRCropJob]) -> None:
+        jobs = [job for job in jobs if row_results[job.row_index].error is None]
+        if not jobs:
+            return
+        try:
+            response_items = _invoke(jobs)
+        except Exception:
+            # The client drains failed calls before returning, so retries do
+            # not race requests from the failed window. Isolate errors by page.
+            jobs_by_page: Dict[int, List[_RemoteOCRCropJob]] = {}
+            for job in jobs:
+                jobs_by_page.setdefault(job.row_index, []).append(job)
+            for row_index, page_jobs in jobs_by_page.items():
+                try:
+                    _stitch(page_jobs, _invoke(page_jobs))
+                except Exception as exc:
+                    _record_ocr_error(row_results[row_index], exc)
+            return
+        _stitch(jobs, response_items)
 
-    _stitch(all_jobs, response_items)
+    pending: List[_RemoteOCRCropJob] = []
+    for prepared in prepared_rows:
+        try:
+            crops = _crop_all_from_page(
+                prepared.page_image_b64,
+                prepared.detections,
+                prepared.wanted_labels,
+                as_b64=True,
+            )
+            for label_name, bbox, crop_b64 in crops:
+                if row_results[prepared.row_index].error is not None:
+                    break
+                pending.append(_RemoteOCRCropJob(prepared.row_index, prepared.row, label_name, bbox, crop_b64))
+                if len(pending) == window_size:
+                    _flush(pending)
+                    pending = []
+        except Exception as exc:
+            _record_ocr_error(row_results[prepared.row_index], exc)
+    _flush(pending)
 
 
 def _collect_local_crop_jobs(

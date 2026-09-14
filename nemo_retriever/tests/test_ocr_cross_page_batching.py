@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pandas as pd
@@ -19,6 +23,8 @@ from nemo_retriever.graph.ingestor_runtime import build_graph
 from nemo_retriever.operators.extract.ocr.cpu_ocr import OCRCPUActor
 from nemo_retriever.operators.extract.ocr.gpu_ocr import OCRActor
 from nemo_retriever.operators.extract.ocr.ocr import OCRActor as OCRArchetype
+from nemo_retriever.models.nim.nim import NIMClient
+from nemo_retriever.operators.graph_ops.multi_type_extract_operator import MultiTypeExtractCPUActor
 
 
 def _page_png_b64(crop_id: int) -> str:
@@ -313,6 +319,155 @@ def test_pdf_graph_forwards_effective_remote_ocr_batch_size(
         node = node.children[0]
 
     assert node.operator_kwargs["inference_batch_size"] == expected
+
+
+@pytest.mark.parametrize("ocr_batch_size,expected", [(None, 3), (5, 5)])
+def test_multi_type_forwards_ocr_batch_and_retry_settings(monkeypatch, ocr_batch_size, expected):
+    operator = MultiTypeExtractCPUActor(
+        extract_params=ExtractParams(
+            method="ocr",
+            extract_text=True,
+            extract_tables=False,
+            use_table_structure=False,
+            inference_batch_size=3,
+            batch_tuning=BatchTuningParams(ocr_inference_batch_size=ocr_batch_size, page_elements_batch_size=7),
+            remote_retry=RemoteRetryParams(remote_max_pool_workers=2, remote_max_retries=3, remote_max_429_retries=4),
+        )
+    )
+    calls = []
+
+    def instantiate(cls, **kwargs):
+        calls.append((cls, kwargs))
+        return type("PassThrough", (), {"run": lambda self, data: data})()
+
+    monkeypatch.setattr(operator, "_instantiate_resolved", instantiate)
+    operator._run_detection_pipeline(pd.DataFrame())
+    assert calls[-1][0] is OCRArchetype
+    assert calls[-1][1]["inference_batch_size"] == expected
+    for key, value in {"remote_max_pool_workers": 2, "remote_max_retries": 3, "remote_max_429_retries": 4}.items():
+        assert calls[-1][1][key] == value
+
+
+def test_remote_actor_bounds_pending_crops_and_preserves_empty_pages():
+    client = _RecordingNIMClient()
+    actor = _remote_actor(client, inference_batch_size=2)
+    actor._remote_retry = RemoteRetryParams(remote_max_pool_workers=2)
+    bbox = [0.0, 0.0, 1.0, 1.0]
+    pages = [_page(str(i), i, [_detection(str(i), "chart", bbox)] * 3) for i in range(1, 5)]
+    pages.insert(2, _page("empty", 99, []))
+    result = actor(pd.DataFrame(pages))
+    assert [len(call["crop_ids"]) for call in client.calls] == [4, 4, 4]
+    assert list(result.page_id) == ["1", "2", "empty", "3", "4"]
+    assert [len(items) for items in result.chart] == [3, 3, 0, 3, 3]
+    assert all(item["error"] is None for item in result.ocr)
+    assert [call["crop_ids"] for call in client.calls] == [[1, 1, 1, 2], [2, 2, 3, 3], [3, 4, 4, 4]]
+
+
+def test_remote_wrong_count_falls_back_without_losing_or_duplicating_regions():
+    class WrongCountClient(_RecordingNIMClient):
+        def invoke_image_inference_batches(self, **kwargs):
+            response = super().invoke_image_inference_batches(**kwargs)
+            return response[:1] if len(response) > 2 else response
+
+    client = WrongCountClient()
+    actor = _remote_actor(client, inference_batch_size=2)
+    actor.ocr_kwargs.update(extract_tables=True, extract_infographics=True)
+    bbox = [0.0, 0.0, 1.0, 1.0]
+    pages = pd.DataFrame(
+        [
+            _page("a", 11, [_detection("a1", "table", bbox), _detection("a2", "chart", bbox)]),
+            _page("b", 22, [_detection("b1", "infographic", bbox)]),
+        ]
+    )
+    result = actor(pages)
+    assert [call["crop_ids"] for call in client.calls] == [[11, 11, 22], [11, 11], [22]]
+    assert [len(items) for items in result.table] == [1, 0]
+    assert [len(items) for items in result.chart] == [1, 0]
+    assert [len(items) for items in result.infographic] == [0, 1]
+    assert all(item["error"] is None for item in result.ocr)
+
+
+@pytest.fixture
+def remote_ocr_http_server():
+    """Exercise the actual HTTP client, including auth, ordering, and pool bounds."""
+    state = {"active": 0, "peak": 0, "calls": [], "fail": False}
+    lock = threading.Lock()
+    both_started = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            ids = []
+            for item in payload["input"]:
+                with Image.open(io.BytesIO(base64.b64decode(item["url"].split(",", 1)[1]))) as image:
+                    ids.append(image.getpixel((0, 0))[0])
+            with lock:
+                state["calls"].append((ids, self.headers.get("Authorization") == "Bearer test-only"))
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+                if state["active"] == 2:
+                    both_started.set()
+            both_started.wait(timeout=5)
+            time.sleep(0.08 if ids[0] == 11 else 0.01)
+            failed = state["fail"] and ids[0] == 22
+            body = json.dumps({"data": [{"text_detections": _ocr_prediction(i)} for i in ids]}).encode()
+            with lock:
+                state["active"] -= 1
+            self.send_response(400 if failed else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1/ocr", state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_remote_http_overlap_auth_chunking_and_output_order(remote_ocr_http_server, batch_size):
+    url, state = remote_ocr_http_server
+    client = NIMClient(max_pool_workers=2)
+    try:
+        actor = _remote_actor(client, inference_batch_size=batch_size)
+        actor.ocr_kwargs.update(invoke_url=url, api_key="test-only")
+        actor._remote_retry = RemoteRetryParams(remote_max_pool_workers=2, remote_max_retries=1)
+        bbox = [0.0, 0.0, 1.0, 1.0]
+        pages = [_page(str(i), i, [_detection(str(i), "chart", bbox)]) for i in (11, 22, 33, 44)]
+        result = actor(pd.DataFrame(pages))
+    finally:
+        client.shutdown()
+    assert state["peak"] == 2
+    assert len(state["calls"]) == 4 // batch_size
+    assert all(len(ids) == batch_size and authorized for ids, authorized in state["calls"])
+    assert [items[0]["text"] for items in result.chart] == [f"crop-{i}" for i in (11, 22, 33, 44)]
+    assert all(item["error"] is None for item in result.ocr)
+
+
+def test_remote_http_failure_drains_running_requests_before_return(remote_ocr_http_server):
+    url, state = remote_ocr_http_server
+    state["fail"] = True
+    client = NIMClient(max_pool_workers=2)
+    try:
+        with pytest.raises(Exception, match="HTTP 400"):
+            client.invoke_image_inference_batches(
+                invoke_url=url,
+                image_b64_list=[_page_png_b64(11), _page_png_b64(22)],
+                max_batch_size=1,
+                max_retries=1,
+            )
+        assert state["active"] == 0
+    finally:
+        client.shutdown()
 
 
 def test_local_actor_separates_merge_levels_chunks_and_preserves_detection_order() -> None:
