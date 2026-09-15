@@ -17,6 +17,7 @@ import pytest
 from PIL import Image
 from requests import ConnectionError, HTTPError, Response, Timeout
 
+from nemo_retriever.common.modality.ocr import shared
 from nemo_retriever.common.params import BatchTuningParams, ExtractParams, RemoteRetryParams
 from nemo_retriever.graph.ingestor_runtime import build_graph
 from nemo_retriever.operators.extract.ocr.cpu_ocr import OCRCPUActor
@@ -677,8 +678,6 @@ def test_nim_concurrent_interruption_is_not_grouped(remote_ocr_http_transport, m
 @pytest.mark.parametrize("page_fallback", [False, True])
 @pytest.mark.parametrize("failure_point", ["parse", "table_stitch"])
 def test_remote_stitch_failure_discards_earlier_windows(monkeypatch, page_fallback, failure_point):
-    from nemo_retriever.common.modality.ocr import shared
-
     class LateRejectionClient(_RecordingNIMClient):
         def invoke_image_inference_batches(self, **kwargs):
             response = super().invoke_image_inference_batches(**kwargs)
