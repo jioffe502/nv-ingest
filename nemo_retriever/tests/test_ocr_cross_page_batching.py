@@ -10,8 +10,6 @@ import base64
 import io
 import json
 import threading
-import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pandas as pd
@@ -402,8 +400,8 @@ def test_remote_failure_discards_earlier_windows_but_preserves_other_pages():
 
 
 @pytest.fixture
-def remote_ocr_http_server():
-    """Exercise the actual HTTP client, including auth, ordering, and pool bounds."""
+def remote_ocr_http_transport(monkeypatch):
+    """Keep the NIM client and pool real, replacing only the HTTP transport."""
     state = {
         "active": 0,
         "peak": 0,
@@ -412,56 +410,54 @@ def remote_ocr_http_server():
         "status": 200,
         "truncate": False,
         "barrier": False,
+        "error": None,
+        "completed": [],
     }
     lock = threading.Lock()
     both_started = threading.Event()
+    other_completed = threading.Event()
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def do_POST(self):
-            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            ids = []
-            for item in payload["input"]:
-                with Image.open(io.BytesIO(base64.b64decode(item["url"].split(",", 1)[1]))) as image:
-                    ids.append(image.getpixel((0, 0))[0])
-            with lock:
-                state["calls"].append((ids, self.headers.get("Authorization") == "Bearer test-only"))
-                state["active"] += 1
-                state["peak"] = max(state["peak"], state["active"])
-                if state["active"] == 2:
-                    both_started.set()
+    def post(url, **kwargs):
+        ids = []
+        for item in kwargs["json"]["input"]:
+            with Image.open(io.BytesIO(base64.b64decode(item["url"].split(",", 1)[1]))) as image:
+                ids.append(image.getpixel((0, 0))[0])
+        with lock:
+            state["calls"].append((ids, kwargs["headers"].get("Authorization") == "Bearer test-only"))
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            if state["active"] == 2:
+                both_started.set()
+        try:
             if state["barrier"]:
-                both_started.wait(timeout=5)
-            time.sleep(0.08 if ids[0] == 11 else 0.01)
+                assert both_started.wait(timeout=5)
+                if ids[0] == 11:
+                    assert other_completed.wait(timeout=5)
             failed = state["bad_crop_status"] and 22 in ids
+            if state["error"] is not None and not failed:
+                raise state["error"]
             predictions = [{"text_detections": _ocr_prediction(i)} for i in ids]
             if state["truncate"]:
                 predictions = predictions[:-1]
-            body = json.dumps({"data": predictions}).encode()
+            response = Response()
+            response.status_code = state["bad_crop_status"] if failed else state["status"]
+            response._content = json.dumps({"data": predictions}).encode()
+            response.url = url
+            return response
+        finally:
             with lock:
                 state["active"] -= 1
-            self.send_response(state["bad_crop_status"] if failed else state["status"])
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+                state["completed"].append(ids)
+            if ids[0] != 11:
+                other_completed.set()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}/v1/ocr", state
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    monkeypatch.setattr("nemo_retriever.models.nim.nim.requests.post", post)
+    return "http://test.invalid/v1/ocr", state
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_remote_http_overlap_auth_chunking_and_output_order(remote_ocr_http_server, batch_size):
-    url, state = remote_ocr_http_server
+def test_remote_http_overlap_auth_chunking_and_output_order(remote_ocr_http_transport, batch_size):
+    url, state = remote_ocr_http_transport
     state["barrier"] = True
     client = NIMClient(max_pool_workers=2)
     try:
@@ -474,14 +470,15 @@ def test_remote_http_overlap_auth_chunking_and_output_order(remote_ocr_http_serv
     finally:
         client.shutdown()
     assert state["peak"] == 2
+    assert state["completed"][0][0] != 11
     assert len(state["calls"]) == 4 // batch_size
     assert all(len(ids) == batch_size and authorized for ids, authorized in state["calls"])
     assert [items[0]["text"] for items in result.chart] == [f"crop-{i}" for i in (11, 22, 33, 44)]
     assert all(item["error"] is None for item in result.ocr)
 
 
-def test_remote_http_failure_drains_running_requests_before_return(remote_ocr_http_server):
-    url, state = remote_ocr_http_server
+def test_remote_http_failure_drains_running_requests_before_return(remote_ocr_http_transport):
+    url, state = remote_ocr_http_transport
     state["bad_crop_status"] = 400
     state["barrier"] = True
     client = NIMClient(max_pool_workers=2)
@@ -499,8 +496,8 @@ def test_remote_http_failure_drains_running_requests_before_return(remote_ocr_ht
 
 
 @pytest.fixture
-def remote_http_actor(remote_ocr_http_server):
-    url, state = remote_ocr_http_server
+def remote_http_actor(remote_ocr_http_transport):
+    url, state = remote_ocr_http_transport
     actor = OCRCPUActor(
         invoke_url=url,
         extract_charts=True,
@@ -603,6 +600,132 @@ def test_nim_client_does_not_drain_requests_on_interruption(monkeypatch, interru
             )
     finally:
         client.shutdown()
+
+
+@pytest.mark.parametrize("input_status", [400, 413, 422])
+@pytest.mark.parametrize("other_failure", [401, 429, 503, "timeout", "connection", "response_count"])
+@pytest.mark.parametrize("input_failure_first", [True, False])
+def test_remote_mixed_concurrent_failures_do_not_retry_pages(
+    remote_http_actor, monkeypatch, input_status, other_failure, input_failure_first
+):
+    from nemo_retriever.models.nim import nim
+
+    actor, state, pages = remote_http_actor
+    actor.ocr_kwargs["inference_batch_size"] = 1
+    state.update(bad_crop_status=input_status, barrier=True)
+    if isinstance(other_failure, int):
+        state["status"] = other_failure
+    elif other_failure == "response_count":
+        state["truncate"] = True
+    else:
+        state["error"] = Timeout("test timeout") if other_failure == "timeout" else ConnectionError("test disconnect")
+    # Both requests run in the real pool; force each exception-observation order.
+    monkeypatch.setattr(
+        nim, "as_completed", lambda futures: reversed(futures) if input_failure_first else iter(futures)
+    )
+
+    result = actor(pages.iloc[:2])
+
+    assert sorted(ids for ids, _ in state["calls"]) == [[11], [22]]
+    assert state["active"] == 0
+    assert all(not items for items in result.chart)
+    assert all(item["error"]["type"] == "ExceptionGroup" for item in result.ocr)
+    other_message = {
+        "timeout": "Request timed out",
+        "connection": "test disconnect",
+        "response_count": "response count mismatch",
+    }.get(other_failure, str(other_failure))
+    for item in result.ocr:
+        assert f"HTTP {input_status}" in item["error"]["traceback"]
+        assert other_message in item["error"]["traceback"]
+
+
+@pytest.mark.parametrize("input_status", [400, 413, 422])
+def test_remote_concurrent_input_rejections_still_allow_page_isolation(remote_http_actor, input_status):
+    actor, state, pages = remote_http_actor
+    actor.ocr_kwargs["inference_batch_size"] = 1
+    state.update(status=input_status, bad_crop_status=input_status, barrier=True)
+
+    result = actor(pages.iloc[:2])
+
+    assert sorted(ids for ids, _ in state["calls"]) == [[11], [11], [22], [22]]
+    assert all(item["error"]["type"] == "HTTPError" for item in result.ocr)
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_nim_concurrent_interruption_is_not_grouped(remote_ocr_http_transport, monkeypatch, interrupt):
+    from nemo_retriever.models.nim import nim
+
+    url, state = remote_ocr_http_transport
+    state.update(bad_crop_status=400, barrier=True, error=interrupt())
+    monkeypatch.setattr(nim, "as_completed", lambda futures: reversed(futures))
+
+    client = NIMClient(max_pool_workers=2)
+    try:
+        with pytest.raises(interrupt):
+            client.invoke_image_inference_batches(
+                invoke_url=url,
+                image_b64_list=[_page_png_b64(11), _page_png_b64(22)],
+                max_batch_size=1,
+                max_retries=1,
+            )
+        assert state["active"] == 0
+    finally:
+        client.shutdown()
+
+
+@pytest.mark.parametrize("page_fallback", [False, True])
+@pytest.mark.parametrize("failure_point", ["parse", "table_stitch"])
+def test_remote_stitch_failure_discards_earlier_windows(monkeypatch, page_fallback, failure_point):
+    from nemo_retriever.common.modality.ocr import shared
+
+    class LateRejectionClient(_RecordingNIMClient):
+        def invoke_image_inference_batches(self, **kwargs):
+            response = super().invoke_image_inference_batches(**kwargs)
+            if page_fallback and len(self.calls) == 2:
+                rejected = Response()
+                rejected.status_code = 400
+                raise HTTPError("reject mixed-page window", response=rejected)
+            return response
+
+    client = LateRejectionClient()
+    actor = _remote_actor(client, inference_batch_size=2)
+    actor._remote_retry = RemoteRetryParams(remote_max_pool_workers=1)
+    actor.ocr_kwargs.update(extract_tables=True, extract_infographics=True, use_table_structure=True)
+    bbox = [0.0, 0.0, 1.0, 1.0]
+    pages = pd.DataFrame(
+        [
+            _page(
+                "a",
+                11,
+                [_detection("a1", "table", bbox), _detection("a2", "chart", bbox), _detection("a3", "table", bbox)],
+            ),
+            _page("b", 22, [_detection("b1", "infographic", bbox)]),
+        ]
+    )
+    target = "_parse_ocr_result" if failure_point == "parse" else "join_table_structure_and_ocr_output"
+    original = getattr(shared, target)
+    calls = 0
+
+    def fail_later(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == (3 if failure_point == "parse" else 2):
+            raise ValueError("invalid later-window response")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shared, "_find_ts_detections_for_bbox", lambda *args: ([], (16, 16)))
+    monkeypatch.setattr(shared, target, fail_later)
+
+    result = actor(pages)
+
+    assert list(result.page_id) == ["a", "b"]
+    assert [len(items) for items in result.table] == [0, 0]
+    assert [len(items) for items in result.chart] == [0, 0]
+    assert [len(items) for items in result.infographic] == [0, 1]
+    assert result.iloc[0].ocr["error"]["type"] == "ValueError"
+    assert result.iloc[0].ocr["num_detections"] == 0
+    assert result.iloc[1].ocr["error"] is None
 
 
 def test_local_actor_separates_merge_levels_chunks_and_preserves_detection_order() -> None:

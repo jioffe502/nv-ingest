@@ -351,12 +351,23 @@ class NIMClient:
                     raise RuntimeError("Internal batch ordering mismatch.")
                 for i, item in enumerate(per_image):
                     flattened[start + i] = item
-        except Exception:
+        except Exception as exc:
             # Do not leave a failed call running while its caller retries or
             # releases the input batch. Running requests retain their timeouts.
             for future in futures:
                 future.cancel()
             wait(futures)
+            errors = [exc]
+            for future in futures:
+                if future.cancelled():
+                    continue
+                error = future.exception()
+                if error is not None and error is not exc:
+                    if not isinstance(error, Exception):
+                        raise error
+                    errors.append(error)
+            if len(errors) > 1:
+                raise ExceptionGroup("Concurrent NIM image batches failed", errors) from None
             raise
 
         out: List[Any] = []

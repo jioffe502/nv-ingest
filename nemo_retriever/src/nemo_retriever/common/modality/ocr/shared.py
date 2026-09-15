@@ -865,10 +865,10 @@ def _run_remote_ocr(
                     use_table_structure=use_table_structure,
                 )
             except Exception as exc:
-                _record_ocr_error(row_results[job.row_index], exc)
+                _fail_page(job.row_index, exc)
 
     def _fail_page(row_index: int, exc: Exception) -> None:
-        # A page can span windows. A failed remote call must not publish
+        # A page can span windows. A failed crop must not publish
         # successful fragments from earlier windows as partial page output.
         row_results[row_index] = _OCRRowResult()
         _record_ocr_error(row_results[row_index], exc)
@@ -885,11 +885,12 @@ def _run_remote_ocr(
                 jobs_by_page.setdefault(job.row_index, []).append(job)
             # Only input/payload rejections can benefit from splitting a
             # multi-page call. Transport retries belong to the NIM client.
-            isolate_pages = (
-                len(jobs_by_page) > 1
-                and isinstance(exc, HTTPError)
-                and exc.response is not None
-                and exc.response.status_code in (400, 413, 422)
+            errors = exc.exceptions if isinstance(exc, ExceptionGroup) else (exc,)
+            isolate_pages = len(jobs_by_page) > 1 and all(
+                isinstance(error, HTTPError)
+                and error.response is not None
+                and error.response.status_code in (400, 413, 422)
+                for error in errors
             )
             for row_index, page_jobs in jobs_by_page.items():
                 if not isolate_pages:
