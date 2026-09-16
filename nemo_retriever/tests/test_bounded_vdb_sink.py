@@ -81,10 +81,15 @@ def _writer_process(
     operation: str = "stream",
     operation_id: str | None = "shared-append",
     block_in_add: bool,
-    add_entered: Any,
+    add_entered: Any | None = None,
+    add_done: Any | None = None,
+    build_index: bool = False,
+    index_entered: Any | None = None,
+    release_index: Any | None = None,
     started: Any | None = None,
     lock_attempted: Any | None = None,
     lock_acquired: Any | None = None,
+    lock_phase: str = "table",
 ) -> None:
     """Run one real LanceDB write in a spawned process."""
 
@@ -95,6 +100,8 @@ def _writer_process(
         original_acquire = lancedb_module.FileLock.acquire
 
         def observed_acquire(self, *args, **kwargs):
+            if not Path(self.lock_file).name.startswith(f"{lock_phase}-"):
+                return original_acquire(self, *args, **kwargs)
             lock_attempted.set()
             result = original_acquire(self, *args, **kwargs)
             lock_acquired.set()
@@ -106,18 +113,34 @@ def _writer_process(
     original_add = table_type.add
 
     def observed_add(self, *args, **kwargs):
-        add_entered.set()
+        if add_entered is not None:
+            add_entered.set()
         if block_in_add and not threading.Event().wait(timeout=30):
             raise TimeoutError("timed out waiting to release the first LanceDB add")
-        return original_add(self, *args, **kwargs)
+        result = original_add(self, *args, **kwargs)
+        if add_done is not None:
+            add_done.set()
+        return result
 
     table_type.add = observed_add
+    if index_entered is not None:
+        original_create_index = table_type.create_index
+
+        def observed_create_index(self, *args, **kwargs):
+            index_entered.set()
+            if release_index is not None:
+                assert release_index.wait(timeout=30)
+            return original_create_index(self, *args, **kwargs)
+
+        table_type.create_index = observed_create_index
     backend = LanceDB(
         uri=uri,
         table_name="chunks",
         vector_dim=2,
         overwrite=False,
-        build_index=False,
+        build_index=build_index,
+        index_type="IVF_FLAT",
+        num_partitions=2,
         stream_operation_id=operation_id,
     )
     if started is not None:
@@ -551,6 +574,32 @@ def test_default_finalization_failure_reports_committed_version_without_durable_
     assert _state(tmp_path)[0] == committed_ids + ["row-20", "row-21"]
 
 
+@pytest.mark.parametrize(
+    ("num_partitions", "error_type"),
+    [(None, TypeError), (float("inf"), OverflowError)],
+)
+def test_default_post_commit_index_config_error_reports_committed_version(
+    tmp_path: Path,
+    num_partitions: Any,
+    error_type: type[Exception],
+) -> None:
+    _backend(tmp_path).stream_ingest(_records(0, 2))
+    backend = _backend(
+        tmp_path,
+        overwrite=False,
+        build_index=True,
+        index_type="IVF_FLAT",
+        num_partitions=num_partitions,
+    )
+
+    with pytest.raises(DataCommittedFinalizationError, match="Do not replay these records") as failure:
+        backend.stream_ingest(_records(10, 12))
+
+    assert isinstance(failure.value.__cause__, error_type)
+    assert failure.value.data_version == _table(tmp_path).version
+    assert _state(tmp_path)[0] == ["row-0", "row-1", "row-10", "row-11"]
+
+
 def test_explicit_operation_id_resumes_finalization_after_reconstruction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -713,6 +762,85 @@ def test_stream_and_legacy_writes_are_serialized_across_processes(tmp_path: Path
         "row-22",
         "row-23",
     ]
+
+
+def test_stream_waits_for_legacy_index_finalization_across_processes(tmp_path: Path) -> None:
+    _backend(
+        tmp_path,
+        build_index=True,
+        index_type="IVF_FLAT",
+        num_partitions=2,
+    ).stream_ingest(_records(0, 4))
+    context = mp.get_context("spawn")
+    legacy_mutation_done = context.Event()
+    legacy_index_entered = context.Event()
+    release_legacy_index = context.Event()
+    stream_mutation_done = context.Event()
+    stream_index_entered = context.Event()
+    stream_index_lock_attempted = context.Event()
+    stream_index_lock_acquired = context.Event()
+    legacy = context.Process(
+        target=_writer_process,
+        args=(str(tmp_path), _records(10, 14)),
+        kwargs={
+            "operation": "run",
+            "operation_id": None,
+            "block_in_add": False,
+            "add_done": legacy_mutation_done,
+            "build_index": True,
+            "index_entered": legacy_index_entered,
+            "release_index": release_legacy_index,
+        },
+    )
+    streaming = context.Process(
+        target=_writer_process,
+        args=(str(tmp_path), _records(20, 24)),
+        kwargs={
+            "operation": "stream",
+            "operation_id": None,
+            "block_in_add": False,
+            "add_done": stream_mutation_done,
+            "build_index": True,
+            "index_entered": stream_index_entered,
+            "lock_attempted": stream_index_lock_attempted,
+            "lock_acquired": stream_index_lock_acquired,
+            "lock_phase": "index",
+        },
+    )
+
+    legacy.start()
+    try:
+        assert legacy_mutation_done.wait(timeout=30)
+        assert legacy_index_entered.wait(timeout=30)
+        streaming.start()
+        assert stream_mutation_done.wait(timeout=30)
+        assert stream_index_lock_attempted.wait(timeout=30)
+        assert not stream_index_lock_acquired.wait(timeout=1)
+        assert not stream_index_entered.is_set()
+        release_legacy_index.set()
+        assert stream_index_lock_acquired.wait(timeout=30)
+        assert stream_index_entered.wait(timeout=30)
+        legacy.join(timeout=30)
+        streaming.join(timeout=30)
+        assert not legacy.is_alive()
+        assert not streaming.is_alive()
+        assert legacy.exitcode == 0
+        assert streaming.exitcode == 0
+    finally:
+        release_legacy_index.set()
+        for process in (legacy, streaming):
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=10)
+
+    ids, _versions = _state(tmp_path)
+    expected_ids = [f"row-{row_id}" for row_id in [*range(4), *range(10, 14), *range(20, 24)]]
+    assert ids == sorted(expected_ids)
+    table = _table(tmp_path)
+    vector_index = next(index for index in table.list_indices() if tuple(index.columns) == ("vector",))
+    stats = table.index_stats(vector_index.name)
+    assert stats.num_indexed_rows == len(ids)
+    assert stats.num_unindexed_rows == 0
 
 
 @pytest.mark.parametrize(

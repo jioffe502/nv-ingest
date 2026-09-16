@@ -115,8 +115,8 @@ def _is_filesystem_lancedb_uri(uri: str) -> bool:
     return _filesystem_lancedb_path(uri) is not None
 
 
-def _table_mutation_lock(uri: str, table_name: str) -> AbstractContextManager[Any]:
-    """Return the process-shared mutation lock for a local LanceDB table."""
+def _local_table_lock(uri: str, table_name: str, *, phase: str) -> AbstractContextManager[Any]:
+    """Return a process-shared phase lock for a local LanceDB table."""
 
     root = _filesystem_lancedb_path(uri)
     if root is None:
@@ -125,7 +125,19 @@ def _table_mutation_lock(uri: str, table_name: str) -> AbstractContextManager[An
     lock_dir = root / ".nemo-retriever-locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     table_token = hashlib.sha256(table_name.encode("utf-8")).hexdigest()[:24]
-    return FileLock(lock_dir / f"table-{table_token}.lock")
+    return FileLock(lock_dir / f"{phase}-{table_token}.lock")
+
+
+def _table_mutation_lock(uri: str, table_name: str) -> AbstractContextManager[Any]:
+    """Return the process-shared mutation lock for a local LanceDB table."""
+
+    return _local_table_lock(uri, table_name, phase="table")
+
+
+def _table_index_lock(uri: str, table_name: str) -> AbstractContextManager[Any]:
+    """Return the process-shared index lock for a local LanceDB table."""
+
+    return _local_table_lock(uri, table_name, phase="index")
 
 
 def _without_fts_phrase_syntax(query_text: str) -> str:
@@ -1570,7 +1582,7 @@ class LanceDB(VDB):
         if self.build_index:
             self._maintain_indexes(None, fresh_table)
         if self.stream_optimize:
-            with self._index_lock:
+            with self._index_lock, _table_index_lock(self.uri, self.table_name):
                 fresh_table.checkout_latest()
                 fresh_table.optimize()
 
@@ -1817,15 +1829,17 @@ class LanceDB(VDB):
                 batches=chain(initial_batches, arrow_batches),
                 stats=stats,
             )
-            created_from_absent = not table_exists or recovered_create
-            if self.overwrite or created_from_absent:
-                expected_rows = stats.rows_written
-            else:
-                append_base_rows = (
-                    base_rows if markers is None else _rows_at_version(self.uri, self.table_name, mutation_base_version)
-                )
-                expected_rows = append_base_rows + stats.rows_written
             try:
+                created_from_absent = not table_exists or recovered_create
+                if self.overwrite or created_from_absent:
+                    expected_rows = stats.rows_written
+                else:
+                    append_base_rows = (
+                        base_rows
+                        if markers is None
+                        else _rows_at_version(self.uri, self.table_name, mutation_base_version)
+                    )
+                    expected_rows = append_base_rows + stats.rows_written
                 self._finalize_stream_write(
                     markers=markers,
                     data_version=data_version,
@@ -1833,7 +1847,13 @@ class LanceDB(VDB):
                     expected_rows=expected_rows,
                     stats=stats,
                 )
-            except (OSError, RuntimeError, ValueError, pa.ArrowException) as exc:
+            except Exception as exc:  # noqa: BLE001 - terminal post-commit boundary preserves replay safety.
+                logger.error(
+                    "LanceDB data committed at version %s but finalization failed for table %r.",
+                    data_version,
+                    self.table_name,
+                    exc_info=True,
+                )
                 raise DataCommittedFinalizationError(
                     self.table_name,
                     data_version,
@@ -1931,7 +1951,7 @@ class LanceDB(VDB):
 
     def _maintain_service_fts(self, table: Any, *, table_existed: bool) -> None:
         """Create or incrementally maintain the service's FTS index."""
-        with self._index_lock:
+        with self._index_lock, _table_index_lock(self.uri, self.table_name):
             self._checkout_latest(table)
             self._ensure_fts_index(table)
             if table_existed:
@@ -1954,7 +1974,7 @@ class LanceDB(VDB):
                 if self._index_completed_generation >= required_generation:
                     return
 
-            with self._index_lock:
+            with self._index_lock, _table_index_lock(self.uri, self.table_name):
                 with self._index_generation_lock:
                     if self._index_completed_generation >= required_generation:
                         return
