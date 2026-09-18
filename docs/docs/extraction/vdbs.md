@@ -64,7 +64,7 @@ result = (
 Bare `.vdb_upload()` writes to table `nemo-retriever`. Default `Retriever()`
 queries that table.
 
-You can omit `.embed()` if a custom stage provides an embedding in `metadata["embedding"]` or `text_embeddings_1b_v2["embedding"]`. If extracted content reaches `.vdb_upload()` without embeddings, `.ingest()` raises `ValueError`. An extraction that produces no content completes without uploading records.
+You can omit `.embed()` if a custom stage provides an embedding in `metadata["embedding"]` or `text_embeddings_1b_v2["embedding"]`. Dense upload fails closed if any searchable row in a nonempty batch is missing an embedding. This includes a mixed batch where other rows have embeddings: the library raises `VdbUploadError`, a `ValueError` subclass, without committing the embedded subset. An extraction that produces no content completes without uploading records. For automatic handling of overlength text before upload, refer to [Text inputs that exceed the model limit](embedding.md#text-input-overflow).
 
 ## Keep the embedding model aligned { #lancedb-embedding-model-compatibility }
 
@@ -234,6 +234,11 @@ implementing `stream_ingest(records)`. The method receives a lazy, single-pass
 iterable of canonical NeMo Retriever Library record dictionaries. It must
 consume the iterable synchronously and to exhaustion, and must not retain it.
 Ray, pandas, Arrow, and backend-specific objects do not cross this interface.
+The converter can discover an invalid later row, including a searchable row
+without an embedding, only when it exhausts the iterator. An opt-in backend
+must treat an exception from the record iterator as failure of the complete
+write and must not commit the consumed prefix. LanceDB enforces this contract
+by passing all bounded Arrow batches through one native table mutation.
 
 Existing custom backends retain the global-batch `VDB.run(records)` path unless
 they opt in. For LanceDB, ordinary fixed-table configurations with scheme-less

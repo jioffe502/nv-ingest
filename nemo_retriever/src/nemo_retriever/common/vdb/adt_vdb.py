@@ -440,7 +440,8 @@ class VDB(ABC):
         records
             Single-pass iterable of canonical record dictionaries. Implementations
             must consume it synchronously, exactly once, and to exhaustion without
-            retaining it.
+            retaining it. If iteration raises, the implementation must propagate
+            the error without committing a partial prefix.
 
         Returns
         -------

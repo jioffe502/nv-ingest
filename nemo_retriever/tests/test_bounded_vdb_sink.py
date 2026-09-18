@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+import pandas as pd
 import pytest
 
 lancedb = pytest.importorskip("lancedb", minversion="0.34.0")
@@ -26,6 +27,8 @@ from nemo_retriever.common.vdb._lancedb_stream_state import (
 )
 from nemo_retriever.common.vdb.adt_vdb import UnsupportedVDBOperation
 from nemo_retriever.common.vdb.lancedb import LanceDB
+from nemo_retriever.common.vdb.records import VdbUploadError
+from nemo_retriever.operators.vdb import IngestVdbOperator
 
 
 def _record(
@@ -254,6 +257,21 @@ def test_stream_ingest_is_lazy_and_byte_bounded_with_legacy_query_parity(
     assert [[hit["id"] for hit in hits] for hits in streaming_hits] == [
         [hit["id"] for hit in hits] for hits in legacy_hits
     ]
+
+
+def test_conversion_failure_does_not_commit_a_partial_stream(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    rows = pd.DataFrame(
+        [
+            {"text": "embedded", "metadata": {"embedding": [1.0, 1.0]}},
+            {"text": "missing", "metadata": {"embedding": []}},
+        ]
+    )
+
+    with pytest.raises(VdbUploadError, match="refusing a partial write"):
+        IngestVdbOperator(vdb=backend)._stream_ingest([rows])
+
+    assert "chunks" not in lancedb.connect(str(tmp_path)).list_tables().tables
 
 
 def test_oversized_row_fails_without_table_mutation(tmp_path: Path) -> None:
