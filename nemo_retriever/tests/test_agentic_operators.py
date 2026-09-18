@@ -188,6 +188,15 @@ class TestReActAgentOperator:
     def _input(self):
         return pd.DataFrame({"query_id": ["q1"], "query_text": ["What causes inflation?"]})
 
+    def test_pop_query_usage_delegates_without_building_agent(self):
+        op = self._op()
+        assert op.pop_query_usage("q1") == {}
+
+        op._agent = MagicMock()
+        op._agent.llm.pop_query_usage.return_value = {"main_agent": {"prompt_tokens": 3}}
+        assert op.pop_query_usage("q1") == {"main_agent": {"prompt_tokens": 3}}
+        op._agent.llm.pop_query_usage.assert_called_once_with("q1")
+
     def test_retrieve_adapter_renames_and_coerces(self):
         op = self._op(
             retriever_fn=lambda q, k: [
@@ -379,6 +388,15 @@ class TestSelectionAgentOperator:
                 "react_final_rank": react_final_rank,
             }
         )
+
+    def test_pop_query_usage_delegates_without_building_agent(self):
+        op = self._op()
+        assert op.pop_query_usage("q1") == {}
+
+        op._sel = MagicMock()
+        op._sel.llm.pop_query_usage.return_value = {"top2_agent": {"completion_tokens": 2}}
+        assert op.pop_query_usage("q1") == {"top2_agent": {"completion_tokens": 2}}
+        op._sel.llm.pop_query_usage.assert_called_once_with("q1")
 
     def test_final_results_passthrough(self):
         """Tier 1: a ReAct final list passes through; the selection agent is not run."""
@@ -918,22 +936,27 @@ class TestCallableLLMBackend:
 
 
 class TestAgentConfigMode:
-    """``mode`` is retained as the extension point but only ``select`` is implemented."""
+    """``select`` and ``answer`` are the supported modes; anything else is rejected."""
 
     def test_select_mode_is_accepted(self):
         from nemo_retriever._agentic.nemo_agent import AgentConfig
 
         assert AgentConfig(mode="select").mode == "select"
 
+    def test_answer_mode_is_accepted(self):
+        from nemo_retriever._agentic.nemo_agent import AgentConfig
+
+        assert AgentConfig(mode="answer").mode == "answer"
+
     def test_mode_defaults_to_select(self):
         from nemo_retriever._agentic.nemo_agent import AgentConfig
 
         assert AgentConfig().mode == "select"
 
-    def test_answer_mode_is_rejected(self):
+    def test_unknown_mode_is_rejected(self):
         from pydantic import ValidationError
 
         from nemo_retriever._agentic.nemo_agent import AgentConfig
 
         with pytest.raises(ValidationError):
-            AgentConfig(mode="answer")
+            AgentConfig(mode="summarize")

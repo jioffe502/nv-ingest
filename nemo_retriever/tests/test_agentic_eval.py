@@ -12,8 +12,13 @@ import pandas as pd
 import pytest
 
 
-def _make_tool_call_response(fn_name: str, fn_args: dict, tc_id: str = "call_1") -> dict:
-    return {
+def _make_tool_call_response(
+    fn_name: str,
+    fn_args: dict,
+    tc_id: str = "call_1",
+    usage: dict | None = None,
+) -> dict:
+    response = {
         "choices": [
             {
                 "message": {
@@ -30,6 +35,9 @@ def _make_tool_call_response(fn_name: str, fn_args: dict, tc_id: str = "call_1")
             }
         ]
     }
+    if usage is not None:
+        response["usage"] = usage
+    return response
 
 
 class FakeRetriever:
@@ -131,6 +139,55 @@ def test_agentic_retriever_runs_graph_with_wrapped_retriever():
     assert result["query_id"].tolist() == ["0"] * 10
     assert result["doc_id"].tolist()[0] == "doc_1"
     assert result["rank"].tolist() == list(range(1, 11))
+
+
+@patch("nemo_retriever.query.agentic.Retriever", FakeRetriever)
+def test_agentic_retriever_returns_and_pops_query_usage():
+    from nemo_retriever.query.agentic import AgenticRetrievalConfig, AgenticRetriever
+
+    usage = {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15}
+    response = _make_tool_call_response(
+        "final_results",
+        {
+            "doc_ids": ["doc_1"] + [f"extra_{i}" for i in range(9)],
+            "message": "done",
+            "search_successful": "true",
+        },
+        usage=usage,
+    )
+    cfg = AgenticRetrievalConfig(llm_model="nemotron-8b")
+    with patch("nemo_retriever.query.agentic._build_agent_chat_completion_fn", return_value=lambda **_: response):
+        result = AgenticRetriever(cfg, match_mode="pdf_page").retrieve_with_usage(["customer-q"], ["find doc"])
+
+    assert result.usage == {"customer-q": {"main_agent": usage}}
+    assert result.documents["query_id"].tolist() == ["customer-q"] * 10
+
+
+@patch("nemo_retriever.query.agentic.Retriever", FakeRetriever)
+def test_agentic_retriever_isolates_usage_for_concurrent_queries():
+    from nemo_retriever.query.agentic import AgenticRetrievalConfig, AgenticRetriever
+
+    usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+    response = _make_tool_call_response(
+        "final_results",
+        {
+            "doc_ids": ["doc_1"] + [f"extra_{i}" for i in range(9)],
+            "message": "done",
+            "search_successful": "true",
+        },
+        usage=usage,
+    )
+    cfg = AgenticRetrievalConfig(llm_model="nemotron-8b", num_concurrent=2)
+    with patch("nemo_retriever.query.agentic._build_agent_chat_completion_fn", return_value=lambda **_: response):
+        result = AgenticRetriever(cfg, match_mode="pdf_page").retrieve_with_usage(
+            ["customer-a", "customer-b"],
+            ["find a", "find b"],
+        )
+
+    assert result.usage == {
+        "customer-a": {"main_agent": usage},
+        "customer-b": {"main_agent": usage},
+    }
 
 
 @patch("nemo_retriever.query.agentic.Retriever", FakeRetriever)
@@ -290,6 +347,109 @@ def test_agentic_query_documents_returns_classic_hit_fields_with_annotations():
     retriever.unload.assert_called_once()
 
 
+def test_agentic_query_documents_with_metadata_normalizes_usage():
+    from nemo_retriever.query.agentic import AgenticRetrieveResult
+    from nemo_retriever.query.options import QueryAgenticOptions, QueryRequest, QueryRetrievalOptions
+    from nemo_retriever.query.workflow import agentic_query_documents_with_metadata
+
+    retriever = MagicMock()
+    retriever.retrieve_with_usage.return_value = AgenticRetrieveResult(
+        documents=pd.DataFrame(
+            {
+                "query_id": ["0"],
+                "doc_id": ["doc_1"],
+                "rank": [1],
+                "result_source": ["final_results"],
+                "hit": [{"text": "body"}],
+            }
+        ),
+        usage={
+            "0": {
+                "main_agent": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 4,
+                    "total_tokens": 15,
+                    "prompt_tokens_details": {"cached_tokens": 5},
+                },
+                "top1_agent": {"input_tokens": 3, "output_tokens": 2},
+            }
+        },
+    )
+    request = QueryRequest(
+        query="find doc",
+        retrieval=QueryRetrievalOptions(top_k=1),
+        agentic=QueryAgenticOptions(enabled=True, llm_model="m", invoke_url=_REMOTE_URL),
+    )
+
+    with patch("nemo_retriever.query.workflow.build_agentic_retriever", return_value=retriever):
+        result = agentic_query_documents_with_metadata(request)
+
+    assert result.usage["input_tokens"] == 14
+    assert result.usage["cache_tokens"] == 5
+    assert result.usage["output_tokens"] == 6
+    assert result.usage["total_tokens"] == 20
+    assert set(result.usage["stages"]) == {"main_agent", "top1_agent"}
+    retriever.unload.assert_called_once()
+
+
+def test_normalize_usage_breakdown_includes_split_cache_input_tokens():
+    """Separately reported cache counters contribute to the input total."""
+    from nemo_retriever._agentic.nemo_agent.llm.usage import normalize_usage_breakdown
+
+    split_input_usage = {
+        "input_tokens": 120,
+        "cache_creation_input_tokens": 30,
+        "cache_read_input_tokens": 400,
+        "cache_creation": {
+            "ephemeral_5m_input_tokens": 30,
+            "ephemeral_1h_input_tokens": 0,
+        },
+        "output_tokens": 25,
+        "service_tier": "standard",
+    }
+
+    result = normalize_usage_breakdown({"main_agent": split_input_usage})
+
+    assert result == {
+        "input_tokens": 550,
+        "cache_tokens": 400,
+        "output_tokens": 25,
+        "total_tokens": 575,
+        "stages": {"main_agent": split_input_usage},
+    }
+
+
+def test_normalize_usage_breakdown_sums_observed_nested_cache_reads():
+    from nemo_retriever._agentic.nemo_agent.llm.usage import normalize_usage_breakdown
+
+    usage = {
+        "main_agent": {
+            "prompt_tokens": 120,
+            "completion_tokens": 25,
+            "total_tokens": 145,
+            "prompt_tokens_details": {"cached_tokens": 40},
+        },
+        "selection_agent": {
+            "input_tokens": 30,
+            "output_tokens": 5,
+            "input_tokens_details": {"cached_tokens": 10},
+        },
+        "provider_without_cache_details": {
+            "prompt_tokens": 20,
+            "completion_tokens": 3,
+            "total_tokens": 23,
+        },
+    }
+
+    result = normalize_usage_breakdown(usage)
+
+    assert result["input_tokens"] == 170
+    assert result["cache_tokens"] == 50
+    assert result["output_tokens"] == 33
+    assert result["total_tokens"] == 203
+    assert result["stages"] == usage
+
+
 @patch("nemo_retriever.query.agentic.Retriever", FakeRetriever)
 def test_agentic_retriever_honors_top_k():
     """cfg.top_k drives the pipeline output count, not the hardcoded default of 10."""
@@ -321,9 +481,37 @@ def test_agentic_retriever_forwards_candidate_k_per_hop():
     retriever._retrieve_for_agent("later", 25, query_id="q1")
 
     assert retriever._retriever.query_calls == [
-        {"query": "first", "top_k": 10, "candidate_k": 20},
+        {"query": "first", "top_k": 20, "candidate_k": 20},
         {"query": "later", "top_k": 25, "candidate_k": 25},
     ]
+
+
+@patch("nemo_retriever.query.agentic.Retriever", FakeRetriever)
+def test_agentic_retriever_fills_top_k_after_document_dedup():
+    from nemo_retriever.query.agentic import AgenticRetrievalConfig, AgenticRetriever
+
+    cfg = AgenticRetrievalConfig(llm_model="m", invoke_url=_REMOTE_URL, top_k=3, candidate_k=6)
+    retriever = AgenticRetriever(cfg, match_mode="pdf_page")
+    ranked_chunks = [
+        {"pdf_page": "doc_1", "text": "doc 1 chunk 1", "_score": 0.9},
+        {"pdf_page": "doc_1", "text": "doc 1 chunk 2", "_score": 0.8},
+        {"pdf_page": "doc_1", "text": "doc 1 chunk 3", "_score": 0.7},
+        {"pdf_page": "doc_2", "text": "doc 2", "_score": 0.6},
+        {"pdf_page": "doc_3", "text": "doc 3", "_score": 0.5},
+        {"pdf_page": "doc_4", "text": "doc 4", "_score": 0.4},
+    ]
+
+    def query(_query, *, top_k=None, candidate_k=None):
+        retriever._retriever.query_calls.append({"query": _query, "top_k": top_k, "candidate_k": candidate_k})
+        return ranked_chunks[:top_k]
+
+    retriever._retriever.query = query
+
+    docs = retriever._retrieve_for_agent("find docs", 3, query_id="q1")
+
+    assert [doc["doc_id"] for doc in docs] == ["doc_1", "doc_2", "doc_3"]
+    assert docs[0]["text"] == "doc 1 chunk 1"
+    assert retriever._retriever.query_calls == [{"query": "find docs", "top_k": 6, "candidate_k": 6}]
 
 
 @patch("nemo_retriever.query.agentic.Retriever", FakeRetriever)

@@ -365,8 +365,10 @@ The config defines models once and composes evaluation combos with per-combo run
 
 ### Results (March 2026 -- full-page markdown, bo767_annotations.csv)
 
+This historical run predates the Nemotron 3.5 Lightning default. Its scores do not measure the current generator.
+
 ```
-1005 queries evaluated (Nemotron Super 49B generator, Mixtral 8x22B judge)
+1005 queries evaluated (historical generator configuration, Mixtral 8x22B judge)
 
 Tier 1 - Retrieval Quality:
   Answer-in-Context rate:  88.2% (886/1005)
@@ -1120,7 +1122,7 @@ across all modalities (text, table, chart, infographic) for 767 bo767 PDFs.
 
 3. **Full-page markdown recommended**: Sub-page chunks may split structured content (tables, charts) across multiple records. The full-page markdown pipeline (step 2 in reproduction) reconstructs complete pages, matching the research team's approach and improving generation accuracy.
 
-4. **Reasoning model truncation**: Models with extended thinking (e.g., Nemotron Super) may spend their token budget reasoning and never produce a final answer. The pipeline detects this (`thinking_truncated`) and nullifies the score.
+4. **Reasoning model truncation**: Models with extended thinking (for example, Nemotron 3.5 Lightning) may spend their token budget reasoning and never produce a final answer. The pipeline detects this (`thinking_truncated`) and nullifies the score.
 
 5. **Model refusal failures**: The model sometimes responds "no information found" even when the answer is in the retrieved chunks. The failure breakdown splits these into `refused_missing_context` (answer genuinely absent -- retrieval problem) vs `refused_with_context` (answer present but model refused -- generator problem). Together they account for ~13% of queries in the reference run.
 
