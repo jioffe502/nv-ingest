@@ -31,7 +31,7 @@ def test_llm_config_defaults_to_reasoning_enabled_for_external_provider_safety()
     assert LLMConfig().reasoning_enabled is True
 
 
-def test_llm_config_defaults_to_current_hosted_nim() -> None:
+def test_llm_config_defaults_to_lightning() -> None:
     assert LLMConfig().model == "openai/nvidia/nemotron-3.5-lightning-30b-a3b"
 
 

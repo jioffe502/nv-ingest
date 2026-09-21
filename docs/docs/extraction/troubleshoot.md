@@ -640,7 +640,7 @@ For value paths and a rename example, refer to [Use externally managed Secrets](
 
 The CLI then exits with `Agentic retrieval failed (llm_call_failed)`.
 
-The default Helm `answer_llm` NIM enables `--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder` through `NIM_PASSTHROUGH_ARGS`. If you override `nimOperator.answer_llm.env`, retain these arguments and include the complete environment-variable list. Also configure `serviceConfig.agentic` for service mode. `POST /v1/answer` is a separate path and does not require tool calling.
+For the Helm `answer_llm` Nemotron 3.5 Lightning NIM, add `--enable-auto-tool-choice --tool-call-parser qwen3_coder` to `NIM_PASSTHROUGH_ARGS`, retaining `--reasoning-parser nemotron_v3`, and set `serviceConfig.agentic` for service mode. `POST /v1/answer` is a separate path and does not require tool calling.
 
 For the copy-paste Helm values and CLI command, refer to [Self-hosted Helm Nemotron 3.5 Lightning](workflow-agentic-retrieval.md#self-hosted-helm-lightning).
 

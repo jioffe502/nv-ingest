@@ -1313,7 +1313,7 @@ nimOperator:
   # extraction NIMs. The default image/model is Nemotron 3.5 Lightning and
   # requests one GPU. Override `image.repository`, `image.tag`, `model`,
   # `nimServiceName`, `resources`, `modelProfile`, and `env` to swap in
-  # another compatible LLM NIM.
+  # another compatible LLM NIM such as Nemotron 3 Nano.
   answer_llm:
     enabled: false
     # NIMService / NIMCache resource name and in-cluster Service DNS label.
@@ -1371,7 +1371,7 @@ nimOperator:
       - name: NIM_TENSOR_PARALLEL_SIZE
         value: "1"
       - name: NIM_PASSTHROUGH_ARGS
-        value: "--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder"
+        value: "--reasoning-parser nemotron_v3"
 
   # Llama Nemotron rerank VL 1B v2 — multimodal reranking NIM.
   #

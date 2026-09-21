@@ -368,7 +368,7 @@ The config defines models once and composes evaluation combos with per-combo run
 This historical run predates the Nemotron 3.5 Lightning default. Its scores do not measure the current generator.
 
 ```
-1005 queries evaluated (historical generator configuration, Mixtral 8x22B judge)
+1005 queries evaluated (Nemotron Super 49B generator, Mixtral 8x22B judge)
 
 Tier 1 - Retrieval Quality:
   Answer-in-Context rate:  88.2% (886/1005)

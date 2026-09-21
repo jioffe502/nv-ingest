@@ -114,8 +114,8 @@ collision-free assignment for the combined-profile example: core NIMs use GPUs
 0, 1, 2, and 3 (page-elements, table-structure, OCR, and embedding), reranker uses 4,
 parse uses 5, caption uses 6, answer uses 7, and audio uses 9. Change the
 defaults to match the active profiles and host before startup. The one-GPU
-answer NIM uses `NIM_ANSWER_GPU_ID`; for example, an answer-only run can set
-`NIM_ANSWER_GPU_ID=0`. Compose lifecycle support
+answer NIM uses `NIM_ANSWER_GPU_ID_0`; for example, an answer-only run can set
+`NIM_ANSWER_GPU_ID_0=0`. Compose lifecycle support
 means image pull, startup, readiness, persistent model or cache data, restart, logs, and
 teardown; NIM Operator reconciliation, NIMCache CRDs, and model-profile
 selection remain Kubernetes-only.
@@ -246,9 +246,8 @@ echo "${NGC_API_KEY}" | docker login nvcr.io --username '$oauthtoken' --password
 docker compose -f nemo_retriever/dev/compose/judge.compose.yaml up -d judge
 ```
 
-Set `judge.model` to `openai/nvidia/nemotron-3.5-lightning-30b-a3b` and `judge.api_base` to
-`http://localhost:8000/v1` in the skill-eval configuration. Override the host
-port with `JUDGE_HTTP_PORT` when needed.
+Point `judge.api_base` at `http://localhost:8000/v1` in the skill-eval
+configuration. Override the host port with `JUDGE_HTTP_PORT` when needed.
 
 ### Neo4j
 

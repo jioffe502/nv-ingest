@@ -377,7 +377,9 @@ embedding endpoint.
 
 **Local in-process vLLM agent LLM.** Omit `--agentic-invoke-url` to load the
 supported local agent LLM directly in the Python process. `nemotron-8b` is the
-default. Use the remote endpoint example below for Nemotron 3.5 Lightning.
+default; `super-49b` is also supported when the process has enough visible GPUs.
+For `super-49b`, set `--agentic-local-tensor-parallel-size 2` with two visible
+GPUs (for example `CUDA_VISIBLE_DEVICES=0,1`).
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 retriever query "Given their activities, which animal is responsible for the typos in my documents?" \
@@ -408,9 +410,10 @@ retriever query "What is RAG?" \
   --table-name nemo-retriever
 ```
 
-The Helm `answer_llm` NIM enables `--reasoning-parser nemotron_v3`,
-`--enable-auto-tool-choice`, and `--tool-call-parser qwen3_coder` by default.
-Configure the agentic endpoint separately. Refer to
+The Helm `answer_llm` Nemotron 3.5 Lightning NIM is not tool-call ready by default.
+Add `--enable-auto-tool-choice --tool-call-parser qwen3_coder` to
+`NIM_PASSTHROUGH_ARGS`, retaining `--reasoning-parser nemotron_v3`, before
+you point `--agentic-invoke-url` at that endpoint. Refer to
 [Agentic retrieval (self-hosted Nemotron 3.5 Lightning)](helm/README.md#agentic-retrieval-llm)
 in the Helm chart README.
 

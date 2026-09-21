@@ -21,7 +21,7 @@ GPU placement follows process-level vLLM behavior. Set `CUDA_VISIBLE_DEVICES` be
 CUDA_VISIBLE_DEVICES=0 retriever query "find documents about parser behavior" --agentic
 ```
 
-To use Nemotron 3.5 Lightning, configure a remote endpoint as described below.
+The larger `super-49b` profile is also supported. Pass `--agentic-local-tensor-parallel-size 2` with two visible GPUs for that profile.
 
 Custom in-process LLMs are not supported. The agent loop depends on OpenAI-style tool-call messages. Use an OpenAI-compatible endpoint for custom models.
 
@@ -49,7 +49,7 @@ retriever query "find documents about parser behavior" \
 
 `--agentic-local-tensor-parallel-size` is ignored when `--agentic-invoke-url` is set. For hosted model IDs, refer to [Default NVCF endpoints](prerequisites-support-matrix.md#default-nvcf-endpoints). For key setup, refer to [Authentication and API keys](api-keys.md).
 
-The Helm answer NIM enables automatic tool calling with the `qwen3_coder` parser by default. Refer to [Self-hosted Helm Nemotron 3.5 Lightning](#self-hosted-helm-lightning).
+This self-hosted NIM configuration gap does not apply to NVIDIA-hosted Build endpoints. A Helm-deployed Nemotron 3.5 Lightning NIM rejects tool-call requests until you add the passthrough arguments. Refer to [Self-hosted Helm Nemotron 3.5 Lightning](#self-hosted-helm-lightning).
 
 ### CLI options { #cli-options }
 
@@ -57,9 +57,9 @@ The following options apply only with `--agentic`. For the full flag list, refer
 
 | Option | Default | Notes |
 |---|---|---|
-| `--agentic-llm-model` | `nemotron-8b` when no invoke URL is set | Local profile alias (`nemotron-8b`) or remote model ID when `--agentic-invoke-url` is set. |
+| `--agentic-llm-model` | `nemotron-8b` when no invoke URL is set | Local profile alias (`nemotron-8b` or `super-49b`) or remote model ID when `--agentic-invoke-url` is set. |
 | `--agentic-invoke-url` | unset (local vLLM) | OpenAI-compatible `/v1/chat/completions` endpoint. Required together with `--agentic-llm-model` for remote runs. |
-| `--agentic-local-tensor-parallel-size` | `1` | vLLM `tensor_parallel_size` for the in-process agent LLM. Match the number of visible GPUs when using tensor parallelism. Ignored when `--agentic-invoke-url` is set. |
+| `--agentic-local-tensor-parallel-size` | `1` | vLLM `tensor_parallel_size` for the in-process agent LLM. Set to `2` for local `super-49b`. Ignored when `--agentic-invoke-url` is set. |
 | `--agentic-react-max-steps` | `50` | Maximum ReAct loop iterations. |
 | `--agentic-reasoning-effort` | `high` | Forwarded on OpenAI-compatible agent LLM calls. Ignored by the local adapter. |
 | `--include-usage` | off | Print an object with `hits` and provider-reported LLM `usage` instead of the default hits list. |
@@ -68,35 +68,49 @@ Embedding credentials use `NVIDIA_API_KEY` or `NGC_API_KEY` when you call a remo
 
 ## Self-hosted Helm Nemotron 3.5 Lightning { #self-hosted-helm-lightning }
 
-Use the chart's optional `answer_llm` NIM for agentic retrieval and grounded answer generation. The slot defaults to `nvidia/nemotron-3.5-lightning-30b-a3b`.
+Use this path when the agent LLM is the Helm-deployed Nemotron 3.5 Lightning NIM rather than local in-process vLLM or an NVIDIA-hosted Build endpoint.
 
-The chart enables `--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder` through `NIM_PASSTHROUGH_ARGS`. These arguments separate reasoning from answer text and support the ReAct loop's `tool_choice=auto` requests. Refer to [NVIDIA's Lightning deployment guide](https://docs.nvidia.com/nim/large-language-models/2.0.10/get-started/advanced/get-started-nemotron-3.5-lightning.html).
+`nimOperator.answer_llm.enabled=true` deploys Nemotron 3.5 Lightning and auto-wires it only to `serviceConfig.llm` for `POST /v1/answer`. That answer path sends a plain text-generation request and does not require tool calling. `serviceConfig.agentic` is a separate block and stays empty unless you set it.
 
-Enabling `answer_llm` auto-wires `POST /v1/answer`. Configure `serviceConfig.agentic` separately for service-mode `POST /v1/query` with `agentic=true`:
+The chart starts that NIM with `NIM_PASSTHROUGH_ARGS=--reasoning-parser nemotron_v3`. The agentic ReAct loop sends OpenAI-style tool-call messages with `tool_choice=auto`. A self-hosted vLLM-backed Nemotron 3.5 Lightning NIM rejects those requests with HTTP 400 unless you also pass `--enable-auto-tool-choice` and `--tool-call-parser qwen3_coder`.
+
+You can reuse the same Nemotron 3.5 Lightning NIM for agentic retrieval after you add those arguments. `POST /v1/answer` continues to work.
+
+If you set `nimOperator.answer_llm.env` in a values file, include the full list. Change only the `NIM_PASSTHROUGH_ARGS` value.
 
 ```yaml
 nimOperator:
   answer_llm:
     enabled: true
-
-serviceConfig:
-  agentic:
-    enabled: true
-    llmModel: nvidia/nemotron-3.5-lightning-30b-a3b
-    invokeUrl: http://answer-llm:8000/v1/chat/completions
+    env:
+      - name: NIM_HTTP_API_PORT
+        value: "8000"
+      - name: NIM_MODEL_NAME
+        value: "nvidia/nemotron-3.5-lightning-30b-a3b"
+      - name: NIM_SERVED_MODEL_NAME
+        value: "nvidia/nemotron-3.5-lightning-30b-a3b"
+      - name: NIM_TENSOR_PARALLEL_SIZE
+        value: "1"
+      - name: NIM_PASSTHROUGH_ARGS
+        value: "--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder"
 ```
 
-The equivalent command is:
+Equivalent `--set` override when you do not use a values file. Helm `--set` replaces the `env` list, so include every Nemotron 3.5 Lightning environment entry and change only the `NIM_PASSTHROUGH_ARGS` value:
 
 ```bash
 helm upgrade --install retriever ./nemo_retriever/helm \
   --set nimOperator.answer_llm.enabled=true \
-  --set serviceConfig.agentic.enabled=true \
-  --set serviceConfig.agentic.llmModel=nvidia/nemotron-3.5-lightning-30b-a3b \
-  --set serviceConfig.agentic.invokeUrl=http://answer-llm:8000/v1/chat/completions
+  --set nimOperator.answer_llm.env[0].name=NIM_HTTP_API_PORT \
+  --set-string nimOperator.answer_llm.env[0].value=8000 \
+  --set nimOperator.answer_llm.env[1].name=NIM_MODEL_NAME \
+  --set-string nimOperator.answer_llm.env[1].value=nvidia/nemotron-3.5-lightning-30b-a3b \
+  --set nimOperator.answer_llm.env[2].name=NIM_SERVED_MODEL_NAME \
+  --set-string nimOperator.answer_llm.env[2].value=nvidia/nemotron-3.5-lightning-30b-a3b \
+  --set nimOperator.answer_llm.env[3].name=NIM_TENSOR_PARALLEL_SIZE \
+  --set-string nimOperator.answer_llm.env[3].value=1 \
+  --set nimOperator.answer_llm.env[4].name=NIM_PASSTHROUGH_ARGS \
+  --set-string nimOperator.answer_llm.env[4].value="--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder"
 ```
-
-`llmModel` is the model ID advertised by the NIM, without the LiteLLM `openai/` prefix used by `serviceConfig.llm.model`. Change the hostname if you override `nimOperator.answer_llm.nimServiceName`.
 
 After the NIM is Ready, confirm the passthrough arguments:
 
@@ -104,19 +118,33 @@ After the NIM is Ready, confirm the passthrough arguments:
 kubectl exec -n <namespace> deploy/answer-llm -- printenv NIM_PASSTHROUGH_ARGS
 ```
 
-The value must include `--reasoning-parser nemotron_v3`, `--enable-auto-tool-choice`, and `--tool-call-parser qwen3_coder`. If you override `nimOperator.answer_llm.env`, include the complete list because Helm replaces environment-variable lists.
+The value must include `--enable-auto-tool-choice` and `--tool-call-parser qwen3_coder`.
 
-For one-shot CLI use, forward the NIM service:
+Forward the answer LLM for CLI use:
 
 ```bash
 kubectl port-forward -n <namespace> service/answer-llm 9000:8000
 ```
 
-Then use the command in [Remote OpenAI-compatible NIM or hosted endpoint](#remote-openai-compatible-endpoint). Set `--agentic-invoke-url` to `http://localhost:9000/v1/chat/completions` and `--agentic-llm-model` to `nvidia/nemotron-3.5-lightning-30b-a3b`. Reuse the embedding model and invoke URL from ingest.
+Then run the remote command in [Remote OpenAI-compatible NIM or hosted endpoint](#remote-openai-compatible-endpoint). Point `--agentic-invoke-url` at `http://localhost:9000/v1/chat/completions` and set `--agentic-llm-model` to `nvidia/nemotron-3.5-lightning-30b-a3b`. Reuse the same embedding invoke URL and model name that you used at ingest.
 
-To register MCP retrieval tools, also enable `serviceConfig.mcp.enabled` and set `serviceConfig.mcp.queryMethods` to `agentic` or `all`. Refer to [Enable MCP on Helm](#enable-mcp-on-helm).
+For service-mode `POST /v1/query` with `agentic=true` and the MCP `agentic_query` tool, also set `serviceConfig.agentic`. The chart does not copy `answer_llm` into this block.
 
-For GPU and profile requirements, refer to [Answer generation](prerequisites-support-matrix.md#answer-generation). For chart keys, refer to [Agentic retrieval](https://github.com/NVIDIA/NeMo-Retriever/blob/main/nemo_retriever/helm/README.md#agentic-retrieval-llm).
+```yaml
+serviceConfig:
+  agentic:
+    enabled: true
+    llmModel: nvidia/nemotron-3.5-lightning-30b-a3b
+    invokeUrl: http://answer-llm:8000/v1/chat/completions
+```
+
+`invokeUrl` uses the in-cluster Nemotron 3.5 Lightning service. Change the hostname if you override `nimOperator.answer_llm.nimServiceName`. `llmModel` is the model ID advertised by the NIM, not the LiteLLM `openai/` prefix used by `serviceConfig.llm.model`.
+
+If you register MCP retrieval tools, also set `serviceConfig.mcp.enabled=true` and set `serviceConfig.mcp.queryMethods` to `agentic` or `all`. Helm leaves MCP disabled by default. Agentic MCP tools are omitted unless `serviceConfig.agentic.enabled` is true. Refer to [Enable MCP on Helm](#enable-mcp-on-helm).
+
+For other self-hosted OpenAI-compatible NIMs, enable automatic tool choice and the parser that model requires. Nemotron 3.5 Lightning uses `qwen3_coder` for tool calls and `nemotron_v3` for reasoning.
+
+For chart keys, refer to [Agentic retrieval (self-hosted Nemotron 3.5 Lightning)](https://github.com/NVIDIA/NeMo-Retriever/blob/main/nemo_retriever/helm/README.md#agentic-retrieval-llm) in the Helm chart README.
 
 ## Enable agentic retrieval in the service { #enable-agentic-retrieval-in-the-service }
 
@@ -210,7 +238,7 @@ helm upgrade --install retriever ./nemo_retriever/helm \
   --set serviceConfig.agentic.invokeUrl=http://answer-llm:8000/v1/chat/completions
 ```
 
-The agentic `--set` values require a running chat-completions endpoint. Enable the answer NIM as described in [Self-hosted Helm Nemotron 3.5 Lightning](#self-hosted-helm-lightning).
+The agentic `--set` values still require a remote chat-completions endpoint. For self-hosted Nemotron 3.5 Lightning, also add the tool-call passthrough arguments in [Self-hosted Helm Nemotron 3.5 Lightning](#self-hosted-helm-lightning).
 
 Confirm the rendered ConfigMap before you rely on the endpoint:
 
@@ -291,7 +319,7 @@ When no retrieval hop captured the document, the service envelope fills these cl
 
 Operational failures from the agent LLM or retrieval tool, including embedding, vector database, and reranker endpoint failures, terminate the query with an error instead of returning a successful empty result.
 
-An HTTP `400` from the chat-completions NIM with `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set` means the self-hosted endpoint is not tool-call ready. For the default answer NIM, refer to [Self-hosted Helm Nemotron 3.5 Lightning](#self-hosted-helm-lightning). The CLI then exits with `Agentic retrieval failed (llm_call_failed)`.
+An HTTP `400` from the chat-completions NIM with `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set` means the self-hosted endpoint is not tool-call ready. Refer to [Self-hosted Helm Nemotron 3.5 Lightning](#self-hosted-helm-lightning). The CLI then exits with `Agentic retrieval failed (llm_call_failed)`.
 
 On the service:
 
@@ -305,10 +333,10 @@ Agentic runs use a dedicated worker pool in the VectorDB process so they cannot 
 
 ## Limitations and resource requirements { #limitations-and-resource-requirements }
 
-- Local in-process agent LLMs default to `nemotron-8b`. Use an OpenAI-compatible endpoint for Nemotron 3.5 Lightning or custom models.
-- Local CLI and harness runs need a CUDA GPU host and the `[local]` extra.
+- Local in-process agent LLMs are limited to the tested `nemotron-8b` and `super-49b` profiles. Custom in-process models require an OpenAI-compatible endpoint instead.
+- Local CLI and harness runs need a CUDA GPU host and the `[local]` extra. `super-49b` needs two visible GPUs and `--agentic-local-tensor-parallel-size 2`.
 - Retriever Service agentic queries require a remote chat-completions URL, a remote embedding endpoint, and matching credentials in the process environment.
-- The default Helm `answer_llm` NIM enables reasoning and tool-call parsers. Enabling `nimOperator.answer_llm` does not configure `serviceConfig.agentic`; set the agentic model and endpoint explicitly.
+- The default Helm `answer_llm` Nemotron 3.5 Lightning NIM is limited to `POST /v1/answer` until you add the tool-call passthrough arguments. Enabling `nimOperator.answer_llm` does not configure `serviceConfig.agentic`.
 - Helm leaves `serviceConfig.mcp.enabled` at `false`. Remote MCP agents require `--set serviceConfig.mcp.enabled=true` and must use the configured mount path, which defaults to `/mcp`. Refer to [Enable MCP on Helm](#enable-mcp-on-helm).
 - Agentic ranking is document-level. Rehydrated hits include chunk `text` when a retrieval hop returned the document. Otherwise load the source document by `doc_id`.
 - Service agentic queries accept a single query string, `format=hits` only, and cannot combine `rerank=true` on the same `/v1/query` request. On the CLI, `--rerank` applies to each agent retrieve hop.

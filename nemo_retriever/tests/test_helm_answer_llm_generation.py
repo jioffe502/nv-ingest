@@ -23,11 +23,12 @@ _LIGHTNING_REPOSITORY = "nvcr.io/nim/nvidia/nemotron-3.5-lightning-30b-a3b"
 _LIGHTNING_TAG = "2.0.9-variant"
 _LIGHTNING_MODEL = "openai/nvidia/nemotron-3.5-lightning-30b-a3b"
 _LIGHTNING_SERVED_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
-_CUSTOM_SERVICE = "custom-answerer"
-_CUSTOM_REPOSITORY = "example.com/nim/custom-answerer"
-_CUSTOM_TAG = "custom-tag"
-_CUSTOM_MODEL = "openai/custom-answerer"
-_CUSTOM_PROFILE = "custom-profile"
+_NANO_SERVICE = "nemotron-3-nano"
+_NANO_REPOSITORY = "nvcr.io/nim/nvidia/nemotron-3-nano"
+_NANO_TAG = "1.7.0-variant"
+_NANO_MODEL = "openai/nvidia/nemotron-3-nano-30b-a3b"
+_NANO_SERVED_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+_NANO_A100_PROFILE = "5f89f01a0af587fd8bae50c611b1f358f92effdb9fb29362e1af0a986e5561c3"
 
 
 def _read_required_file(path: Path) -> str:
@@ -80,9 +81,8 @@ class HelmAnswerLLMGenerationTests(TestCase):
         self.assertIn("modelProfile: {}", block)
         self.assertIn(_LIGHTNING_SERVED_MODEL, block)
         self.assertIn("NIM_MODEL_NAME", block)
-        self.assertIn("--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder", block)
+        self.assertIn("--reasoning-parser nemotron_v3", block)
         self.assertIn('size: "250Gi"', block)
-        self.assertIn("modelProfile: {}", block)
         self.assertIn("reasoningEnabled: true", values)
         self.assertIn('ragSystemPromptPrefix: ""', block)
 
@@ -146,56 +146,49 @@ class HelmAnswerLLMGenerationTests(TestCase):
         self.assertIn("nimOperator.answer_llm.image.pullSecrets is empty", combined)
         self.assertIn("ngcImagePullSecret.name is unset", combined)
 
-    def test_answer_llm_can_swap_to_custom_image_model_and_profile(self) -> None:
+    def test_answer_llm_can_swap_to_nano_image_model_and_profile(self) -> None:
         proc = _helm_template(
             extra_args=(
                 "--set",
                 "nimOperator.answer_llm.enabled=true",
                 "--set",
-                f"nimOperator.answer_llm.nimServiceName={_CUSTOM_SERVICE}",
+                f"nimOperator.answer_llm.nimServiceName={_NANO_SERVICE}",
                 "--set",
-                f"nimOperator.answer_llm.image.repository={_CUSTOM_REPOSITORY}",
+                f"nimOperator.answer_llm.image.repository={_NANO_REPOSITORY}",
                 "--set",
-                f"nimOperator.answer_llm.image.tag={_CUSTOM_TAG}",
+                f"nimOperator.answer_llm.image.tag={_NANO_TAG}",
                 "--set",
-                f"nimOperator.answer_llm.model={_CUSTOM_MODEL}",
+                f"nimOperator.answer_llm.model={_NANO_MODEL}",
                 "--set-json",
-                f'nimOperator.answer_llm.modelProfile={{"profiles":["{_CUSTOM_PROFILE}"]}}',
+                f'nimOperator.answer_llm.modelProfile={{"profiles":["{_NANO_A100_PROFILE}"]}}',
                 "--set-json",
-                'nimOperator.answer_llm.resources={"limits":{"nvidia.com/gpu":2}}',
+                'nimOperator.answer_llm.resources={"limits":{"nvidia.com/gpu":1},"requests":{"nvidia.com/gpu":1}}',
                 "--set",
                 "nimOperator.answer_llm.env[0].name=NIM_HTTP_API_PORT",
                 "--set-string",
                 "nimOperator.answer_llm.env[0].value=8000",
                 "--set",
-                "nimOperator.answer_llm.env[1].name=NIM_TENSOR_PARALLEL_SIZE",
+                "nimOperator.answer_llm.env[1].name=NIM_SERVED_MODEL_NAME",
                 "--set-string",
-                "nimOperator.answer_llm.env[1].value=2",
+                f"nimOperator.answer_llm.env[1].value={_NANO_SERVED_MODEL}",
                 "--set",
-                "nimOperator.answer_llm.env[2].name=NIM_PASSTHROUGH_ARGS",
+                "nimOperator.answer_llm.env[2].name=NIM_TENSOR_PARALLEL_SIZE",
                 "--set-string",
-                "nimOperator.answer_llm.env[2].value=--disable-custom-all-reduce",
-                "--set",
-                "nimOperator.answer_llm.env[3].name=NCCL_IB_DISABLE",
-                "--set-string",
-                "nimOperator.answer_llm.env[3].value=1",
-                "--set",
-                "nimOperator.answer_llm.env[4].name=NCCL_P2P_DISABLE",
-                "--set-string",
-                "nimOperator.answer_llm.env[4].value=1",
+                "nimOperator.answer_llm.env[2].value=1",
             )
         )
         _assert_helm_ok(self, proc)
 
-        self.assertIn(f"name: {_CUSTOM_SERVICE}", proc.stdout)
-        self.assertIn(f"repository: {_CUSTOM_REPOSITORY}", proc.stdout)
-        self.assertIn(f"tag: {_CUSTOM_TAG}", proc.stdout)
-        self.assertIn("NIM_PASSTHROUGH_ARGS", proc.stdout)
+        self.assertIn(f"name: {_NANO_SERVICE}", proc.stdout)
+        self.assertIn(f"repository: {_NANO_REPOSITORY}", proc.stdout)
+        self.assertIn(f"tag: {_NANO_TAG}", proc.stdout)
+        self.assertIn("NIM_SERVED_MODEL_NAME", proc.stdout)
+        self.assertIn(_NANO_SERVED_MODEL, proc.stdout)
         self.assertIn("NIM_TENSOR_PARALLEL_SIZE", proc.stdout)
-        self.assertIn(_CUSTOM_PROFILE, proc.stdout)
-        self.assertIn("nvidia.com/gpu: 2", proc.stdout)
-        self.assertIn(f'api_base: "http://{_CUSTOM_SERVICE}:8000/v1"', proc.stdout)
-        self.assertIn(f'model: "{_CUSTOM_MODEL}"', proc.stdout)
+        self.assertIn(_NANO_A100_PROFILE, proc.stdout)
+        self.assertIn("nvidia.com/gpu: 1", proc.stdout)
+        self.assertIn(f'api_base: "http://{_NANO_SERVICE}:8000/v1"', proc.stdout)
+        self.assertIn(f'model: "{_NANO_MODEL}"', proc.stdout)
         self.assertIn("rag_system_prompt_prefix: null", proc.stdout)
         self.assertIn("enabled: true", proc.stdout)
 

@@ -1067,10 +1067,12 @@ llm:
 The retriever service then exposes `POST /v1/answer`, which calls the
 VectorDB pod's `/v1/query` endpoint for context and sends those chunks to
 the configured LLM endpoint. This path does not require tool calling.
-The `answer_llm` NIM is not wired into `serviceConfig.agentic`. Configure
-that block separately when you use the same endpoint for agentic retrieval.
+The `answer_llm` NIM is not wired into `serviceConfig.agentic` and is
+not tool-call ready by default. For agentic retrieval against that NIM,
+refer to
+[Agentic retrieval (self-hosted Nemotron 3.5 Lightning)](#agentic-retrieval-llm).
 The `answer_llm` NIM starts with
-`NIM_PASSTHROUGH_ARGS=--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder`, which separates
+`NIM_PASSTHROUGH_ARGS=--reasoning-parser nemotron_v3`, which separates
 Lightning reasoning from the final answer content. `/v1/answer` controls
 reasoning per request. By default, `serviceConfig.llm.reasoningEnabled=true`, so requests
 leave reasoning behavior to the LLM endpoint defaults and avoid sending
@@ -1286,16 +1288,41 @@ Omni endpoint for `/v1/answer` does not add a second Omni GPU or cache.
 
 #### Agentic retrieval (self-hosted Nemotron 3.5 Lightning) { #agentic-retrieval-llm }
 
-The optional `answer_llm` NIM serves Nemotron 3.5 Lightning and enables
-`--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder`
-through `NIM_PASSTHROUGH_ARGS`. You can reuse it for grounded answers and
-agentic retrieval. The chart auto-wires `POST /v1/answer`; configure
-`serviceConfig.agentic` separately:
+`nimOperator.answer_llm.enabled=true` deploys Nemotron 3.5 Lightning and auto-wires
+it only to `serviceConfig.llm` for `POST /v1/answer`. That answer path
+sends a plain text-generation request and does not require tool
+calling. `serviceConfig.agentic` is a separate block. The chart does
+not populate it from `answer_llm`.
+
+The default Nemotron 3.5 Lightning NIM starts with
+`NIM_PASSTHROUGH_ARGS=--reasoning-parser nemotron_v3`. Agentic retrieval
+sends OpenAI-style tool-call messages with `tool_choice=auto`. A
+self-hosted vLLM-backed Nemotron 3.5 Lightning NIM rejects those requests with
+HTTP 400 unless you also pass `--enable-auto-tool-choice` and
+`--tool-call-parser qwen3_coder`.
+
+You can reuse the same Nemotron 3.5 Lightning NIM for agentic retrieval after you
+add those arguments. `POST /v1/answer` continues to work. This gap
+does not apply to NVIDIA-hosted Build endpoints.
+
+If you set `nimOperator.answer_llm.env` in a values file, include
+the full list. Change only the passthrough value:
 
 ```yaml
 nimOperator:
   answer_llm:
     enabled: true
+    env:
+      - name: NIM_HTTP_API_PORT
+        value: "8000"
+      - name: NIM_MODEL_NAME
+        value: "nvidia/nemotron-3.5-lightning-30b-a3b"
+      - name: NIM_SERVED_MODEL_NAME
+        value: "nvidia/nemotron-3.5-lightning-30b-a3b"
+      - name: NIM_TENSOR_PARALLEL_SIZE
+        value: "1"
+      - name: NIM_PASSTHROUGH_ARGS
+        value: "--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder"
 
 serviceConfig:
   agentic:
@@ -1304,34 +1331,52 @@ serviceConfig:
     invokeUrl: http://answer-llm:8000/v1/chat/completions
 ```
 
-The equivalent command is:
+Equivalent `--set` form when you do not use a values file.
+Helm `--set` replaces the `env` list, so include every Nemotron 3.5 Lightning
+environment entry and change only the `NIM_PASSTHROUGH_ARGS` value:
 
 ```bash
 helm upgrade --install retriever ./nemo_retriever/helm \
   --set nimOperator.answer_llm.enabled=true \
+  --set nimOperator.answer_llm.env[0].name=NIM_HTTP_API_PORT \
+  --set-string nimOperator.answer_llm.env[0].value=8000 \
+  --set nimOperator.answer_llm.env[1].name=NIM_MODEL_NAME \
+  --set-string nimOperator.answer_llm.env[1].value=nvidia/nemotron-3.5-lightning-30b-a3b \
+  --set nimOperator.answer_llm.env[2].name=NIM_SERVED_MODEL_NAME \
+  --set-string nimOperator.answer_llm.env[2].value=nvidia/nemotron-3.5-lightning-30b-a3b \
+  --set nimOperator.answer_llm.env[3].name=NIM_TENSOR_PARALLEL_SIZE \
+  --set-string nimOperator.answer_llm.env[3].value=1 \
+  --set nimOperator.answer_llm.env[4].name=NIM_PASSTHROUGH_ARGS \
+  --set-string nimOperator.answer_llm.env[4].value="--reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder" \
   --set serviceConfig.agentic.enabled=true \
   --set serviceConfig.agentic.llmModel=nvidia/nemotron-3.5-lightning-30b-a3b \
   --set serviceConfig.agentic.invokeUrl=http://answer-llm:8000/v1/chat/completions
 ```
 
-`serviceConfig.agentic.llmModel` is the NIM-advertised model ID, without
-the LiteLLM `openai/` prefix used by `serviceConfig.llm.model`. Change
-`invokeUrl` if you override `nimOperator.answer_llm.nimServiceName`.
+`serviceConfig.agentic.llmModel` is the model ID advertised by the
+NIM, not the LiteLLM `openai/` prefix used by
+`serviceConfig.llm.model`. Change `invokeUrl` if you override
+`nimOperator.answer_llm.nimServiceName`.
 
-After the NIM is Ready, check its configuration:
+After the NIM is Ready, confirm the passthrough arguments:
 
 ```bash
 kubectl exec -n <namespace> deploy/answer-llm -- printenv NIM_PASSTHROUGH_ARGS
 ```
 
-Keep the reasoning parser, automatic tool choice, and `qwen3_coder` tool
-parser when overriding `nimOperator.answer_llm.env`. Helm replaces the
-complete environment-variable list. Other model overrides require the
-parsers supported by that model.
-
-For CLI commands and service requests, refer to
+The value must include `--enable-auto-tool-choice` and
+`--tool-call-parser qwen3_coder`. For one-shot CLI use, port-forward
+`service/answer-llm` and point `--agentic-invoke-url` at
+`http://localhost:9000/v1/chat/completions`. For the CLI command,
+service request, and MCP notes, refer to
 [Self-hosted Helm Nemotron 3.5 Lightning](https://github.com/NVIDIA/NeMo-Retriever/blob/main/docs/docs/extraction/workflow-agentic-retrieval.md#self-hosted-helm-lightning).
-The chart leaves MCP disabled; refer to [MCP HTTP endpoint](#mcp-http-endpoint).
+
+For other self-hosted OpenAI-compatible NIMs, enable automatic tool
+choice and the parser that model requires. Nemotron 3.5 Lightning uses `qwen3_coder` for tool calls and
+`nemotron_v3` for reasoning.
+
+The chart leaves the MCP HTTP mount disabled. Refer to
+[MCP HTTP endpoint](#mcp-http-endpoint).
 
 #### MCP HTTP endpoint { #mcp-http-endpoint }
 
