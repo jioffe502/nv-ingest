@@ -246,8 +246,9 @@ echo "${NGC_API_KEY}" | docker login nvcr.io --username '$oauthtoken' --password
 docker compose -f nemo_retriever/dev/compose/judge.compose.yaml up -d judge
 ```
 
-Point `judge.api_base` at `http://localhost:8000/v1` in the skill-eval
-configuration. Override the host port with `JUDGE_HTTP_PORT` when needed.
+Set `judge.model` to `openai/nvidia/nemotron-3.5-lightning-30b-a3b` and
+`judge.api_base` to `http://localhost:8000/v1` in the skill-eval configuration.
+Override the host port with `JUDGE_HTTP_PORT` when needed.
 
 ### Neo4j
 

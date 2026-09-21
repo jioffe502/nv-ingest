@@ -44,7 +44,7 @@ models:
 # Each evaluation picks a generator + judge by name.
 # "runs" is optional (defaults to execution.runs, then 1).
 evaluations:
-  - generator: "nemotron-nano-30b"
+  - generator: "nemotron-lightning"
     judge: "nemotron-lightning-judge"
     runs: 1
 
@@ -53,7 +53,7 @@ evaluations:
   #   judge: "nemotron-lightning-judge"
   #   runs: 2
   #
-  # - generator: "nemotron-lightning"
+  # - generator: "nemotron-nano-30b"
   #   judge: "nemotron-lightning-judge"
   #   runs: 5
 
