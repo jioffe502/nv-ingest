@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -382,36 +382,81 @@ def _stage_error_field(path: Any) -> str:
     return "error"
 
 
-def _raise_for_empty_vdb_conversion(graph_rows: list[dict[str, Any]]) -> None:
-    upstream_errors = [error for row in graph_rows for error in iter_stage_errors_from_value(row)]
-    if upstream_errors:
-        error_fields = Counter(_stage_error_field(error.get("path")) for error in upstream_errors)
-        summary = ", ".join(f"{field}={count}" for field, count in sorted(error_fields.items()))
+def _raise_for_empty_vdb_conversion(
+    *,
+    row_count: int,
+    upstream_error_count: int,
+    upstream_error_fields: Counter[str],
+    rejection_reasons: Counter[str],
+) -> None:
+    if upstream_error_count:
+        summary = ", ".join(f"{field}={count}" for field, count in sorted(upstream_error_fields.items()))
         raise VdbUploadError(
-            f"vdb_upload received {len(graph_rows)} row(s), but none were uploadable because upstream stages "
-            f"reported {len(upstream_errors)} structured row error(s) ({summary}); "
+            f"vdb_upload received {row_count} row(s), but none were uploadable because upstream stages "
+            f"reported {upstream_error_count} structured row error(s) ({summary}); "
             "error payloads are omitted because they may contain sensitive data."
         )
 
-    reasons = Counter(
-        (
-            "missing embedding"
-            if _row_has_uploadable_content_without_embedding(row)
-            else "missing searchable text or image backing"
-        )
-        for row in graph_rows
-    )
-    if "missing embedding" in reasons:
-        summary = ", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
+    summary = ", ".join(f"{reason}={count}" for reason, count in sorted(rejection_reasons.items()))
+    if "missing embedding" in rejection_reasons:
         raise VdbUploadError(
             "vdb_upload requires embedded records, but no embeddings were found. "
-            f"Received {len(graph_rows)} nonempty row(s); rejection reasons: {summary}. "
+            f"Received {row_count} nonempty row(s); rejection reasons: {summary}. "
             "Add an embed stage or provide a supported embedding column."
         )
-    summary = ", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
     raise VdbUploadError(
-        f"vdb_upload received {len(graph_rows)} row(s), but none were uploadable; rejection reasons: {summary}."
+        f"vdb_upload received {row_count} row(s), but none were uploadable; rejection reasons: {summary}."
     )
+
+
+def _iter_client_vdb_records(rows: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Lazily convert graph rows into individual canonical NRL records.
+
+    Rows without searchable content are skipped. Missing embeddings fail the
+    stream on exhaustion, matching :func:`to_client_vdb_records`.
+    """
+
+    row_count = 0
+    converted_count = 0
+    upstream_error_count = 0
+    upstream_error_fields: Counter[str] = Counter()
+    rejection_reasons: Counter[str] = Counter()
+    missing_embeddings = 0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_count += 1
+        record = _client_record_from_graph_row(row)
+        if record is not None:
+            converted_count += 1
+            yield record
+            continue
+
+        missing_embedding = _row_has_uploadable_content_without_embedding(row)
+        if missing_embedding:
+            missing_embeddings += 1
+
+        upstream_errors = list(iter_stage_errors_from_value(row))
+        if upstream_errors:
+            upstream_error_count += len(upstream_errors)
+            upstream_error_fields.update(_stage_error_field(error.get("path")) for error in upstream_errors)
+        else:
+            reason = "missing embedding" if missing_embedding else "missing searchable text or image backing"
+            rejection_reasons[reason] += 1
+
+    if converted_count and missing_embeddings:
+        raise VdbUploadError(
+            "vdb_upload is refusing a partial write because searchable rows are missing embeddings: "
+            f"input rows={row_count}, uploadable rows={converted_count}, missing embedding={missing_embeddings}."
+        )
+    if row_count and not converted_count:
+        _raise_for_empty_vdb_conversion(
+            row_count=row_count,
+            upstream_error_count=upstream_error_count,
+            upstream_error_fields=upstream_error_fields,
+            rejection_reasons=rejection_reasons,
+        )
 
 
 def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
@@ -452,7 +497,21 @@ def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:
             f"input rows={len(graph_rows)}, uploadable rows={len(inner)}, missing embedding={missing_embeddings}."
         )
     if not inner and graph_rows:
-        _raise_for_empty_vdb_conversion(graph_rows)
+        upstream_errors = [error for row in graph_rows for error in iter_stage_errors_from_value(row)]
+        rejection_reasons = Counter(
+            (
+                "missing embedding"
+                if _row_has_uploadable_content_without_embedding(row)
+                else "missing searchable text or image backing"
+            )
+            for row in graph_rows
+        )
+        _raise_for_empty_vdb_conversion(
+            row_count=len(graph_rows),
+            upstream_error_count=len(upstream_errors),
+            upstream_error_fields=Counter(_stage_error_field(error.get("path")) for error in upstream_errors),
+            rejection_reasons=rejection_reasons,
+        )
     # Preserve legacy contract: no uploadable rows → [], not [[]].
     return [inner] if inner else []
 
