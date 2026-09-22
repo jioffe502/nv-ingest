@@ -115,6 +115,7 @@ class HelmAnswerLLMGenerationTests(TestCase):
         self.assertIn(f'api_base: "http://{_ANSWER_LLM_SERVICE}:8000/v1"', proc.stdout)
         self.assertIn(f'model: "{_LIGHTNING_MODEL}"', proc.stdout)
         self.assertIn("reasoning_enabled: true", proc.stdout)
+        self.assertIn("max_tokens: 4096", proc.stdout)
         self.assertIn("rag_system_prompt_prefix: null", proc.stdout)
         self.assertIn("enabled: true", proc.stdout)
         self.assertIn("NEMO_RETRIEVER_LLM_API_KEY", proc.stdout)

@@ -106,7 +106,7 @@ llm:
   api_key: null
   temperature: 0.0
   top_p: null
-  max_tokens: 512
+  max_tokens: 4096
   extra_params: {}
   num_retries: 3
   timeout: 180.0

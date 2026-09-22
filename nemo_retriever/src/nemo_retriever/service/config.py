@@ -252,7 +252,7 @@ class LLMConfig(RichModel):
     api_key: str | None = None
     temperature: float = 0.0
     top_p: float | None = None
-    max_tokens: int = 512
+    max_tokens: int = 4096
     extra_params: dict[str, Any] = Field(default_factory=dict)
     num_retries: int = 3
     timeout: float = 180.0

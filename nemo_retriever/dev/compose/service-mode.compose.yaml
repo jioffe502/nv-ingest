@@ -317,7 +317,7 @@ configs:
         api_key: null
         temperature: ${ANSWER_LLM_TEMPERATURE:-0.0}
         top_p: ${ANSWER_LLM_TOP_P:-null}
-        max_tokens: ${ANSWER_LLM_MAX_TOKENS:-512}
+        max_tokens: ${ANSWER_LLM_MAX_TOKENS:-4096}
         extra_params: ${ANSWER_LLM_EXTRA_PARAMS:-{}}
         num_retries: ${ANSWER_LLM_NUM_RETRIES:-3}
         timeout: ${ANSWER_LLM_TIMEOUT:-180.0}

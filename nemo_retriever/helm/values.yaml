@@ -644,7 +644,7 @@ serviceConfig:
       optional: false
     temperature: 0.0
     topP: null
-    maxTokens: 512
+    maxTokens: 4096
     extraParams: {}
     numRetries: 3
     timeout: 180.0

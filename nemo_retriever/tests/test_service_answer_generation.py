@@ -33,6 +33,7 @@ def test_llm_config_defaults_to_reasoning_enabled_for_external_provider_safety()
 
 def test_llm_config_defaults_to_lightning() -> None:
     assert LLMConfig().model == "openai/nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert LLMConfig().max_tokens == 4096
 
 
 def test_llm_config_allows_empty_model_when_disabled_for_helm_default() -> None:
@@ -81,10 +82,15 @@ def app_with_answer_config(monkeypatch: pytest.MonkeyPatch, tmp_path):
         yield client
 
 
+@pytest.mark.parametrize("use_defaults", [True, False])
 def test_answer_retrieves_from_vectordb_and_generates_with_configured_llm(
     app_with_answer_config: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    use_defaults: bool,
 ) -> None:
+    if use_defaults:
+        app_with_answer_config.app.state.config.llm.max_tokens = LLMConfig().max_tokens
+        app_with_answer_config.app.state.config.llm.reasoning_enabled = LLMConfig().reasoning_enabled
     requests: list[dict[str, Any]] = []
 
     class _FakeResponse:
@@ -166,13 +172,13 @@ def test_answer_retrieves_from_vectordb_and_generates_with_configured_llm(
         api_key="not-needed",
         temperature=0.0,
         top_p=None,
-        max_tokens=128,
+        max_tokens=4096 if use_defaults else 128,
         extra_params={},
         num_retries=3,
         timeout=180.0,
         rag_system_prompt=None,
         rag_system_prompt_prefix=None,
-        reasoning_enabled=False,
+        reasoning_enabled=use_defaults,
     )
 
 

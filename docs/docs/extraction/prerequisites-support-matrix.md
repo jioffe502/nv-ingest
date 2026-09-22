@@ -200,6 +200,8 @@ The Omni rows in the following table describe self-hosted NIM deployments. Direc
 
 `POST /v1/answer` is optional and is not part of the default extraction pipeline. Enable it when you need grounded answers from retrieved VectorDB chunks.
 
+Service answer generation defaults to `llm.max_tokens: 4096`, matching `LiteLLMClient`. Override it with Helm `serviceConfig.llm.maxTokens` or development Compose `ANSWER_LLM_MAX_TOKENS`. For Nemotron 3.5 Lightning, this budget covers both reasoning and the visible answer. Increase it if reasoning exhausts the budget before an answer is produced. Refer to [Control thinking budget](https://docs.nvidia.com/nim/large-language-models/2.0.10/get-started/advanced/get-started-nemotron-3.5-lightning.html#control-thinking-budget).
+
 The supported answer-generation model paths are:
 
 - **Default LLM:** hosted model ID `nvidia/nemotron-3.5-lightning-30b-a3b`. Helm `nimOperator.answer_llm` defaults to self-hosted NIM `nvcr.io/nim/nvidia/nemotron-3.5-lightning-30b-a3b:2.0.9-variant`, which advertises the same raw model ID.
