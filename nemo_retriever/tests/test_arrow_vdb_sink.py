@@ -226,6 +226,17 @@ def test_cached_model_conflicts_fail_before_mutation(tmp_path):
     assert _table(tmp_path).version == version
 
 
+def test_append_retains_existing_schema_metadata(tmp_path):
+    _backend(tmp_path).ingest_arrow(_reader(_cached(0, 4)))
+    incoming = _cached(4, 4)
+    metadata = {**incoming.schema.metadata, b"corpus": b"incoming-corpus"}
+    incoming = incoming.replace_schema_metadata(metadata)
+    _backend(tmp_path, overwrite=False).ingest_arrow(_reader(incoming), expected_rows=4)
+    stored = _table(tmp_path).to_arrow()
+    assert stored["id"].to_pylist() == [f"row-{i}" for i in range(8)]
+    assert stored.schema.metadata[b"corpus"] == b"frozen-corpus"
+
+
 def test_unsupported_adapter_does_not_consume_arrow(tmp_path):
     backend = _backend(tmp_path)
     pulled = []

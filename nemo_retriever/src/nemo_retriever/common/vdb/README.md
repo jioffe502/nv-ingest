@@ -138,8 +138,10 @@ matches legacy fixed-table ingestion.
 finalization, and recovery lifecycle with an existing Arrow reader. It avoids
 Python vector lists and row dictionaries, and writes all input batches through
 one native mutation. It preserves row order, additional typed columns,
-embedding identity, and user schema metadata. Retrieval-mode tags follow the
-configured dense or hybrid mode. Prior table-write recovery markers are excluded.
+embedding identity, and user schema metadata for new or overwritten tables.
+Retrieval-mode tags follow the configured dense or hybrid mode. Appends retain
+the existing table's schema and metadata and reject known model conflicts.
+Prior table-write recovery markers are excluded.
 
 The input schema requires `vector` as `pa.list_(pa.float32(), vector_dim)`,
 plus string `id`, `text`, `source`, and `metadata`

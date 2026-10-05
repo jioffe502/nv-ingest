@@ -1943,7 +1943,9 @@ class LanceDB(VDB):
         """Load cached vectors through one bounded native LanceDB mutation.
 
         The reader must contain fixed-size float32 vectors and canonical
-        string columns. Additional columns and model metadata are preserved.
+        string columns. New or overwritten tables preserve additional columns
+        and model metadata. Appends retain existing schema and metadata and
+        reject known model conflicts.
         Invalid cached vectors fail before commit; record-ingest drop/fill
         policies do not change cached input. Existing append/overwrite,
         indexing, locking and explicit retry settings still apply.
