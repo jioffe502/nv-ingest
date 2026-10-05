@@ -1736,7 +1736,8 @@ class LanceDB(VDB):
         )
         metadata = dict(input_schema.metadata or {})
         # A replay is a new operation; it must not inherit the source table's
-        # private retry identity. All product/user metadata remains intact.
+        # private retry identity. Retrieval-mode tags follow this writer;
+        # embedding identity and user metadata remain intact.
         for key in (b"nemo_retriever.sink_create_operation_sha256", b"nemo_retriever.sink_create_request_sha256"):
             metadata.pop(key, None)
         for key, configured in (

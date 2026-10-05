@@ -196,7 +196,9 @@ Provide cached data in the following schema:
 
 Store `source` and `metadata` as the JSON strings expected by the retrieval path.
 The API rejects invalid schemas, null vectors, and nonfinite vector values.
-It preserves valid vectors, row order, typed columns, and schema metadata.
+It preserves valid vectors, row order, typed columns, embedding identity, and
+user schema metadata. Retrieval-mode tags follow the configured dense or hybrid
+mode.
 Recovery markers from a previous table write are excluded from the new table.
 
 Read Parquet in bounded batches instead of loading the entire file with
