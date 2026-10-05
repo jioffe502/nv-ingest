@@ -45,6 +45,7 @@ from nemo_retriever.common.vdb._lancedb_stream import (
     _inspect_vector,
     _matches_create_identity,
     _reject_empty_operation_bypass,
+    _record_stream_batch,
     _rows_at_version,
     _schemas_have_same_fields,
     _StreamStats,
@@ -62,7 +63,9 @@ from nemo_retriever.common.vdb.adt_vdb import (
     CollectionWriteContext,
     CollectionWriteResult,
     UnsupportedVDBOperation,
+    VDBInvalidRequest,
 )
+from nemo_retriever.common.vdb.arrow import cached_vector_dimension, checked_cached_batches
 from nemo_retriever.common.vdb.hybrid_fusion import (
     HybridFusionPolicy,
     WeightedRRFReranker,
@@ -1472,6 +1475,7 @@ class LanceDB(VDB):
         schema: pa.Schema,
         batches: Iterable[pa.RecordBatch],
         stats: _StreamStats,
+        on_bad_vectors: str | None = None,
     ) -> int:
         """Perform or recover the single Lance data mutation."""
 
@@ -1487,8 +1491,9 @@ class LanceDB(VDB):
                 markers.mark_data(existing_table, version=data_version, rows=0, digest=stats.digest)
             return data_version
 
-        write_kwargs: dict[str, Any] = {"on_bad_vectors": self.on_bad_vectors}
-        if self.on_bad_vectors == "fill":
+        vector_policy = self.on_bad_vectors if on_bad_vectors is None else on_bad_vectors
+        write_kwargs: dict[str, Any] = {"on_bad_vectors": vector_policy}
+        if vector_policy == "fill":
             write_kwargs["fill_value"] = self.fill_value
         reader = pa.RecordBatchReader.from_batches(schema, batches)
         try:
@@ -1712,8 +1717,51 @@ class LanceDB(VDB):
         self._remember_table(self.table_name, existing_table)
         return None
 
-    def _write_stream_records(self, records: Iterable[dict[str, Any]], *, operation_id: str | None) -> None:
-        """Consume canonical NRL records through one coordinated LanceDB mutation."""
+    def _cached_arrow_schema(self, input_schema: pa.Schema) -> pa.Schema:
+        """Preserve cached columns and model identity for a native Arrow write."""
+        vector_dim = cached_vector_dimension(input_schema)
+        if self.sparse:
+            raise VDBInvalidRequest("Cached vector ingestion requires a dense or hybrid LanceDB backend")
+        if self.vector_dim is not None and vector_dim != self.vector_dim:
+            raise VDBInvalidRequest(f"Cached Arrow vector dimension is {vector_dim}, expected {self.vector_dim}")
+        vector_field = input_schema.field("vector")
+        if vector_field.type.value_field.metadata or not vector_field.type.value_field.nullable:
+            raise VDBInvalidRequest(
+                "Cached Arrow vector elements must use the canonical nullable field without metadata"
+            )
+        # Parquet names list children "element"; Lance names vector children
+        # "item". Normalize the schema while retaining the float32 buffers.
+        input_schema = input_schema.set(
+            input_schema.get_field_index("vector"), vector_field.with_type(pa.list_(pa.float32(), vector_dim))
+        )
+        metadata = dict(input_schema.metadata or {})
+        # A replay is a new operation; it must not inherit the source table's
+        # private retry identity. All product/user metadata remains intact.
+        for key in (b"nemo_retriever.sink_create_operation_sha256", b"nemo_retriever.sink_create_request_sha256"):
+            metadata.pop(key, None)
+        for key, configured in (
+            (_EMBEDDING_MODEL_METADATA_KEY, self.embedding_model_name),
+            (_EMBEDDING_MODEL_REVISION_METADATA_KEY, self.embedding_model_revision),
+        ):
+            recorded = metadata.get(key)
+            if configured and recorded and recorded.decode("utf-8") != configured:
+                raise VDBInvalidRequest(f"Cached Arrow {key.decode('utf-8')} disagrees with the configured model")
+        return _with_retrieval_mode_metadata(
+            input_schema.with_metadata(metadata),
+            "hybrid" if self.hybrid else "dense",
+            self.embedding_model_name,
+            self.embedding_model_revision,
+        )
+
+    def _write_stream_records(
+        self,
+        records: Iterable[dict[str, Any]],
+        *,
+        operation_id: str | None,
+        arrow_reader: pa.RecordBatchReader | None = None,
+        expected_rows: int | None = None,
+    ) -> None:
+        """Consume records or cached Arrow through one coordinated LanceDB mutation."""
 
         stats = _StreamStats(vector_dim=self.vector_dim)
         with self._write_lock:
@@ -1738,37 +1786,39 @@ class LanceDB(VDB):
             if stats.vector_dim is None and existing_table is not None and not self.overwrite and not self.sparse:
                 stats.vector_dim = _schema_vector_dim(_table_schema(existing_table))
 
-            canonical_rows = self._iter_stream_rows(records, stats)
-            missing = object()
-            first_canonical_row = next(canonical_rows, missing)
-            if first_canonical_row is missing:
-                if stats.client_records == 0:
-                    if operation_id is not None:
-                        _reject_empty_operation_bypass(existing_table, operation_id=operation_id)
-                    if existing_table is not None:
-                        self._remember_table(self.table_name, existing_table)
-                    return
+            if arrow_reader is None:
+                canonical_rows = self._iter_stream_rows(records, stats)
+                missing = object()
+                first_canonical_row = next(canonical_rows, missing)
+                if first_canonical_row is missing:
+                    if stats.client_records == 0:
+                        if operation_id is not None:
+                            _reject_empty_operation_bypass(existing_table, operation_id=operation_id)
+                        if existing_table is not None:
+                            self._remember_table(self.table_name, existing_table)
+                        return
 
-            canonical_row_stream = chain(
-                () if first_canonical_row is missing else (first_canonical_row,),
-                canonical_rows,
-            )
-            if stats.vector_dim is None and not self.sparse:
-                stats.vector_dim, canonical_row_stream = _infer_vector_dim_with_spooled_prefix(
-                    canonical_row_stream,
-                    validate_vector_length=self.validate_vector_length,
-                    on_bad_vectors=self.on_bad_vectors,
+                canonical_row_stream = chain(
+                    () if first_canonical_row is missing else (first_canonical_row,),
+                    canonical_rows,
                 )
-
-            policy_rows = _apply_deferred_bad_vector_policy(
-                canonical_row_stream,
-                vector_dim=int(stats.vector_dim or 0),
-                sparse=self.sparse,
-                on_bad_vectors=self.on_bad_vectors,
-                fill_value=self.fill_value,
-            )
-
-            base_schema = self._stream_schema(stats.vector_dim)
+                if stats.vector_dim is None and not self.sparse:
+                    stats.vector_dim, canonical_row_stream = _infer_vector_dim_with_spooled_prefix(
+                        canonical_row_stream,
+                        validate_vector_length=self.validate_vector_length,
+                        on_bad_vectors=self.on_bad_vectors,
+                    )
+                policy_rows = _apply_deferred_bad_vector_policy(
+                    canonical_row_stream,
+                    vector_dim=int(stats.vector_dim or 0),
+                    sparse=self.sparse,
+                    on_bad_vectors=self.on_bad_vectors,
+                    fill_value=self.fill_value,
+                )
+                base_schema = self._stream_schema(stats.vector_dim)
+            else:
+                base_schema = self._cached_arrow_schema(arrow_reader.schema)
+                stats.vector_dim = _schema_vector_dim(base_schema)
             mode = "overwrite" if self.overwrite else "append"
             if operation_id is None:
                 schema = base_schema
@@ -1787,21 +1837,41 @@ class LanceDB(VDB):
                 _validate_append_schema(existing_table, schema, table_name=self.table_name, uri=self.uri)
                 _validate_append_embedding_model(
                     existing_table,
-                    self.embedding_model_name,
-                    self.embedding_model_revision,
+                    (base_schema.metadata or {}).get(_EMBEDDING_MODEL_METADATA_KEY, b"").decode("utf-8") or None,
+                    (base_schema.metadata or {}).get(_EMBEDDING_MODEL_REVISION_METADATA_KEY, b"").decode("utf-8")
+                    or None,
                     table_name=self.table_name,
                     uri=self.uri,
                 )
                 expected_schema = _table_schema(existing_table)
 
-            arrow_batches = _checked_batches(
-                policy_rows,
-                schema=schema,
-                max_batch_bytes=self.stream_batch_bytes,
-                stats=stats,
-                include_digest=operation_id is not None,
-            )
+            if arrow_reader is None:
+                arrow_batches = _checked_batches(
+                    policy_rows,
+                    schema=schema,
+                    max_batch_bytes=self.stream_batch_bytes,
+                    stats=stats,
+                    include_digest=operation_id is not None,
+                )
+            else:
+
+                def tracked_batches() -> Iterator[pa.RecordBatch]:
+                    for batch in checked_cached_batches(
+                        arrow_reader, max_batch_bytes=self.stream_batch_bytes, expected_rows=expected_rows
+                    ):
+                        batch = pa.RecordBatch.from_arrays(batch.columns, schema=schema)
+                        stats.client_records += batch.num_rows
+                        _record_stream_batch(stats, batch, include_digest=operation_id is not None)
+                        yield batch
+
+                arrow_batches = tracked_batches()
             first_batch = next(arrow_batches, None)
+            if arrow_reader is not None and first_batch is None:
+                if operation_id is not None:
+                    _reject_empty_operation_bypass(existing_table, operation_id=operation_id)
+                if existing_table is not None:
+                    self._remember_table(self.table_name, existing_table)
+                return
             if operation_id is None:
                 markers = None
                 mutation_base_version = base_version
@@ -1833,6 +1903,7 @@ class LanceDB(VDB):
                 schema=schema,
                 batches=chain(initial_batches, arrow_batches),
                 stats=stats,
+                on_bad_vectors="error" if arrow_reader is not None else None,
             )
             try:
                 created_from_absent = not table_exists or recovered_create
@@ -1864,6 +1935,29 @@ class LanceDB(VDB):
                     data_version,
                     retry_operation_id=operation_id,
                 ) from exc
+
+    def ingest_arrow(self, reader: pa.RecordBatchReader, *, expected_rows: int | None = None) -> None:
+        """Load cached vectors through one bounded native LanceDB mutation.
+
+        The reader must contain fixed-size float32 vectors and canonical
+        string columns. Additional columns and model metadata are preserved.
+        Invalid cached vectors fail before commit; record-ingest drop/fill
+        policies do not change cached input. Existing append/overwrite,
+        indexing, locking and explicit retry settings still apply.
+        """
+        if not self.supports_stream_ingest:
+            raise UnsupportedVDBOperation("LanceDB.ingest_arrow() requires an ordinary local filesystem table")
+        if not isinstance(reader, pa.RecordBatchReader):
+            raise TypeError("ingest_arrow() requires a pyarrow.RecordBatchReader")
+        if expected_rows is not None and (
+            isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or expected_rows < 0
+        ):
+            raise VDBInvalidRequest("expected_rows must be a non-negative integer or None")
+        self._cached_arrow_schema(reader.schema)
+        with self._stream_lock, _table_mutation_lock(self.uri, self.table_name):
+            self._write_stream_records(
+                (), operation_id=self.stream_operation_id, arrow_reader=reader, expected_rows=expected_rows
+            )
 
     def stream_ingest(self, records: Iterable[dict[str, Any]]) -> None:
         """Ingest canonical records through one bounded LanceDB lifecycle.

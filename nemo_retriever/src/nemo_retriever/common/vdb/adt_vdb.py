@@ -26,7 +26,10 @@ metadata-filtering section and its reference notebook.
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 from nemo_retriever.common.schemas.collections import (
     CollectionCreateRequest,
@@ -428,6 +431,21 @@ class VDB(ABC):
     def health(self) -> dict[str, Any]:
         """Return optional backend-specific operational health details."""
         return {}
+
+    def ingest_arrow(self, reader: "pa.RecordBatchReader", *, expected_rows: int | None = None) -> None:
+        """Load existing cached vectors from a single-pass Arrow reader.
+
+        This optional capability leaves existing record ingestion unchanged.
+        The reader contains canonical ``vector``, ``id``, ``text``, ``source``
+        and ``metadata`` columns, with fixed-size float32 vectors. Producers
+        own bounded source reads; adapters own native writes, any required
+        wire conversion, and index finalization. When supplied, expected_rows
+        is the total number of rows that must be persisted.
+
+        The default raises before consuming input. Concrete backends must
+        explicitly implement the capability; there is no Python-row fallback.
+        """
+        raise UnsupportedVDBOperation(f"{type(self).__name__} does not implement ingest_arrow()")
 
     def stream_ingest(self, records: Iterable[dict[str, Any]]) -> None:
         """Ingest a lazy stream of canonical NRL record dictionaries.

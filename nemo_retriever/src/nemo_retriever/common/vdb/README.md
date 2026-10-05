@@ -33,6 +33,13 @@ iterable of canonical record dictionaries and returns after consuming it to
 exhaustion. The default flag is `False`, so existing subclasses retain the
 `VDB.run(records)` path. Overriding the method alone does not enable streaming.
 
+`VDB.ingest_arrow(reader, *, expected_rows=None)` is a separate optional,
+non-abstract capability for existing cached vectors. It accepts a single-pass
+`pyarrow.RecordBatchReader`. The default method raises
+`UnsupportedVDBOperation` without reading input, so existing custom backends do
+not need to implement it. A supporting backend owns validation, persistence,
+and any conversion required by its write API.
+
 ---
 
 ## `IngestVdbOperator` (ingestion)
@@ -127,6 +134,34 @@ table mutation, validation, index coverage, and optional optimization. Without
 `stream_operation_id`, it stores no durable idempotency history, and retry scope
 matches legacy fixed-table ingestion.
 
+`LanceDB.ingest_arrow()` uses the same local table mutation, validation,
+finalization, and recovery lifecycle with an existing Arrow reader. It avoids
+Python vector lists and row dictionaries, and writes all input batches through
+one native mutation. It preserves row order, additional typed columns, and
+schema metadata, except for prior table-write recovery markers.
+
+The input schema requires `vector` as `pa.list_(pa.float32(), vector_dim)`,
+plus string `id`, `text`, `source`, and `metadata`
+columns. The latter two columns already contain their retrieval JSON strings.
+Null or nonfinite vectors fail the complete write; cached Arrow input does not
+apply `on_bad_vectors` filtering. An optional `expected_rows` counts incoming
+rows, including for an append, and must match the exhausted reader.
+
+Produce bounded source batches. For example, use
+`ParquetFile.iter_batches(batch_size=8192)` and
+`RecordBatchReader.from_batches(parquet.schema_arrow, batches)`, then call
+`vdb.ingest_arrow(reader, expected_rows=parquet.metadata.num_rows)`.
+`stream_batch_bytes` limits retained Arrow buffers in each input batch. An
+oversized batch fails, including a slice that retains the original table's
+buffers. Read smaller source batches rather than materializing the cache first.
+
+Schema metadata supplies `nemo_retriever.embedding_model_name` and
+`nemo_retriever.embedding_model_revision` when the constructor does not specify
+them. Explicit model values must agree with recorded input values. The existing
+append checks reject an incompatible target model. Configured `hybrid`, vector
+index, optimization, and durable retry settings still apply.
+An explicit `stream_operation_id` adds content hashing for retry verification.
+
 An explicit `stream_operation_id` enables durable request, stored-row, version,
 and finalization checks. Its identity covers the rows produced after configured
 bad-vector filtering and the table-result settings. Dropped input records are
@@ -154,6 +189,9 @@ Common constructor arguments include:
 | `stream_batch_bytes` | Maximum Arrow bytes per packed streaming batch (default 256 MiB) |
 | `stream_optimize` | Run LanceDB optimization after a streaming write (default `False`) |
 | `stream_operation_id` | Optional caller-persisted ID for durable retries; binds stored rows after configured filtering and table-result settings; the default `None` stores no durable idempotency history |
+
+The streaming controls also apply to `LanceDB.ingest_arrow()`. Graph operators
+and the root CLI continue to use their existing record ingestion paths.
 
 Persist an explicit operation ID before the first attempt. If an append commits
 but its durable data marker is not recorded, do not replay it. Inspect the
@@ -326,6 +364,9 @@ flowchart LR
     R1[to_client_vdb_records]
     L1[LanceDB.run / stream_ingest]
     G --> IVO --> R1 --> L1
+    C[Cached Arrow / Parquet batches]
+    L3[LanceDB.ingest_arrow]
+    C --> L3
   end
 
   subgraph retrieve
@@ -337,10 +378,12 @@ flowchart LR
   end
 
   L1 -->[(LanceDB table on disk)]
+  L3 -->[(same table)]
   L2 -->[(same table)]
 ```
 
 - **Ingest**: flat rows → canonical records → **`LanceDB.run`** or **`LanceDB.stream_ingest`** → table + indexes.
+- **Cached vectors**: bounded Arrow reader → **`LanceDB.ingest_arrow`** → table + indexes.
 - **Retrieve**: strings → vectors → **`RetrieveVdbOperator`** → **`LanceDB.retrieval`** → hit lists.
 
 For implementation details, refer to `operators/vdb.py`, `adt_vdb.py`,
