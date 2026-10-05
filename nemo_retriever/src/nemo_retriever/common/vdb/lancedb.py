@@ -65,7 +65,13 @@ from nemo_retriever.common.vdb.adt_vdb import (
     UnsupportedVDBOperation,
     VDBInvalidRequest,
 )
-from nemo_retriever.common.vdb.arrow import cached_vector_dimension, checked_cached_batches
+from nemo_retriever.common.vdb.arrow import (
+    EMBEDDING_MODEL_METADATA_KEY,
+    EMBEDDING_MODEL_REVISION_METADATA_KEY,
+    cached_vector_dimension,
+    cached_vector_schema,
+    checked_cached_batches,
+)
 from nemo_retriever.common.vdb.hybrid_fusion import (
     HybridFusionPolicy,
     WeightedRRFReranker,
@@ -90,8 +96,6 @@ _DEFAULT_STREAM_BATCH_BYTES: Final[int] = 256 << 20
 _VALID_ON_BAD_VECTORS: Final[FrozenSet[str]] = frozenset({"drop", "fill", "null", "error"})
 _RETRIEVAL_MODE_METADATA_KEY: Final[bytes] = b"retrieval_mode"
 _NEMO_RETRIEVER_RETRIEVAL_MODE_METADATA_KEY: Final[bytes] = b"nemo_retriever.retrieval_mode"
-_EMBEDDING_MODEL_METADATA_KEY: Final[bytes] = b"nemo_retriever.embedding_model_name"
-_EMBEDDING_MODEL_REVISION_METADATA_KEY: Final[bytes] = b"nemo_retriever.embedding_model_revision"
 _MISSING_FTS_POSITIONS_ERROR: Final[str] = "position is not found but required for phrase queries"
 # Appended rows remain searchable through LanceDB's unindexed-tail scan until
 # optimize() folds them into FTS. These thresholds follow its recommended cadence.
@@ -291,9 +295,9 @@ def _with_retrieval_mode_metadata(
     metadata[_RETRIEVAL_MODE_METADATA_KEY] = encoded_mode
     metadata[_NEMO_RETRIEVER_RETRIEVAL_MODE_METADATA_KEY] = encoded_mode
     if embedding_model_name:
-        metadata[_EMBEDDING_MODEL_METADATA_KEY] = embedding_model_name.encode("utf-8")
+        metadata[EMBEDDING_MODEL_METADATA_KEY] = embedding_model_name.encode("utf-8")
     if embedding_model_revision:
-        metadata[_EMBEDDING_MODEL_REVISION_METADATA_KEY] = embedding_model_revision.encode("utf-8")
+        metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] = embedding_model_revision.encode("utf-8")
     return schema.with_metadata(metadata)
 
 
@@ -383,7 +387,7 @@ def _validate_append_embedding_model(
         return
 
     metadata = _table_schema(table).metadata or {}
-    stored_value = metadata.get(_EMBEDDING_MODEL_METADATA_KEY)
+    stored_value = metadata.get(EMBEDDING_MODEL_METADATA_KEY)
     if stored_value is None:
         return
 
@@ -394,7 +398,7 @@ def _validate_append_embedding_model(
             f"cannot append vectors from {embedding_model_name!r}. Use the table model or overwrite the table."
         )
 
-    stored_revision_value = metadata.get(_EMBEDDING_MODEL_REVISION_METADATA_KEY)
+    stored_revision_value = metadata.get(EMBEDDING_MODEL_REVISION_METADATA_KEY)
     if stored_revision_value is None:
         return
     stored_revision = stored_revision_value.decode("utf-8", errors="replace").strip()
@@ -1742,12 +1746,12 @@ class LanceDB(VDB):
         # embedding identity and user metadata remain intact.
         for key in (b"nemo_retriever.sink_create_operation_sha256", b"nemo_retriever.sink_create_request_sha256"):
             metadata.pop(key, None)
-        for key, configured in (
-            (_EMBEDDING_MODEL_METADATA_KEY, self.embedding_model_name),
-            (_EMBEDDING_MODEL_REVISION_METADATA_KEY, self.embedding_model_revision),
-        ):
+        configured_metadata = (
+            cached_vector_schema(vector_dim, self.embedding_model_name, self.embedding_model_revision).metadata or {}
+        )
+        for key, configured in configured_metadata.items():
             recorded = metadata.get(key)
-            if configured and recorded and recorded.decode("utf-8") != configured:
+            if recorded and recorded.decode("utf-8") != configured.decode("utf-8"):
                 raise VDBInvalidRequest(f"Cached Arrow {key.decode('utf-8')} disagrees with the configured model")
         return _with_retrieval_mode_metadata(
             input_schema.with_metadata(metadata),
@@ -1840,8 +1844,8 @@ class LanceDB(VDB):
                 _validate_append_schema(existing_table, schema, table_name=self.table_name, uri=self.uri)
                 _validate_append_embedding_model(
                     existing_table,
-                    (base_schema.metadata or {}).get(_EMBEDDING_MODEL_METADATA_KEY, b"").decode("utf-8") or None,
-                    (base_schema.metadata or {}).get(_EMBEDDING_MODEL_REVISION_METADATA_KEY, b"").decode("utf-8")
+                    (base_schema.metadata or {}).get(EMBEDDING_MODEL_METADATA_KEY, b"").decode("utf-8") or None,
+                    (base_schema.metadata or {}).get(EMBEDDING_MODEL_REVISION_METADATA_KEY, b"").decode("utf-8")
                     or None,
                     table_name=self.table_name,
                     uri=self.uri,

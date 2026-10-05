@@ -150,6 +150,14 @@ Null or nonfinite vectors fail the complete write; cached Arrow input does not
 apply `on_bad_vectors` filtering. An optional `expected_rows` counts incoming
 rows, including for an append, and must match the exhausted reader.
 
+For a separate staging writer, import `cached_vector_schema`,
+`EMBEDDING_MODEL_METADATA_KEY`, and `EMBEDDING_MODEL_REVISION_METADATA_KEY` from
+`nemo_retriever.common.vdb.arrow`. `cached_vector_schema(dim,
+embedding_model_name=None, embedding_model_revision=None)` returns the canonical
+schema and records only supplied model metadata. Use it for Arrow batches or a
+`pyarrow.parquet.ParquetWriter`; add any extra typed columns to that schema.
+The public constants are bytes keys for reading or setting model schema metadata.
+
 Produce bounded source batches. For example, use
 `ParquetFile.iter_batches(batch_size=8192)` and
 `RecordBatchReader.from_batches(parquet.schema_arrow, batches)`, then call

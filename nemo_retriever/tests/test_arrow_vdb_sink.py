@@ -14,25 +14,19 @@ lancedb = pytest.importorskip("lancedb", minversion="0.34.0")
 from nemo_retriever.common.vdb.adt_vdb import UnsupportedVDBOperation, VDB, VDBInvalidRequest
 from nemo_retriever.common.vdb._lancedb_stream import DataCommittedFinalizationError
 from nemo_retriever.common.vdb._lancedb_stream_state import VdbOperationConflict
+from nemo_retriever.common.vdb.arrow import (
+    EMBEDDING_MODEL_METADATA_KEY,
+    EMBEDDING_MODEL_REVISION_METADATA_KEY,
+    cached_vector_schema,
+)
 from nemo_retriever.common.vdb.lancedb import LanceDB
 
 
 def _cached(start: int = 0, rows: int = 16) -> pa.Table:
-    schema = pa.schema(
-        [
-            pa.field("vector", pa.list_(pa.float32(), 2)),
-            pa.field("id", pa.string()),
-            pa.field("text", pa.string()),
-            pa.field("source", pa.string()),
-            pa.field("metadata", pa.string()),
-            pa.field("partition", pa.int64(), metadata={b"meaning": b"source partition"}),
-        ],
-        metadata={
-            b"nemo_retriever.embedding_model_name": b"cached-model",
-            b"nemo_retriever.embedding_model_revision": b"frozen-revision",
-            b"corpus": b"frozen-corpus",
-        },
+    schema = cached_vector_schema(2, "cached-model", "frozen-revision").append(
+        pa.field("partition", pa.int64(), metadata={b"meaning": b"source partition"})
     )
+    schema = schema.with_metadata({**schema.metadata, b"corpus": b"frozen-corpus"})
     return pa.Table.from_pylist(
         [
             {
@@ -59,6 +53,56 @@ def _reader(table: pa.Table, batch_size: int = 4) -> pa.RecordBatchReader:
 
 def _table(path: Path):
     return lancedb.connect(str(path)).open_table("cached")
+
+
+@pytest.mark.parametrize(
+    "model,revision", [(None, None), ("cached-model", None), (None, "revision-only"), ("modèle", "révision")]
+)
+def test_exported_schema_stages_parquet_accepted_by_ingest_arrow(tmp_path, model, revision):
+    schema = cached_vector_schema(2, embedding_model_name=model, embedding_model_revision=revision)
+    assert schema.names == ["vector", "id", "text", "source", "metadata"]
+    assert schema.field("vector").type == pa.list_(pa.float32(), 2)
+    assert all(schema.field(name).type == pa.string() for name in ("id", "text", "source", "metadata"))
+    assert EMBEDDING_MODEL_METADATA_KEY == b"nemo_retriever.embedding_model_name"
+    assert EMBEDDING_MODEL_REVISION_METADATA_KEY == b"nemo_retriever.embedding_model_revision"
+    expected_metadata = {}
+    if model:
+        expected_metadata[EMBEDDING_MODEL_METADATA_KEY] = model.encode("utf-8")
+    if revision:
+        expected_metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] = revision.encode("utf-8")
+    assert (schema.metadata or {}) == expected_metadata
+    source = _cached(rows=4)
+    staged = pa.Table.from_arrays([source[name] for name in schema.names], schema=schema)
+    path = tmp_path / "staged.parquet"
+    pq.write_table(staged, path)
+    parquet = pq.ParquetFile(path)
+    backend = _backend(tmp_path / "sink", embedding_model_name=model, embedding_model_revision=revision)
+    backend.ingest_arrow(
+        pa.RecordBatchReader.from_batches(parquet.schema_arrow, parquet.iter_batches(batch_size=2)), expected_rows=4
+    )
+    actual = _table(tmp_path / "sink").to_arrow()
+    assert actual.equals(staged, check_metadata=False)
+    np.testing.assert_array_equal(
+        actual["vector"].combine_chunks().flatten().to_numpy().view(np.uint32),
+        staged["vector"].combine_chunks().flatten().to_numpy().view(np.uint32),
+    )
+    for key in (EMBEDDING_MODEL_METADATA_KEY, EMBEDDING_MODEL_REVISION_METADATA_KEY):
+        assert actual.schema.metadata.get(key) == expected_metadata.get(key)
+
+
+@pytest.mark.parametrize("dim", [0, -1, True, 2.5])
+def test_exported_schema_rejects_invalid_dimension(dim):
+    with pytest.raises(VDBInvalidRequest, match="positive integer"):
+        cached_vector_schema(dim)
+
+
+def test_large_strings_and_additional_columns_remain_accepted(tmp_path):
+    expected = _cached(rows=4)
+    for name in ("id", "text", "source", "metadata"):
+        index = expected.schema.get_field_index(name)
+        expected = expected.set_column(index, name, expected[name].cast(pa.large_string()))
+    _backend(tmp_path).ingest_arrow(_reader(expected), expected_rows=4)
+    assert _table(tmp_path).to_arrow().equals(expected, check_metadata=False)
 
 
 def test_public_parquet_load_is_native_lazy_and_preserves_readback(tmp_path, monkeypatch):
