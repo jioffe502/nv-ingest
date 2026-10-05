@@ -1724,16 +1724,18 @@ class LanceDB(VDB):
             raise VDBInvalidRequest("Cached vector ingestion requires a dense or hybrid LanceDB backend")
         if self.vector_dim is not None and vector_dim != self.vector_dim:
             raise VDBInvalidRequest(f"Cached Arrow vector dimension is {vector_dim}, expected {self.vector_dim}")
-        vector_field = input_schema.field("vector")
-        if vector_field.type.value_field.metadata or not vector_field.type.value_field.nullable:
-            raise VDBInvalidRequest(
-                "Cached Arrow vector elements must use the canonical nullable field without metadata"
+        # Parquet names fixed-list children "element"; Lance uses "item".
+        # Normalize primary and additional columns without copying buffers.
+        for index, field in enumerate(input_schema):
+            if not pa.types.is_fixed_size_list(field.type):
+                continue
+            if field.type.value_field.metadata or not field.type.value_field.nullable:
+                raise VDBInvalidRequest(
+                    f"Cached Arrow fixed-list elements in {field.name!r} must use a nullable field without metadata"
+                )
+            input_schema = input_schema.set(
+                index, field.with_type(pa.list_(field.type.value_type, field.type.list_size))
             )
-        # Parquet names list children "element"; Lance names vector children
-        # "item". Normalize the schema while retaining the float32 buffers.
-        input_schema = input_schema.set(
-            input_schema.get_field_index("vector"), vector_field.with_type(pa.list_(pa.float32(), vector_dim))
-        )
         metadata = dict(input_schema.metadata or {})
         # A replay is a new operation; it must not inherit the source table's
         # private retry identity. Retrieval-mode tags follow this writer;

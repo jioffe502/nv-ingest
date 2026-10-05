@@ -62,7 +62,9 @@ def _table(path: Path):
 
 
 def test_public_parquet_load_is_native_lazy_and_preserves_readback(tmp_path, monkeypatch):
-    expected = _cached()
+    expected = _cached().append_column(
+        "additional_embedding", pa.array([[1.0] * 16] * 16, type=pa.list_(pa.float32(), 16))
+    )
     parquet_path = tmp_path / "cached.parquet"
     pq.write_table(expected, parquet_path)
     parquet = pq.ParquetFile(parquet_path)
