@@ -76,7 +76,9 @@ def test_exported_schema_stages_parquet_accepted_by_ingest_arrow(tmp_path, model
     path = tmp_path / "staged.parquet"
     pq.write_table(staged, path)
     parquet = pq.ParquetFile(path)
-    backend = _backend(tmp_path / "sink", embedding_model_name=model, embedding_model_revision=revision)
+    backend = _backend(
+        tmp_path / "sink", embedding_model_name="constructor-model", embedding_model_revision="constructor-revision"
+    )
     backend.ingest_arrow(
         pa.RecordBatchReader.from_batches(parquet.schema_arrow, parquet.iter_batches(batch_size=2)), expected_rows=4
     )
@@ -84,6 +86,8 @@ def test_exported_schema_stages_parquet_accepted_by_ingest_arrow(tmp_path, model
     assert actual.equals(staged, check_metadata=False)
     for key in (EMBEDDING_MODEL_METADATA_KEY, EMBEDDING_MODEL_REVISION_METADATA_KEY):
         assert actual.schema.metadata.get(key) == expected_metadata.get(key)
+    assert backend.get_index_metadata("embedding_model_name") == model
+    assert backend.get_index_metadata("embedding_model_revision") == revision
 
 
 @pytest.mark.parametrize("dim", [0, -1, True, 2.5])
@@ -286,7 +290,13 @@ def test_revision_only_append_checks_known_revisions(tmp_path, stored_model):
 
 def test_append_and_retry_are_exact_once_across_batch_boundaries(tmp_path):
     _backend(tmp_path).ingest_arrow(_reader(_cached(0, 4)))
-    backend = _backend(tmp_path, overwrite=False, stream_operation_id="cached-append")
+    backend = _backend(
+        tmp_path,
+        overwrite=False,
+        stream_operation_id="cached-append",
+        embedding_model_name="constructor-model",
+        embedding_model_revision="constructor-revision",
+    )
     backend.ingest_arrow(_reader(_cached(4, 8), batch_size=2), expected_rows=8)
     version = _table(tmp_path).version
     backend.ingest_arrow(_reader(_cached(4, 8), batch_size=3), expected_rows=8)
@@ -316,13 +326,13 @@ def test_finalization_failure_is_recoverable_without_duplicate_vectors(tmp_path,
 
 def test_cached_model_conflicts_fail_before_mutation(tmp_path):
     _backend(tmp_path).ingest_arrow(_reader(_cached()))
+    before = _table(tmp_path).to_arrow()
     version = _table(tmp_path).version
     incompatible = _cached().replace_schema_metadata({b"nemo_retriever.embedding_model_name": b"different-model"})
     with pytest.raises(ValueError, match="embedding model"):
         _backend(tmp_path, overwrite=False).ingest_arrow(_reader(incompatible))
-    with pytest.raises(VDBInvalidRequest, match="configured model"):
-        _backend(tmp_path, embedding_model_name="different-model").ingest_arrow(_reader(_cached()))
     assert _table(tmp_path).version == version
+    assert _table(tmp_path).to_arrow().equals(before, check_metadata=True)
 
 
 def test_append_retains_existing_schema_metadata(tmp_path):

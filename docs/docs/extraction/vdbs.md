@@ -244,11 +244,7 @@ For a separate staging writer, use `cached_vector_schema()` to construct the
 shared schema for your Arrow batches or `pyarrow.parquet.ParquetWriter`:
 
 ```python
-from nemo_retriever.common.vdb.arrow import (
-    EMBEDDING_MODEL_METADATA_KEY,
-    EMBEDDING_MODEL_REVISION_METADATA_KEY,
-    cached_vector_schema,
-)
+from nemo_retriever.common.vdb.arrow import cached_vector_schema
 
 schema = cached_vector_schema(
     2048,
@@ -259,15 +255,19 @@ schema = cached_vector_schema(
 Pass the actual dimension and model that produced your cache. The factory also
 accepts an optional `embedding_model_revision`. Its default model and revision
 are `None`, so it adds no model metadata unless you provide it. The exported
-constants are the bytes keys `b"nemo_retriever.embedding_model_name"` and
-`b"nemo_retriever.embedding_model_revision"` for reading or setting schema metadata.
+constants `EMBEDDING_MODEL_METADATA_KEY` and
+`EMBEDDING_MODEL_REVISION_METADATA_KEY` are bytes keys for reading or setting
+schema metadata.
 
-The reader schema can record the embedding model in
-`nemo_retriever.embedding_model_name` and its revision in
-`nemo_retriever.embedding_model_revision`. You can instead provide
-`embedding_model_name` and `embedding_model_revision` to the constructor. Explicit
-values must agree with recorded values. Record the model that produced the cache
-so dense and hybrid query paths can verify compatibility.
+`ingest_arrow()` uses only the reader schema's
+`nemo_retriever.embedding_model_name` and
+`nemo_retriever.embedding_model_revision` metadata as embedding provenance.
+It preserves these values and uses them for append compatibility checks.
+The constructor's `embedding_model_name` and `embedding_model_revision` apply
+to record ingestion, without changing or validating cached-vector identity.
+Cached inputs without model metadata remain untagged.
+Record the model that produced the cache so dense and hybrid query paths can
+verify compatibility.
 
 `ingest_arrow()` supports the same local filesystem configurations and streaming
 lifecycle controls as `stream_ingest()`. Configure `hybrid=True` to also build the

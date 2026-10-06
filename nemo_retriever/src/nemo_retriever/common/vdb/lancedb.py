@@ -71,7 +71,6 @@ from nemo_retriever.common.vdb.arrow import (
     EMBEDDING_MODEL_METADATA_KEY,
     EMBEDDING_MODEL_REVISION_METADATA_KEY,
     cached_vector_dimension,
-    cached_vector_schema,
     checked_cached_batches,
 )
 from nemo_retriever.common.vdb.hybrid_fusion import (
@@ -1760,18 +1759,9 @@ class LanceDB(VDB):
         # embedding identity and user metadata remain intact.
         for key in (_CREATE_OPERATION_KEY, _CREATE_REQUEST_KEY):
             metadata.pop(key, None)
-        configured_metadata = (
-            cached_vector_schema(vector_dim, self.embedding_model_name, self.embedding_model_revision).metadata or {}
-        )
-        for key, configured in configured_metadata.items():
-            recorded = metadata.get(key)
-            if recorded and recorded != configured:
-                raise VDBInvalidRequest(f"Cached Arrow {key.decode('utf-8')} disagrees with the configured model")
         return _with_retrieval_mode_metadata(
             input_schema.with_metadata(metadata),
             "hybrid" if self.hybrid else "dense",
-            self.embedding_model_name,
-            self.embedding_model_revision,
         )
 
     def _write_stream_records(
@@ -1963,8 +1953,9 @@ class LanceDB(VDB):
 
         The reader must contain fixed-size float32 vectors and canonical
         string columns. New or overwritten tables preserve additional columns
-        and model metadata. Appends retain existing schema and metadata and
-        reject known model conflicts.
+        and model metadata from the reader schema. Constructor model settings
+        apply to record ingestion. Appends retain existing schema and metadata
+        and reject known model conflicts.
         Invalid cached vectors fail before commit; record-ingest drop/fill
         policies do not change cached input. Existing append/overwrite,
         indexing, locking and explicit retry settings still apply.
