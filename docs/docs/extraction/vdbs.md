@@ -71,6 +71,10 @@ You can omit `.embed()` if a custom stage provides an embedding in `metadata["em
 
 Dense and hybrid retrieval require query and stored vectors from the same embedding model. New LanceDB tables record the canonical model in `nemo_retriever.embedding_model_name`. A local `Retriever` uses that model automatically and rejects an explicit query model that differs from it. Dense and hybrid queries also reject legacy or third-party tables that do not contain this metadata because compatibility cannot be verified. Local sparse retrieval is exempt because it does not create a dense query vector.
 
+When you append with embedding model or revision metadata, LanceDB checks known
+values against the table. A recorded revision requires a matching incoming
+revision, even when the incoming model name is absent.
+
 The default changed from `nvidia/llama-nemotron-embed-vl-1b-v2` to `nvidia/nemotron-3-embed-1b`. Before you migrate a persistent table:
 
 1. Back up the LanceDB directory or persistent volume and retain the original corpus and ingest configuration.
@@ -192,14 +196,18 @@ Provide cached data in the following schema:
 
 - `vector`: the fixed-size list type `pa.list_(pa.float32(), vector_dim)`.
 - `id`, `text`, `source`, and `metadata`: string columns.
-- Additional columns: their existing Arrow types.
+- Additional columns: LanceDB-compatible Arrow types.
+
+Use nullable element fields without field metadata for fixed-size-list columns.
+Fixed-size lists nested inside another Arrow type are unsupported.
 
 Store `source` and `metadata` as the JSON strings expected by the retrieval path.
 The API rejects invalid schemas, null vectors, and nonfinite vector values.
+Cached Arrow input does not apply `on_bad_vectors` filtering.
 It preserves valid vectors, row order, typed columns, embedding identity, and
 user schema metadata for new or overwritten tables. Retrieval-mode tags follow
 the configured dense or hybrid mode. Appends retain the existing table's schema
-and metadata and reject known embedding-model conflicts.
+and metadata and reject known embedding-model or revision conflicts.
 Recovery markers from a previous table write are excluded from the new table.
 
 Read Parquet in bounded batches instead of loading the entire file with
@@ -265,7 +273,8 @@ so dense and hybrid query paths can verify compatibility.
 lifecycle controls as `stream_ingest()`. Configure `hybrid=True` to also build the
 full-text index. For durable retries, persist and reuse `stream_operation_id` as
 described under [Backends with `VDB` implementations](#vdb-backends-implementations).
-An explicit operation ID adds content hashing for retry verification.
+An explicit operation ID binds the input schema, row content, and table-result
+settings for retry verification.
 Graph ingestion and the `retriever ingest` CLI continue through their existing
 record-based paths.
 

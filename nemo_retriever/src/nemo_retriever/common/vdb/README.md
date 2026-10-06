@@ -134,44 +134,16 @@ table mutation, validation, index coverage, and optional optimization. Without
 `stream_operation_id`, it stores no durable idempotency history, and retry scope
 matches legacy fixed-table ingestion.
 
-`LanceDB.ingest_arrow()` uses the same local table mutation, validation,
-finalization, and recovery lifecycle with an existing Arrow reader. It avoids
-Python vector lists and row dictionaries, and writes all input batches through
-one native mutation. It preserves row order, additional typed columns,
-embedding identity, and user schema metadata for new or overwritten tables.
-Retrieval-mode tags follow the configured dense or hybrid mode. Appends retain
-the existing table's schema and metadata and reject known model conflicts.
-Prior table-write recovery markers are excluded.
+`LanceDB.ingest_arrow()` loads cached vectors from a bounded
+`pyarrow.RecordBatchReader` through the same local write, validation, index, and
+recovery lifecycle as `stream_ingest()`. Its schema requires a fixed-size
+`float32` vector and string `id`, `text`, `source`, and `metadata` columns.
+Additional columns must use LanceDB-compatible Arrow types.
 
-The input schema requires `vector` as `pa.list_(pa.float32(), vector_dim)`,
-plus string `id`, `text`, `source`, and `metadata`
-columns. The latter two columns already contain their retrieval JSON strings.
-Null or nonfinite vectors fail the complete write; cached Arrow input does not
-apply `on_bad_vectors` filtering. An optional `expected_rows` counts incoming
-rows, including for an append, and must match the exhausted reader.
-
-For a separate staging writer, import `cached_vector_schema`,
-`EMBEDDING_MODEL_METADATA_KEY`, and `EMBEDDING_MODEL_REVISION_METADATA_KEY` from
-`nemo_retriever.common.vdb.arrow`. `cached_vector_schema(dim,
-embedding_model_name=None, embedding_model_revision=None)` returns the canonical
-schema and records only supplied model metadata. Use it for Arrow batches or a
-`pyarrow.parquet.ParquetWriter`; add any extra typed columns to that schema.
-The public constants are bytes keys for reading or setting model schema metadata.
-
-Produce bounded source batches. For example, use
-`ParquetFile.iter_batches(batch_size=8192)` and
-`RecordBatchReader.from_batches(parquet.schema_arrow, batches)`, then call
-`vdb.ingest_arrow(reader, expected_rows=parquet.metadata.num_rows)`.
-`stream_batch_bytes` limits retained Arrow buffers in each input batch. An
-oversized batch fails, including a slice that retains the original table's
-buffers. Read smaller source batches rather than materializing the cache first.
-
-Schema metadata supplies `nemo_retriever.embedding_model_name` and
-`nemo_retriever.embedding_model_revision` when the constructor does not specify
-them. Explicit model values must agree with recorded input values. The existing
-append checks reject an incompatible target model. Configured `hybrid`, vector
-index, optimization, and durable retry settings still apply.
-An explicit `stream_operation_id` adds content hashing for retry verification.
+`nemo_retriever.common.vdb.arrow` exports `cached_vector_schema()`,
+`EMBEDDING_MODEL_METADATA_KEY`, and `EMBEDDING_MODEL_REVISION_METADATA_KEY`.
+For schema requirements, bounded Parquet loading, and embedding metadata, refer
+to [Load cached vectors from Parquet](https://docs.nvidia.com/nemo/retriever/latest/extraction/vdbs/#load-cached-vectors-from-parquet).
 
 An explicit `stream_operation_id` enables durable request, stored-row, version,
 and finalization checks. Its identity covers the rows produced after configured

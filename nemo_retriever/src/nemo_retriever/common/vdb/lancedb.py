@@ -41,6 +41,8 @@ from nemo_retriever.common.vdb._lancedb_stream import (
     _assert_lancedb_table_ready,
     _bounded_create_is_finalized,
     _checked_batches,
+    _CREATE_OPERATION_KEY,
+    _CREATE_REQUEST_KEY,
     _infer_vector_dim_with_spooled_prefix,
     _inspect_vector,
     _matches_create_identity,
@@ -383,16 +385,13 @@ def _validate_append_embedding_model(
     uri: str,
 ) -> None:
     """Reject appends that would mix known embedding models in one table."""
-    if not embedding_model_name:
+    if not embedding_model_name and not embedding_model_revision:
         return
 
     metadata = _table_schema(table).metadata or {}
     stored_value = metadata.get(EMBEDDING_MODEL_METADATA_KEY)
-    if stored_value is None:
-        return
-
-    stored_model = stored_value.decode("utf-8", errors="replace").strip()
-    if stored_model and stored_model != embedding_model_name:
+    stored_model = stored_value.decode("utf-8", errors="replace").strip() if stored_value else ""
+    if embedding_model_name and stored_model and stored_model != embedding_model_name:
         raise ValueError(
             f"LanceDB table {table_name!r} at {uri!r} uses embedding model {stored_model!r}; "
             f"cannot append vectors from {embedding_model_name!r}. Use the table model or overwrite the table."
@@ -1443,14 +1442,20 @@ class LanceDB(VDB):
             embedding_model_revision=self.embedding_model_revision,
         )
 
-    def _stream_request_fingerprint(self, schema: pa.Schema, *, mode: str) -> str:
+    def _stream_request_fingerprint(self, schema: pa.Schema, *, mode: str, cached_arrow: bool = False) -> str:
         """Identify settings that affect the durable table result."""
 
         return json.dumps(
             {
                 "table": self.table_name,
                 "mode": mode,
-                "schema": schema.to_string(show_schema_metadata=True),
+                # Preserve existing record-operation identities. Cached input
+                # can contain arbitrary field types and binary schema metadata.
+                "schema": (
+                    hashlib.sha256(schema.serialize()).hexdigest()
+                    if cached_arrow
+                    else schema.to_string(show_schema_metadata=True)
+                ),
                 "build_index": self.build_index,
                 "index_type": str(self.index_type),
                 "metric": str(self.metric),
@@ -1640,10 +1645,11 @@ class LanceDB(VDB):
         base_schema: pa.Schema,
         operation_id: str,
         mode: str,
+        cached_arrow: bool = False,
     ) -> tuple[pa.Schema, str, bool]:
         """Bind a caller-owned operation ID to the requested table result."""
 
-        request_fingerprint = self._stream_request_fingerprint(base_schema, mode=mode)
+        request_fingerprint = self._stream_request_fingerprint(base_schema, mode=mode, cached_arrow=cached_arrow)
         recovered_create = bool(
             existing_table is not None
             and _matches_create_identity(
@@ -1728,6 +1734,14 @@ class LanceDB(VDB):
             raise VDBInvalidRequest("Cached vector ingestion requires a dense or hybrid LanceDB backend")
         if self.vector_dim is not None and vector_dim != self.vector_dim:
             raise VDBInvalidRequest(f"Cached Arrow vector dimension is {vector_dim}, expected {self.vector_dim}")
+        # Lance also rewrites fixed-list children inside other types. Reject
+        # those schemas before mutation rather than fail after committing data.
+        nested_fields = [field.type.field(i) for field in input_schema for i in range(field.type.num_fields)]
+        while nested_fields:
+            field = nested_fields.pop()
+            if pa.types.is_fixed_size_list(field.type):
+                raise VDBInvalidRequest("Cached Arrow columns cannot contain nested fixed-size lists")
+            nested_fields.extend(field.type.field(i) for i in range(field.type.num_fields))
         # Parquet names fixed-list children "element"; Lance uses "item".
         # Normalize primary and additional columns without copying buffers.
         for index, field in enumerate(input_schema):
@@ -1744,14 +1758,14 @@ class LanceDB(VDB):
         # A replay is a new operation; it must not inherit the source table's
         # private retry identity. Retrieval-mode tags follow this writer;
         # embedding identity and user metadata remain intact.
-        for key in (b"nemo_retriever.sink_create_operation_sha256", b"nemo_retriever.sink_create_request_sha256"):
+        for key in (_CREATE_OPERATION_KEY, _CREATE_REQUEST_KEY):
             metadata.pop(key, None)
         configured_metadata = (
             cached_vector_schema(vector_dim, self.embedding_model_name, self.embedding_model_revision).metadata or {}
         )
         for key, configured in configured_metadata.items():
             recorded = metadata.get(key)
-            if recorded and recorded.decode("utf-8") != configured.decode("utf-8"):
+            if recorded and recorded != configured:
                 raise VDBInvalidRequest(f"Cached Arrow {key.decode('utf-8')} disagrees with the configured model")
         return _with_retrieval_mode_metadata(
             input_schema.with_metadata(metadata),
@@ -1837,6 +1851,7 @@ class LanceDB(VDB):
                     base_schema=base_schema,
                     operation_id=operation_id,
                     mode=mode,
+                    cached_arrow=arrow_reader is not None,
                 )
 
             expected_schema = base_schema
