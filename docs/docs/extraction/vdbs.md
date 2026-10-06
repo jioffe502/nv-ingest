@@ -8,6 +8,7 @@ Use this documentation to learn how [NeMo Retriever Library](overview.md) stores
 - [Keep the embedding model aligned](#lancedb-embedding-model-compatibility)
 - [LanceDB Overview](#why-lancedb)
 - [Upload to LanceDB](#upload-to-lancedb)
+    - [Stage large batch runs to Parquet](#stage-batch-runs-to-parquet)
     - [Direct LanceDB ingest and retrieval](#direct-lancedb-ingest-and-retrieval)
     - [Load cached vectors from Parquet](#load-cached-vectors-from-parquet)
 - [Semantic retrieval](#semantic-retrieval)
@@ -108,6 +109,28 @@ retriever ingest ./data/multimodal_test.pdf
 ```
 
 Use `--lancedb-uri` and `--table-name` on the local and batch commands when you need a non-default LanceDB location. For modes and flags, refer to the [Retriever CLI](https://github.com/NVIDIA/NeMo-Retriever/tree/26.08.1/nemo_retriever/docs/cli).
+
+### Stage large batch runs to Parquet { #stage-batch-runs-to-parquet }
+
+By default, `retriever ingest batch` streams every embedded row through the driver process to LanceDB. For large runs where that stream limits throughput or driver memory, pass `--stage-dir`. Ray write tasks then write the embedded rows as Parquet files in a local directory, and the command loads those files into LanceDB in one write.
+
+```bash
+retriever ingest batch /path/to/your/pdfs --stage-dir /path/to/stage
+```
+
+The command creates the staging directory if it does not exist and fails if the directory is not empty. The staged files use the schema described in [Load cached vectors from Parquet](#load-cached-vectors-from-parquet).
+
+After all rows are written, the command checks them before it changes the table. It fails if any searchable row is missing an embedding, any row has a stage error, or the run produces no rows. Otherwise, it loads the staged files in one write that builds the configured indexes and validates the row count.
+
+If a run fails, the command does not load the staged rows. Rerun with a new or empty staging directory. A rerun processes all inputs again.
+
+Staging has the following requirements:
+
+- Use `retriever ingest batch`. Other ingest modes reject `--stage-dir`.
+- Use local filesystem paths for `--stage-dir` and `--lancedb-uri`.
+- Staging replaces the target table. It does not support `--append` or `--index-mode sparse`.
+
+The staging directory keeps a full copy of the rows, including vectors, after the load. Delete it when you no longer need it.
 
 ### Programmatic API (Python)
 
@@ -274,7 +297,9 @@ substantially reduce throughput for large cached-vector loads. The default
 with the operation ID setting you plan to deploy.
 
 Graph ingestion and the `retriever ingest` CLI continue through their existing
-record-based paths.
+record-based paths. The exception is `retriever ingest batch --stage-dir`,
+which loads its staged Parquet through `ingest_arrow()`. Refer to
+[Stage large batch runs to Parquet](#stage-batch-runs-to-parquet).
 
 ## Semantic retrieval { #semantic-retrieval }
 
