@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
+import math
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
@@ -15,7 +18,11 @@ from typing import Any, TypedDict
 from pydantic import ValidationError
 
 from nemo_retriever.common.schemas.collections import QueryHit
-from nemo_retriever.common.schemas.embedding import embedding_record_content, embedding_split_content
+from nemo_retriever.common.schemas.embedding import (
+    EMBEDDING_SPLIT_METADATA_KEY,
+    embedding_record_content,
+    embedding_split_content,
+)
 from nemo_retriever.common.stage_errors import ERROR_FIELD_KEYS, iter_stage_errors_from_value
 
 _CONTENT_TYPE_ALIASES: dict[str, str] = {
@@ -33,6 +40,14 @@ _CONTENT_PROVENANCE_METADATA_KEYS = (
     "segment_end_seconds",
     "frame_timestamp_seconds",
 )
+
+# Versioned so a future change to the identity inputs cannot reuse an earlier ID.
+_ROW_ID_DOMAIN = b"nemo-retriever-graph-row-id-v1\0"
+# Rounding absorbs float noise; narrowing a float64 to float32 can still change an ID.
+_ROW_ID_FLOAT_DIGITS = 6
+_ROW_ID_CHUNK_KEYS = ("chunk_index", "chunk_count")
+_ROW_ID_MEDIA_KEYS = ("segment_start_seconds", "segment_end_seconds", "frame_timestamp_seconds", "segment_index")
+_ROW_ID_SPLIT_KEYS = ("chunk_index", "chunk_count", "start_token", "end_token")
 
 
 def normalize_content_type(value: Any) -> str | None:
@@ -285,6 +300,93 @@ def _derive_fidelity(content_type: Any, metadata: dict[str, Any], content_metada
     return None
 
 
+def _graph_source_path(row: Mapping[str, Any], metadata: Mapping[str, Any]) -> str:
+    """Return the source path stored as the record's ``source_metadata.source_id``."""
+    return _first_str(
+        metadata.get("source_path"),
+        row.get("path"),
+        row.get("source_id"),
+        row.get("source"),
+        metadata.get("source_id"),
+    )
+
+
+def _identity_value(value: Any) -> Any:
+    """Canonicalize one provenance value; ``None`` and non-finite floats mean absent."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        value = tolist()
+    if isinstance(value, (list, tuple)):
+        return [_identity_value(item) for item in value]
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        value = round(value, _ROW_ID_FLOAT_DIGITS)
+        return int(value) if value.is_integer() else value
+    return str(value)
+
+
+def _identity_fields(source: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(source, Mapping):
+        return {}
+    fields = {key: _identity_value(source.get(key)) for key in keys}
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _graph_row_kind(row: Mapping[str, Any], metadata: Mapping[str, Any]) -> str:
+    """Return the raw element kind, preferring the extractor's ``metadata._content_type``.
+
+    Batch reshaping can relabel a media row as ``text`` depending on its Ray block.
+    """
+    for value in (metadata.get("_content_type"), row.get("_content_type"), row.get("content_type")):
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return "text"
+
+
+def graph_row_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the fields that identify one embedded graph row.
+
+    Two rows are the same row when their source path, page, raw element kind,
+    bbox, chunk and embedding-split positions, media window, and text SHA-256
+    match. Null and absent fields are equal and floats are rounded, so the rows
+    that share a Ray block cannot change an ID; position never contributes.
+    """
+    metadata = _dict_or_empty(row.get("metadata"))
+    content_metadata = _dict_or_empty(metadata.get("content_metadata"))
+    text = _text_from_graph_row(row) or ""
+    identity = {
+        "source": _graph_source_path(row, metadata),
+        "page": _page_number_from_graph_row(row, content_metadata),
+        "kind": _graph_row_kind(row, metadata),
+        "bbox": _identity_value(_bbox_from_graph_row(row)),
+        "chunk": _identity_fields(metadata, _ROW_ID_CHUNK_KEYS),
+        "media": _identity_fields(metadata, _ROW_ID_MEDIA_KEYS),
+        "split": _identity_fields(metadata.get(EMBEDDING_SPLIT_METADATA_KEY), _ROW_ID_SPLIT_KEYS),
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+    return {key: value for key, value in identity.items() if value not in (None, "", {})}
+
+
+def graph_row_id(row: Mapping[str, Any]) -> str:
+    """Return the versioned SHA-256 hex of :func:`graph_row_identity`."""
+    payload = json.dumps(graph_row_identity(row), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(_ROW_ID_DOMAIN + payload.encode("utf-8")).hexdigest()
+
+
+def explicit_row_id(metadata: Any, content_metadata: Any) -> str | None:
+    """Return a caller-supplied row ID; ``content_metadata.id`` wins and blank IDs are absent."""
+    for source in (content_metadata, metadata):
+        value = source.get("id") if isinstance(source, Mapping) else None
+        if value is not None and str(value).strip():
+            return str(value)
+    return None
+
+
 def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: bool = True) -> dict[str, Any] | None:
     metadata = _dict_or_empty(row.get("metadata"))
 
@@ -326,13 +428,7 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
         if key in metadata:
             content_metadata.setdefault(key, metadata[key])
 
-    source_path = _first_str(
-        metadata.get("source_path"),
-        row.get("path"),
-        row.get("source_id"),
-        row.get("source"),
-        metadata.get("source_id"),
-    )
+    source_path = _graph_source_path(row, metadata)
     source_name = Path(source_path).name if source_path else str(row.get("filename") or row.get("source_id") or "")
     source_metadata = _dict_or_empty(metadata.get("source_metadata"))
     if source_path:
@@ -341,6 +437,8 @@ def _client_record_from_graph_row(row: dict[str, Any], *, require_embedding: boo
         source_metadata.setdefault("source_name", source_name)
 
     record_metadata = dict(metadata)
+    if explicit_row_id(metadata, content_metadata) is None:
+        record_metadata["id"] = graph_row_id(row)
     if embedding is not None:
         record_metadata["embedding"] = embedding
     record_metadata["content"] = "" if text is None else text
@@ -409,54 +507,73 @@ def _raise_for_empty_vdb_conversion(
     )
 
 
+@dataclasses.dataclass
+class VdbConversionTally:
+    """Count graph rows converted to canonical records and enforce the upload rules on them.
+
+    Tallies from separate batches can be merged, so a distributed writer
+    applies the same rules as one record stream.
+    """
+
+    rows: int = 0
+    converted: int = 0
+    missing_embeddings: int = 0
+    upstream_error_fields: Counter[str] = dataclasses.field(default_factory=Counter)
+    rejection_reasons: Counter[str] = dataclasses.field(default_factory=Counter)
+
+    def convert(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        """Return the canonical record for ``row``, or ``None`` after counting why it was skipped."""
+        self.rows += 1
+        record = _client_record_from_graph_row(row)
+        if record is not None:
+            self.converted += 1
+            return record
+        missing_embedding = _row_has_uploadable_content_without_embedding(row)
+        self.missing_embeddings += int(missing_embedding)
+        upstream_errors = list(iter_stage_errors_from_value(row))
+        if upstream_errors:
+            self.upstream_error_fields.update(_stage_error_field(error.get("path")) for error in upstream_errors)
+        else:
+            reason = "missing embedding" if missing_embedding else "missing searchable text or image backing"
+            self.rejection_reasons[reason] += 1
+        return None
+
+    def merge(self, other: Mapping[str, Any]) -> None:
+        """Add a tally serialized with ``dataclasses.asdict``."""
+        self.rows += other["rows"]
+        self.converted += other["converted"]
+        self.missing_embeddings += other["missing_embeddings"]
+        self.upstream_error_fields.update(other["upstream_error_fields"])
+        self.rejection_reasons.update(other["rejection_reasons"])
+
+    def raise_for_failures(self) -> None:
+        """Refuse partial writes and streams with nothing uploadable."""
+        if self.converted and self.missing_embeddings:
+            raise VdbUploadError(
+                "vdb_upload is refusing a partial write because searchable rows are missing embeddings: "
+                f"input rows={self.rows}, uploadable rows={self.converted}, "
+                f"missing embedding={self.missing_embeddings}."
+            )
+        if self.rows and not self.converted:
+            _raise_for_empty_vdb_conversion(
+                row_count=self.rows,
+                upstream_error_count=sum(self.upstream_error_fields.values()),
+                upstream_error_fields=self.upstream_error_fields,
+                rejection_reasons=self.rejection_reasons,
+            )
+
+
 def _iter_client_vdb_records(rows: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     """Lazily convert graph rows into individual canonical NRL records.
 
     Rows without searchable content are skipped. Missing embeddings fail the
     stream on exhaustion, matching :func:`to_client_vdb_records`.
     """
-
-    row_count = 0
-    converted_count = 0
-    upstream_error_count = 0
-    upstream_error_fields: Counter[str] = Counter()
-    rejection_reasons: Counter[str] = Counter()
-    missing_embeddings = 0
-
+    tally = VdbConversionTally()
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        row_count += 1
-        record = _client_record_from_graph_row(row)
-        if record is not None:
-            converted_count += 1
+        if isinstance(row, dict) and (record := tally.convert(row)) is not None:
             yield record
-            continue
-
-        missing_embedding = _row_has_uploadable_content_without_embedding(row)
-        if missing_embedding:
-            missing_embeddings += 1
-
-        upstream_errors = list(iter_stage_errors_from_value(row))
-        if upstream_errors:
-            upstream_error_count += len(upstream_errors)
-            upstream_error_fields.update(_stage_error_field(error.get("path")) for error in upstream_errors)
-        else:
-            reason = "missing embedding" if missing_embedding else "missing searchable text or image backing"
-            rejection_reasons[reason] += 1
-
-    if converted_count and missing_embeddings:
-        raise VdbUploadError(
-            "vdb_upload is refusing a partial write because searchable rows are missing embeddings: "
-            f"input rows={row_count}, uploadable rows={converted_count}, missing embedding={missing_embeddings}."
-        )
-    if row_count and not converted_count:
-        _raise_for_empty_vdb_conversion(
-            row_count=row_count,
-            upstream_error_count=upstream_error_count,
-            upstream_error_fields=upstream_error_fields,
-            rejection_reasons=rejection_reasons,
-        )
+    tally.raise_for_failures()
 
 
 def to_client_vdb_records(rows: Any) -> list[list[dict[str, Any]]]:

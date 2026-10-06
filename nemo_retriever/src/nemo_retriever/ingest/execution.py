@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from nemo_retriever.common.params import EmbedParams
+from nemo_retriever.common.params.models import _is_secret_display_field
 from nemo_retriever.ingest.plan import ResolvedIngestPlan
 from nemo_retriever.ingestor.manifest import format_branch_summary
 from nemo_retriever.ingestor import Ingestor, create_ingestor
@@ -102,6 +105,9 @@ def execute_ingest_plan(
             produced no rows or failed to add rows to an append target.
     """
 
+    if plan.staging is not None:
+        return _execute_staged_ingest_plan(plan)
+
     lancedb_target = _resolve_lancedb_target(plan)
     if verify_rows and lancedb_target is None:
         raise ValueError(
@@ -142,6 +148,82 @@ def execute_ingest_plan(
             "lancedb_target": f"{lancedb_uri}/{table_name}",
             "profile": plan.profile,
             "branch_summary": format_branch_summary(plan.branches),
+        },
+    )
+
+
+_STAGE_ROW_POLICY_KEYS = (
+    "embedding_model_name",
+    "embedding_model_revision",
+    "vector_dim",
+    "on_bad_vectors",
+    "fill_value",
+    "validate_vector_length",
+)
+
+
+def _stage_settings(value: Any) -> Any:
+    """Drop throughput tuning and credentials, which may change when a staged run resumes."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {
+            str(key): _stage_settings(nested)
+            for key, nested in value.items()
+            if key != "batch_tuning" and not _is_secret_display_field(str(key))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stage_settings(item) for item in value]
+    return value
+
+
+def _execute_staged_ingest_plan(plan: ResolvedIngestPlan) -> IngestExecutionResult:
+    """Stage embedded rows as Parquet shard by shard, then load them into LanceDB."""
+    from nemo_retriever.ingest.staging import load_stage, stage_documents
+    from nemo_retriever.operators.vdb import STAGE_PARQUET_VDB_KWARG
+
+    vdb_kwargs = dict(plan.vdb_params.vdb_kwargs)
+    settings = {
+        "profile": plan.profile,
+        "branches": sorted([branch.family, branch.extraction_mode] for branch in plan.branches),
+        "extract": plan.extract_params,
+        "extract_call": plan.extract_call_kwargs(),
+        "split_config": plan.split_config,
+        "dedup": plan.dedup_params,
+        "caption": plan.caption_params,
+        # A plan without embed options runs ``.embed()`` with default params.
+        "embed": plan.embed_params or EmbedParams(),
+        "store": plan.store_params,
+        "rows": {key: vdb_kwargs.get(key) for key in _STAGE_ROW_POLICY_KEYS},
+    }
+    unstaged = dataclasses.replace(plan, staging=None)
+
+    def run_shard(documents: list[str], target: Any) -> Any:
+        params = plan.vdb_params.model_copy(update={"vdb_kwargs": {**vdb_kwargs, STAGE_PARQUET_VDB_KWARG: target}})
+        return build_ingest_pipeline(dataclasses.replace(unstaged, documents=documents, vdb_params=params)).ingest()
+
+    staged = stage_documents(
+        plan.documents,
+        stage_dir=plan.staging.stage_dir,
+        shard_files=plan.staging.shard_files,
+        settings=_stage_settings(settings),
+        run_shard=run_shard,
+        stage_error_columns=sorted(build_ingest_pipeline(unstaged)._remote_stage_diagnostics()),
+    )
+    loaded = load_stage(plan.staging.stage_dir, lancedb_kwargs=vdb_kwargs)
+    return IngestExecutionResult(
+        plan=plan,
+        result=staged,
+        n_rows=loaded["rows"],
+        result_n_rows=staged["rows"],
+        initial_n_rows=None,
+        lancedb_uri=loaded["uri"],
+        table_name=loaded["table_name"],
+        run_metadata={
+            "lancedb_target": f"{loaded['uri']}/{loaded['table_name']}",
+            "profile": plan.profile,
+            "branch_summary": format_branch_summary(plan.branches),
+            "staging": {**staged, "load": loaded},
         },
     )
 

@@ -8,8 +8,10 @@ Use this documentation to learn how [NeMo Retriever Library](overview.md) stores
 - [Keep the embedding model aligned](#lancedb-embedding-model-compatibility)
 - [LanceDB Overview](#why-lancedb)
 - [Upload to LanceDB](#upload-to-lancedb)
+    - [Stage large batch runs to Parquet](#stage-batch-runs-to-parquet)
     - [Direct LanceDB ingest and retrieval](#direct-lancedb-ingest-and-retrieval)
     - [Load cached vectors from Parquet](#load-cached-vectors-from-parquet)
+    - [Row IDs](#lancedb-row-ids)
 - [Semantic retrieval](#semantic-retrieval)
 - [Metadata and filtering](#metadata-and-filtering)
 - [LanceDB deployment characteristics](#lancedb-deployment-characteristics)
@@ -104,6 +106,24 @@ retriever ingest ./data/multimodal_test.pdf
 ```
 
 Use `--lancedb-uri` and `--table-name` on the local and batch commands when you need a non-default LanceDB location. For modes and flags, refer to the [Retriever CLI](https://github.com/NVIDIA/NeMo-Retriever/tree/26.08.1/nemo_retriever/docs/cli).
+
+### Stage large batch runs to Parquet { #stage-batch-runs-to-parquet }
+
+Pass `--stage-dir` to `retriever ingest batch` to make a large run resumable. Ray workers write the embedded rows as Parquet files in a local directory, and the command then loads them into LanceDB in one write that builds the configured indexes.
+
+```bash
+retriever ingest batch /path/to/your/pdfs --stage-dir /path/to/stage
+```
+
+The command processes the input files in shards of `--stage-shard-files` files (default `1000`) and records each shard after its files are written. If a run stops, rerun the same command. Recorded shards are not extracted or embedded again, and a completed load is not repeated. A smaller shard size repeats less work after a failure, but each shard reloads the pipeline's models.
+
+Use the same inputs and options when you rerun. The command rejects a staging directory that was created for different input files or for settings that change the staged rows, such as extraction, chunking, or the embedding model. Worker counts, batch sizes, and API keys can change.
+
+Staging has the following requirements:
+
+- Use `retriever ingest batch` with local input files, a local `--stage-dir`, and a local `--lancedb-uri`.
+- Staging replaces the target table. It does not support `--append` or `--index-mode sparse`.
+- The staging directory keeps a full copy of the rows, including vectors, in addition to the LanceDB table. Delete it after a successful run when you no longer need to resume or reload.
 
 ### Programmatic API (Python)
 
@@ -267,7 +287,17 @@ full-text index. For durable retries, persist and reuse `stream_operation_id` as
 described under [Backends with `VDB` implementations](#vdb-backends-implementations).
 An explicit operation ID adds content hashing for retry verification.
 Graph ingestion and the `retriever ingest` CLI continue through their existing
-record-based paths.
+record-based paths. The exception is `retriever ingest batch --stage-dir`,
+which loads its staged Parquet through `ingest_arrow()`. Refer to
+[Stage large batch runs to Parquet](#stage-batch-runs-to-parquet).
+
+### Row IDs { #lancedb-row-ids }
+
+Graph ingestion stores a row ID in the `id` column of each LanceDB row. If an input row has a nonblank `metadata.content_metadata.id` or `metadata.id`, the library stores that value. Otherwise, it stores a deterministic 64-character hexadecimal ID: a versioned SHA-256 hash of the row's source path, page number, element kind, bounding box, text-chunk and [embedding split](embedding.md#text-input-overflow) positions, media time window, and the SHA-256 hash of its embedded text.
+
+Row order and Ray batch boundaries do not affect the ID, so a rerun that produces the same text produces the same IDs. If the embedded text changes, the ID changes.
+
+The ID is not a uniqueness constraint: appending the same input twice stores duplicate rows that share an ID. A [staged batch run](#stage-batch-runs-to-parquet) fails if two rows of one shard share an ID.
 
 ## Semantic retrieval { #semantic-retrieval }
 

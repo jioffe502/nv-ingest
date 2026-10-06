@@ -87,6 +87,7 @@ from nemo_retriever.common.vdb.lancedb_schema import (
     lancedb_schema,
     normalize_content_type,
 )
+from nemo_retriever.common.vdb.records import explicit_row_id
 
 logger = logging.getLogger(__name__)
 
@@ -513,16 +514,13 @@ def _create_lancedb_result(
             return None, "dropped_no_text"
         text = ""
 
-    row_id = content_meta.get("id") if isinstance(content_meta, dict) else None
-    if row_id is None and isinstance(metadata, dict):
-        row_id = metadata.get("id")
     return (
         {
             "vector": embedding,
             "text": text,
             "metadata": _json_str(content_meta),
             "source": _json_str(metadata.get("source_metadata", {})),
-            "id": str(row_id) if row_id is not None else "",
+            "id": explicit_row_id(metadata, content_meta) or "",
         },
         None,
     )
@@ -670,14 +668,11 @@ def _create_sparse_lancedb_result(element: dict[str, Any]) -> dict[str, Any] | N
         logger.debug("No text found for sparse entity: %s page: %s", source_name, page_number)
         return None
 
-    row_id = content_meta.get("id") if isinstance(content_meta, dict) else None
-    if row_id is None and isinstance(metadata, dict):
-        row_id = metadata.get("id")
     return {
         "text": text,
         "metadata": _json_str(content_meta),
         "source": _json_str(metadata.get("source_metadata", {})),
-        "id": str(row_id) if row_id is not None else "",
+        "id": explicit_row_id(metadata, content_meta) or "",
     }
 
 
