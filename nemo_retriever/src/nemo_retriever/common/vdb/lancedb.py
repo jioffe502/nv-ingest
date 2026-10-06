@@ -68,8 +68,6 @@ from nemo_retriever.common.vdb.adt_vdb import (
     VDBInvalidRequest,
 )
 from nemo_retriever.common.vdb.arrow import (
-    EMBEDDING_MODEL_METADATA_KEY,
-    EMBEDDING_MODEL_REVISION_METADATA_KEY,
     cached_vector_dimension,
     checked_cached_batches,
 )
@@ -97,6 +95,8 @@ _DEFAULT_STREAM_BATCH_BYTES: Final[int] = 256 << 20
 _VALID_ON_BAD_VECTORS: Final[FrozenSet[str]] = frozenset({"drop", "fill", "null", "error"})
 _RETRIEVAL_MODE_METADATA_KEY: Final[bytes] = b"retrieval_mode"
 _NEMO_RETRIEVER_RETRIEVAL_MODE_METADATA_KEY: Final[bytes] = b"nemo_retriever.retrieval_mode"
+_EMBEDDING_MODEL_METADATA_KEY: Final[bytes] = b"nemo_retriever.embedding_model_name"
+_EMBEDDING_MODEL_REVISION_METADATA_KEY: Final[bytes] = b"nemo_retriever.embedding_model_revision"
 _MISSING_FTS_POSITIONS_ERROR: Final[str] = "position is not found but required for phrase queries"
 # Appended rows remain searchable through LanceDB's unindexed-tail scan until
 # optimize() folds them into FTS. These thresholds follow its recommended cadence.
@@ -296,9 +296,9 @@ def _with_retrieval_mode_metadata(
     metadata[_RETRIEVAL_MODE_METADATA_KEY] = encoded_mode
     metadata[_NEMO_RETRIEVER_RETRIEVAL_MODE_METADATA_KEY] = encoded_mode
     if embedding_model_name:
-        metadata[EMBEDDING_MODEL_METADATA_KEY] = embedding_model_name.encode("utf-8")
+        metadata[_EMBEDDING_MODEL_METADATA_KEY] = embedding_model_name.encode("utf-8")
     if embedding_model_revision:
-        metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] = embedding_model_revision.encode("utf-8")
+        metadata[_EMBEDDING_MODEL_REVISION_METADATA_KEY] = embedding_model_revision.encode("utf-8")
     return schema.with_metadata(metadata)
 
 
@@ -388,7 +388,7 @@ def _validate_append_embedding_model(
         return
 
     metadata = _table_schema(table).metadata or {}
-    stored_value = metadata.get(EMBEDDING_MODEL_METADATA_KEY)
+    stored_value = metadata.get(_EMBEDDING_MODEL_METADATA_KEY)
     stored_model = stored_value.decode("utf-8", errors="replace").strip() if stored_value else ""
     if embedding_model_name and stored_model and stored_model != embedding_model_name:
         raise ValueError(
@@ -396,7 +396,7 @@ def _validate_append_embedding_model(
             f"cannot append vectors from {embedding_model_name!r}. Use the table model or overwrite the table."
         )
 
-    stored_revision_value = metadata.get(EMBEDDING_MODEL_REVISION_METADATA_KEY)
+    stored_revision_value = metadata.get(_EMBEDDING_MODEL_REVISION_METADATA_KEY)
     if stored_revision_value is None:
         return
     stored_revision = stored_revision_value.decode("utf-8", errors="replace").strip()
@@ -1727,7 +1727,7 @@ class LanceDB(VDB):
         return None
 
     def _cached_arrow_schema(self, input_schema: pa.Schema) -> pa.Schema:
-        """Preserve cached columns and model identity for a native Arrow write."""
+        """Preserve cached columns and attach this ingestion's table metadata."""
         vector_dim = cached_vector_dimension(input_schema)
         if self.sparse:
             raise VDBInvalidRequest("Cached vector ingestion requires a dense or hybrid LanceDB backend")
@@ -1754,14 +1754,20 @@ class LanceDB(VDB):
                 index, field.with_type(pa.list_(field.type.value_type, field.type.list_size))
             )
         metadata = dict(input_schema.metadata or {})
-        # A replay is a new operation; it must not inherit the source table's
-        # private retry identity. Retrieval-mode tags follow this writer;
-        # embedding identity and user metadata remain intact.
-        for key in (_CREATE_OPERATION_KEY, _CREATE_REQUEST_KEY):
+        # Table identity follows this writer's configuration; source retry and
+        # embedding tags are excluded while user metadata remains intact.
+        for key in (
+            _CREATE_OPERATION_KEY,
+            _CREATE_REQUEST_KEY,
+            _EMBEDDING_MODEL_METADATA_KEY,
+            _EMBEDDING_MODEL_REVISION_METADATA_KEY,
+        ):
             metadata.pop(key, None)
         return _with_retrieval_mode_metadata(
             input_schema.with_metadata(metadata),
             "hybrid" if self.hybrid else "dense",
+            self.embedding_model_name,
+            self.embedding_model_revision,
         )
 
     def _write_stream_records(
@@ -1849,8 +1855,8 @@ class LanceDB(VDB):
                 _validate_append_schema(existing_table, schema, table_name=self.table_name, uri=self.uri)
                 _validate_append_embedding_model(
                     existing_table,
-                    (base_schema.metadata or {}).get(EMBEDDING_MODEL_METADATA_KEY, b"").decode("utf-8") or None,
-                    (base_schema.metadata or {}).get(EMBEDDING_MODEL_REVISION_METADATA_KEY, b"").decode("utf-8")
+                    (base_schema.metadata or {}).get(_EMBEDDING_MODEL_METADATA_KEY, b"").decode("utf-8") or None,
+                    (base_schema.metadata or {}).get(_EMBEDDING_MODEL_REVISION_METADATA_KEY, b"").decode("utf-8")
                     or None,
                     table_name=self.table_name,
                     uri=self.uri,
@@ -1953,9 +1959,9 @@ class LanceDB(VDB):
 
         The reader must contain fixed-size float32 vectors and canonical
         string columns. New or overwritten tables preserve additional columns
-        and model metadata from the reader schema. Constructor model settings
-        apply to record ingestion. Appends retain existing schema and metadata
-        and reject known model conflicts.
+        and user metadata. Embedding identity comes from the constructor, as
+        for record ingestion. Appends retain existing schema and metadata and
+        reject known model conflicts.
         Invalid cached vectors fail before commit; record-ingest drop/fill
         policies do not change cached input. Existing append/overwrite,
         indexing, locking and explicit retry settings still apply.

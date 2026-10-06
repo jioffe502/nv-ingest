@@ -204,8 +204,8 @@ Fixed-size lists nested inside another Arrow type are unsupported.
 Store `source` and `metadata` as the JSON strings expected by the retrieval path.
 The API rejects invalid schemas, null vectors, and nonfinite vector values.
 Cached Arrow input does not apply `on_bad_vectors` filtering.
-It preserves valid vectors, row order, typed columns, embedding identity, and
-user schema metadata for new or overwritten tables. Retrieval-mode tags follow
+It preserves valid vectors, row order, typed columns, and user schema metadata
+for new or overwritten tables. Retrieval-mode tags follow
 the configured dense or hybrid mode. Appends retain the existing table's schema
 and metadata and reject known embedding-model or revision conflicts.
 Recovery markers from a previous table write are excluded from the new table.
@@ -229,45 +229,34 @@ vdb = LanceDB(
     uri="./lancedb_cached",
     table_name="cached-vectors",
     vector_dim=2048,
+    embedding_model_name="nvidia/nemotron-3-embed-1b",
 )
 vdb.ingest_arrow(reader, expected_rows=parquet.metadata.num_rows)
 ```
 
-Set `vector_dim` to your cached embedding length. `expected_rows` is optional;
+Set `vector_dim` to your cached embedding length and `embedding_model_name` to
+the model that produced your cache. `expected_rows` is optional;
 when supplied, it must match the number of rows consumed from the reader.
 Choose the Parquet batch size for your vector dimensions and additional columns.
 `stream_batch_bytes` limits retained Arrow buffers in each input batch. Oversized
 batches fail; read smaller source batches instead of slicing an already
 materialized table, which can retain its entire allocation.
 
-For a separate staging writer, use `cached_vector_schema()` to construct the
-shared schema for your Arrow batches or `pyarrow.parquet.ParquetWriter`:
+Use `cached_vector_schema(dim)` to define the canonical fields and types for
+your cached Arrow data:
 
 ```python
 from nemo_retriever.common.vdb.arrow import cached_vector_schema
 
-schema = cached_vector_schema(
-    2048,
-    embedding_model_name="nvidia/nemotron-3-embed-1b",
-)
+schema = cached_vector_schema(2048)
 ```
 
-Pass the actual dimension and model that produced your cache. The factory also
-accepts an optional `embedding_model_revision`. Its default model and revision
-are `None`, so it adds no model metadata unless you provide it. The exported
-constants `EMBEDDING_MODEL_METADATA_KEY` and
-`EMBEDDING_MODEL_REVISION_METADATA_KEY` are bytes keys for reading or setting
-schema metadata.
-
-`ingest_arrow()` uses only the reader schema's
-`nemo_retriever.embedding_model_name` and
-`nemo_retriever.embedding_model_revision` metadata as embedding provenance.
-It preserves these values and uses them for append compatibility checks.
-The constructor's `embedding_model_name` and `embedding_model_revision` apply
-to record ingestion, without changing or validating cached-vector identity.
-Cached inputs without model metadata remain untagged.
-Record the model that produced the cache so dense and hybrid query paths can
-verify compatibility.
+`LanceDB` uses the constructor's `embedding_model_name` and optional
+`embedding_model_revision` for both cached and record ingestion. It writes
+this configured identity to the table and uses it for append compatibility
+checks. Cached source model and revision tags are discarded; other user schema
+metadata is preserved. Storage accepts vectors without a known model. Dense
+and hybrid `Retriever` queries require a recorded model.
 
 `ingest_arrow()` supports the same local filesystem configurations and streaming
 lifecycle controls as `stream_ingest()`. Configure `hybrid=True` to also build the

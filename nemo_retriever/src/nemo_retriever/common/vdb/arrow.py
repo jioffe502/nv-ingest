@@ -5,7 +5,6 @@
 """Public cached-vector schema and columnar checks shared by VDB adapters."""
 
 from collections.abc import Iterator
-from typing import Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -13,28 +12,14 @@ import pyarrow.compute as pc
 from nemo_retriever.common.vdb.adt_vdb import VDBInvalidRequest
 
 
-EMBEDDING_MODEL_METADATA_KEY: Final[bytes] = b"nemo_retriever.embedding_model_name"
-EMBEDDING_MODEL_REVISION_METADATA_KEY: Final[bytes] = b"nemo_retriever.embedding_model_revision"
-
-
-def cached_vector_schema(
-    dim: int,
-    embedding_model_name: str | None = None,
-    embedding_model_revision: str | None = None,
-) -> pa.Schema:
+def cached_vector_schema(dim: int) -> pa.Schema:
     """Return the canonical schema for staging cached vectors for ``ingest_arrow``.
 
-    ``dim`` must be a positive integer. Model identity is optional UTF-8 schema
-    metadata under the public bytes constants above. Producers can add typed
-    columns and user metadata; adapters retain their existing validation rules.
+    ``dim`` must be a positive integer. Producers can add typed columns and
+    user metadata; adapters retain their existing validation rules.
     """
     if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
         raise VDBInvalidRequest("Cached Arrow vector dimension must be a positive integer")
-    metadata = {}
-    if embedding_model_name:
-        metadata[EMBEDDING_MODEL_METADATA_KEY] = embedding_model_name.encode("utf-8")
-    if embedding_model_revision:
-        metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] = embedding_model_revision.encode("utf-8")
     return pa.schema(
         [
             pa.field("vector", pa.list_(pa.float32(), dim)),
@@ -43,7 +28,6 @@ def cached_vector_schema(
             pa.field("source", pa.string()),
             pa.field("metadata", pa.string()),
         ],
-        metadata=metadata or None,
     )
 
 

@@ -140,8 +140,8 @@ recovery lifecycle as `stream_ingest()`. Its schema requires a fixed-size
 `float32` vector and string `id`, `text`, `source`, and `metadata` columns.
 Additional columns must use LanceDB-compatible Arrow types.
 
-`nemo_retriever.common.vdb.arrow` exports `cached_vector_schema()`,
-`EMBEDDING_MODEL_METADATA_KEY`, and `EMBEDDING_MODEL_REVISION_METADATA_KEY`.
+`nemo_retriever.common.vdb.arrow.cached_vector_schema(dim)` defines the canonical
+fields and types. Configure embedding identity through the `LanceDB` constructor.
 For schema requirements, bounded Parquet loading, and embedding metadata, refer
 to [Load cached vectors from Parquet](https://docs.nvidia.com/nemo/retriever/latest/extraction/vdbs/#load-cached-vectors-from-parquet).
 

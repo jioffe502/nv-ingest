@@ -14,19 +14,15 @@ lancedb = pytest.importorskip("lancedb", minversion="0.34.0")
 from nemo_retriever.common.vdb.adt_vdb import UnsupportedVDBOperation, VDB, VDBInvalidRequest
 from nemo_retriever.common.vdb._lancedb_stream import DataCommittedFinalizationError
 from nemo_retriever.common.vdb._lancedb_stream_state import VdbOperationConflict
-from nemo_retriever.common.vdb.arrow import (
-    EMBEDDING_MODEL_METADATA_KEY,
-    EMBEDDING_MODEL_REVISION_METADATA_KEY,
-    cached_vector_schema,
-)
+from nemo_retriever.common.vdb.arrow import cached_vector_schema
 from nemo_retriever.common.vdb.lancedb import LanceDB
 
 
 def _cached(start: int = 0, rows: int = 16) -> pa.Table:
-    schema = cached_vector_schema(2, "cached-model", "frozen-revision").append(
+    schema = cached_vector_schema(2).append(
         pa.field("partition", pa.int64(), metadata={b"meaning": b"source partition"})
     )
-    schema = schema.with_metadata({**schema.metadata, b"corpus": b"frozen-corpus"})
+    schema = schema.with_metadata({b"corpus": b"frozen-corpus"})
     return pa.Table.from_pylist(
         [
             {
@@ -44,6 +40,7 @@ def _cached(start: int = 0, rows: int = 16) -> pa.Table:
 
 
 def _backend(path: Path, **kwargs) -> LanceDB:
+    kwargs = {"embedding_model_name": "cached-model", "embedding_model_revision": "frozen-revision", **kwargs}
     return LanceDB(uri=str(path), table_name="cached", vector_dim=2, build_index=False, **kwargs)
 
 
@@ -59,33 +56,28 @@ def _table(path: Path):
     "model,revision", [(None, None), ("cached-model", None), (None, "revision-only"), ("modèle", "révision")]
 )
 def test_exported_schema_stages_parquet_accepted_by_ingest_arrow(tmp_path, model, revision):
-    schema = cached_vector_schema(2, embedding_model_name=model, embedding_model_revision=revision)
+    schema = cached_vector_schema(2)
     assert schema.names == ["vector", "id", "text", "source", "metadata"]
     assert schema.field("vector").type == pa.list_(pa.float32(), 2)
     assert all(schema.field(name).type == pa.string() for name in ("id", "text", "source", "metadata"))
-    assert EMBEDDING_MODEL_METADATA_KEY == b"nemo_retriever.embedding_model_name"
-    assert EMBEDDING_MODEL_REVISION_METADATA_KEY == b"nemo_retriever.embedding_model_revision"
-    expected_metadata = {}
-    if model:
-        expected_metadata[EMBEDDING_MODEL_METADATA_KEY] = model.encode("utf-8")
-    if revision:
-        expected_metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] = revision.encode("utf-8")
-    assert (schema.metadata or {}) == expected_metadata
+    assert schema.metadata is None
     source = _cached(rows=4)
     staged = pa.Table.from_arrays([source[name] for name in schema.names], schema=schema)
+    staged = staged.replace_schema_metadata(
+        {
+            b"nemo_retriever.embedding_model_name": b"source-model",
+            b"nemo_retriever.embedding_model_revision": b"source-revision",
+        }
+    )
     path = tmp_path / "staged.parquet"
     pq.write_table(staged, path)
     parquet = pq.ParquetFile(path)
-    backend = _backend(
-        tmp_path / "sink", embedding_model_name="constructor-model", embedding_model_revision="constructor-revision"
-    )
+    backend = _backend(tmp_path / "sink", embedding_model_name=model, embedding_model_revision=revision)
     backend.ingest_arrow(
         pa.RecordBatchReader.from_batches(parquet.schema_arrow, parquet.iter_batches(batch_size=2)), expected_rows=4
     )
     actual = _table(tmp_path / "sink").to_arrow()
     assert actual.equals(staged, check_metadata=False)
-    for key in (EMBEDDING_MODEL_METADATA_KEY, EMBEDDING_MODEL_REVISION_METADATA_KEY):
-        assert actual.schema.metadata.get(key) == expected_metadata.get(key)
     assert backend.get_index_metadata("embedding_model_name") == model
     assert backend.get_index_metadata("embedding_model_revision") == revision
 
@@ -256,6 +248,10 @@ def test_retry_with_changed_long_schema_metadata_conflicts(tmp_path):
     changed = original.replace_schema_metadata({**original.schema.metadata, b"corpus": b"x" * 100 + b"other"})
     with pytest.raises(VdbOperationConflict, match="different write request"):
         backend.ingest_arrow(_reader(changed), expected_rows=4)
+    with pytest.raises(VdbOperationConflict, match="different write request"):
+        _backend(tmp_path, stream_operation_id="metadata-retry", embedding_model_revision="new-revision").ingest_arrow(
+            _reader(original), expected_rows=4
+        )
     backend.ingest_arrow(_reader(original, batch_size=3), expected_rows=4)
     assert _table(tmp_path).version == version
     assert _table(tmp_path).to_arrow().equals(before, check_metadata=True)
@@ -263,40 +259,26 @@ def test_retry_with_changed_long_schema_metadata_conflicts(tmp_path):
 
 @pytest.mark.parametrize("stored_model", [None, "cached-model"])
 def test_revision_only_append_checks_known_revisions(tmp_path, stored_model):
-    initial = _cached(rows=4)
-    metadata = dict(initial.schema.metadata)
-    if stored_model is None:
-        metadata.pop(EMBEDDING_MODEL_METADATA_KEY)
-    _backend(tmp_path).ingest_arrow(_reader(initial.replace_schema_metadata(metadata)))
+    _backend(tmp_path, embedding_model_name=stored_model).ingest_arrow(_reader(_cached(rows=4)))
     before = _table(tmp_path).to_arrow()
     version = _table(tmp_path).version
     incoming = _cached(4, 4)
-    metadata = dict(incoming.schema.metadata)
-    metadata.pop(EMBEDDING_MODEL_METADATA_KEY)
-    metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] = b"different-revision"
-    backend = _backend(tmp_path, overwrite=False)
+    backend = _backend(
+        tmp_path, overwrite=False, embedding_model_name=None, embedding_model_revision="different-revision"
+    )
     with pytest.raises(ValueError, match="cannot append vectors from revision"):
-        backend.ingest_arrow(_reader(incoming.replace_schema_metadata(metadata)), expected_rows=4)
+        backend.ingest_arrow(_reader(incoming), expected_rows=4)
     assert _table(tmp_path).version == version
     assert _table(tmp_path).to_arrow().equals(before, check_metadata=True)
-    metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] = b"frozen-revision"
-    backend.ingest_arrow(_reader(incoming.replace_schema_metadata(metadata)), expected_rows=4)
+    _backend(tmp_path, overwrite=False, embedding_model_name=None).ingest_arrow(_reader(incoming), expected_rows=4)
     assert _table(tmp_path).to_arrow()["id"].to_pylist() == [f"row-{i}" for i in range(8)]
-    assert _table(tmp_path).schema.metadata.get(EMBEDDING_MODEL_METADATA_KEY) == before.schema.metadata.get(
-        EMBEDDING_MODEL_METADATA_KEY
-    )
-    assert _table(tmp_path).schema.metadata[EMBEDDING_MODEL_REVISION_METADATA_KEY] == b"frozen-revision"
+    assert backend.get_index_metadata("embedding_model_name") == stored_model
+    assert backend.get_index_metadata("embedding_model_revision") == "frozen-revision"
 
 
 def test_append_and_retry_are_exact_once_across_batch_boundaries(tmp_path):
     _backend(tmp_path).ingest_arrow(_reader(_cached(0, 4)))
-    backend = _backend(
-        tmp_path,
-        overwrite=False,
-        stream_operation_id="cached-append",
-        embedding_model_name="constructor-model",
-        embedding_model_revision="constructor-revision",
-    )
+    backend = _backend(tmp_path, overwrite=False, stream_operation_id="cached-append")
     backend.ingest_arrow(_reader(_cached(4, 8), batch_size=2), expected_rows=8)
     version = _table(tmp_path).version
     backend.ingest_arrow(_reader(_cached(4, 8), batch_size=3), expected_rows=8)
@@ -328,9 +310,8 @@ def test_cached_model_conflicts_fail_before_mutation(tmp_path):
     _backend(tmp_path).ingest_arrow(_reader(_cached()))
     before = _table(tmp_path).to_arrow()
     version = _table(tmp_path).version
-    incompatible = _cached().replace_schema_metadata({b"nemo_retriever.embedding_model_name": b"different-model"})
     with pytest.raises(ValueError, match="embedding model"):
-        _backend(tmp_path, overwrite=False).ingest_arrow(_reader(incompatible))
+        _backend(tmp_path, overwrite=False, embedding_model_name="different-model").ingest_arrow(_reader(_cached()))
     assert _table(tmp_path).version == version
     assert _table(tmp_path).to_arrow().equals(before, check_metadata=True)
 
