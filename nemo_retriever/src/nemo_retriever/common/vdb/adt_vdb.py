@@ -26,10 +26,9 @@ metadata-filtering section and its reference notebook.
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    import pyarrow as pa
+import pyarrow as pa
 
 from nemo_retriever.common.schemas.collections import (
     CollectionCreateRequest,
@@ -432,7 +431,7 @@ class VDB(ABC):
         """Return optional backend-specific operational health details."""
         return {}
 
-    def ingest_arrow(self, reader: "pa.RecordBatchReader", *, expected_rows: int | None = None) -> None:
+    def ingest_arrow(self, reader: pa.RecordBatchReader, *, expected_rows: int | None = None) -> None:
         """Load existing cached vectors from a single-pass Arrow reader.
 
         This optional capability leaves existing record ingestion unchanged.
