@@ -15,8 +15,24 @@ from nemo_retriever.common.vdb.adt_vdb import VDBInvalidRequest
 def cached_vector_schema(dim: int) -> pa.Schema:
     """Return the canonical schema for staging cached vectors for ``ingest_arrow``.
 
-    ``dim`` must be a positive integer. Producers can add typed columns and
-    user metadata; adapters retain their existing validation rules.
+    Producers can add typed columns and user metadata; adapters retain their
+    existing validation rules.
+
+    Parameters
+    ----------
+    dim
+        Positive integer embedding dimension; boolean values are invalid.
+
+    Returns
+    -------
+    pyarrow.Schema
+        Fixed-size float32 ``vector`` and string ``id``, ``text``, ``source``,
+        and ``metadata`` fields, without schema metadata.
+
+    Raises
+    ------
+    VDBInvalidRequest
+        If ``dim`` is not a positive integer.
     """
     if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
         raise VDBInvalidRequest("Cached Arrow vector dimension must be a positive integer")
@@ -32,7 +48,24 @@ def cached_vector_schema(dim: int) -> pa.Schema:
 
 
 def cached_vector_dimension(schema: pa.Schema) -> int:
-    """Validate the cached row schema without materializing any rows."""
+    """Validate the cached row schema without materializing any rows.
+
+    Parameters
+    ----------
+    schema
+        Candidate cached-vector schema; additional fields are allowed.
+
+    Returns
+    -------
+    int
+        The positive fixed-size float32 vector dimension.
+
+    Raises
+    ------
+    VDBInvalidRequest
+        If names are duplicated, required fields are missing, or their types
+        do not match the cached-vector contract. Large string fields are accepted.
+    """
     if len(set(schema.names)) != len(schema.names):
         raise VDBInvalidRequest("Cached Arrow columns must have unique names")
     if "vector" not in schema.names:
@@ -66,6 +99,27 @@ def checked_cached_batches(
     table can retain the entire parent allocation, so check retained bytes,
     rather than only the logical size of each slice. An invalid later batch
     raises while the native writer is still consuming its data transaction.
+    Exceptions from the source reader propagate unchanged.
+
+    Parameters
+    ----------
+    reader
+        Single-pass reader whose schema passes ``cached_vector_dimension``.
+    max_batch_bytes
+        Maximum retained Arrow buffer bytes allowed in each nonempty batch.
+    expected_rows
+        Optional total input row count; ``None`` disables count comparison.
+
+    Returns
+    -------
+    Iterator[pyarrow.RecordBatch]
+        Nonempty validated batches, yielded without Python row conversion.
+
+    Raises
+    ------
+    VDBInvalidRequest
+        If a batch changes schema, exceeds the buffer limit, contains null or
+        nonfinite vectors, or the total count differs from ``expected_rows``.
     """
     rows = 0
     for batch in reader:

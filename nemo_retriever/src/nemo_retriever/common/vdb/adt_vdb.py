@@ -438,13 +438,35 @@ class VDB(ABC):
         The reader contains canonical ``vector``, ``id``, ``text``, ``source``
         and ``metadata`` columns, with fixed-size float32 vectors. Producers
         own bounded source reads; adapters own native writes, any required
-        wire conversion, and index finalization. When supplied, expected_rows
-        is the total number of rows that must be persisted.
+        wire conversion, and index finalization.
 
         The default raises before consuming input. Concrete backends must
         explicitly implement the capability; there is no Python-row fallback.
+
+        Parameters
+        ----------
+        reader
+            Single-pass reader of canonical cached-vector batches. The producer
+            bounds retained input buffers; implementing adapters consume the reader.
+        expected_rows
+            Optional non-negative total number of input rows to persist.
+            ``None`` disables comparison with a caller-supplied count.
+
+        Returns
+        -------
+        None
+            After an implementing adapter completes its write and finalization.
+
+        Raises
+        ------
+        UnsupportedVDBOperation
+            If the backend does not implement cached Arrow loading. Concrete
+            adapters document their validation and storage exceptions.
         """
-        raise UnsupportedVDBOperation(f"{type(self).__name__} does not implement ingest_arrow()")
+        raise UnsupportedVDBOperation(
+            f"{type(self).__name__} does not implement ingest_arrow(); "
+            "use an adapter that supports cached Arrow loading."
+        )
 
     def stream_ingest(self, records: Iterable[dict[str, Any]]) -> None:
         """Ingest a lazy stream of canonical NRL record dictionaries.

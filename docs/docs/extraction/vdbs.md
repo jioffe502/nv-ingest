@@ -254,9 +254,11 @@ schema = cached_vector_schema(2048)
 `LanceDB` uses the constructor's `embedding_model_name` and optional
 `embedding_model_revision` for both cached and record ingestion. It writes
 this configured identity to the table and uses it for append compatibility
-checks. Cached source model and revision tags are discarded; other user schema
-metadata is preserved. Storage accepts vectors without a known model. Dense
-and hybrid `Retriever` queries require a recorded model.
+checks. Nonempty model or revision tags in the reader schema must match the
+corresponding constructor setting. Mismatches fail before input is read or the
+table is changed. Other user schema metadata is preserved. Storage accepts
+vectors without a known model. Dense and hybrid `Retriever` queries require a
+recorded model.
 
 `ingest_arrow()` supports the same local filesystem configurations and streaming
 lifecycle controls as `stream_ingest()`. Configure `hybrid=True` to also build the

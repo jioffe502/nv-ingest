@@ -63,12 +63,12 @@ def test_exported_schema_stages_parquet_accepted_by_ingest_arrow(tmp_path, model
     assert schema.metadata is None
     source = _cached(rows=4)
     staged = pa.Table.from_arrays([source[name] for name in schema.names], schema=schema)
-    staged = staged.replace_schema_metadata(
-        {
-            b"nemo_retriever.embedding_model_name": b"source-model",
-            b"nemo_retriever.embedding_model_revision": b"source-revision",
-        }
-    )
+    metadata = {}
+    if model:
+        metadata[b"nemo_retriever.embedding_model_name"] = model.encode("utf-8")
+    if revision:
+        metadata[b"nemo_retriever.embedding_model_revision"] = revision.encode("utf-8")
+    staged = staged.replace_schema_metadata(metadata)
     path = tmp_path / "staged.parquet"
     pq.write_table(staged, path)
     parquet = pq.ParquetFile(path)
@@ -312,6 +312,41 @@ def test_cached_model_conflicts_fail_before_mutation(tmp_path):
     version = _table(tmp_path).version
     with pytest.raises(ValueError, match="embedding model"):
         _backend(tmp_path, overwrite=False, embedding_model_name="different-model").ingest_arrow(_reader(_cached()))
+    assert _table(tmp_path).version == version
+    assert _table(tmp_path).to_arrow().equals(before, check_metadata=True)
+
+
+@pytest.mark.parametrize("overwrite", [True, False])
+@pytest.mark.parametrize(
+    "option,configured",
+    [
+        ("embedding_model_name", "cached-model"),
+        ("embedding_model_revision", "frozen-revision"),
+        ("embedding_model_name", None),
+        ("embedding_model_revision", None),
+    ],
+)
+def test_conflicting_source_identity_fails_before_consumption_or_mutation(tmp_path, overwrite, option, configured):
+    _backend(tmp_path).ingest_arrow(_reader(_cached(rows=2)))
+    before = _table(tmp_path).to_arrow()
+    version = _table(tmp_path).version
+    incoming = _cached(10, 4)
+    metadata = {**incoming.schema.metadata, f"nemo_retriever.{option}".encode("utf-8"): b"different-source"}
+    incoming = incoming.replace_schema_metadata(metadata)
+    path = tmp_path / "conflicting.parquet"
+    pq.write_table(incoming, path)
+    parquet = pq.ParquetFile(path)
+    pulled = []
+
+    def batches():
+        for batch in parquet.iter_batches(batch_size=2):
+            pulled.append(True)
+            yield batch
+
+    backend = _backend(tmp_path, overwrite=overwrite, stream_operation_id="conflicting-source", **{option: configured})
+    with pytest.raises(VDBInvalidRequest, match=f"Cached Arrow {option}.*Set {option}"):
+        backend.ingest_arrow(pa.RecordBatchReader.from_batches(parquet.schema_arrow, batches()), expected_rows=4)
+    assert not pulled
     assert _table(tmp_path).version == version
     assert _table(tmp_path).to_arrow().equals(before, check_metadata=True)
 

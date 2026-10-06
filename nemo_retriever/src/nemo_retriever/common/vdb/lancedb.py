@@ -1754,6 +1754,17 @@ class LanceDB(VDB):
                 index, field.with_type(pa.list_(field.type.value_type, field.type.list_size))
             )
         metadata = dict(input_schema.metadata or {})
+        for key, configured, option in (
+            (_EMBEDDING_MODEL_METADATA_KEY, self.embedding_model_name, "embedding_model_name"),
+            (_EMBEDDING_MODEL_REVISION_METADATA_KEY, self.embedding_model_revision, "embedding_model_revision"),
+        ):
+            recorded = metadata.get(key)
+            if recorded and recorded != (configured.encode("utf-8") if configured else None):
+                raise VDBInvalidRequest(
+                    f"Cached Arrow {option} {recorded.decode('utf-8', errors='replace')!r} "
+                    f"does not match configured {option} {configured!r}. "
+                    f"Set {option} to the value that produced the cache or load matching vectors."
+                )
         # Table identity follows this writer's configuration; source retry and
         # embedding tags are excluded while user metadata remains intact.
         for key in (
@@ -1960,11 +1971,50 @@ class LanceDB(VDB):
         The reader must contain fixed-size float32 vectors and canonical
         string columns. New or overwritten tables preserve additional columns
         and user metadata. Embedding identity comes from the constructor, as
-        for record ingestion. Appends retain existing schema and metadata and
-        reject known model conflicts.
+        for record ingestion; nonempty source identity tags must agree with it.
+        Appends retain existing schema and metadata and reject known model conflicts.
         Invalid cached vectors fail before commit; record-ingest drop/fill
         policies do not change cached input. Existing append/overwrite,
         indexing, locking and explicit retry settings still apply.
+
+        Parameters
+        ----------
+        reader
+            Single-pass Arrow reader of canonical cached vectors. Each batch's
+            retained buffers must fit ``stream_batch_bytes``.
+        expected_rows
+            Optional non-negative total input row count, excluding rows already
+            in an append target. A mismatch rejects the write before data commit.
+            ``None`` disables comparison with a caller-supplied count.
+
+        Returns
+        -------
+        None
+            After write validation and configured index finalization succeed.
+            An empty reader leaves the table unchanged.
+
+        Raises
+        ------
+        UnsupportedVDBOperation
+            If the URI is not an ordinary local filesystem table.
+        TypeError
+            If ``reader`` is not a ``pyarrow.RecordBatchReader``.
+        VDBInvalidRequest
+            If schema, source identity, vectors, buffer size, or ``expected_rows``
+            are invalid. Match tagged source identity in the constructor settings.
+        ValueError
+            If the append target is incompatible or the native writer rejects input.
+        VdbOperationConflict
+            If an operation ID conflicts with prior input, settings, or an unfinished write.
+        CommitOutcomeUnknown
+            If creation or append may have committed without acknowledgement;
+            follow the error's recovery action.
+        DataCommittedFinalizationError
+            If data committed but validation, index maintenance, or durable
+            bookkeeping failed. Follow the error's recovery action; retry the
+            original operation ID only when permitted.
+        pyarrow.ArrowException, OSError, RuntimeError
+            If source reading, storage, or write recovery fails.
         """
         if not self.supports_stream_ingest:
             raise UnsupportedVDBOperation("LanceDB.ingest_arrow() requires an ordinary local filesystem table")
