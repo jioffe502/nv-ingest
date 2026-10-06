@@ -1976,6 +1976,8 @@ class LanceDB(VDB):
         Invalid cached vectors fail before commit; record-ingest drop/fill
         policies do not change cached input. Existing append/overwrite,
         indexing, locking and explicit retry settings still apply.
+        Setting ``stream_operation_id`` hashes every row on initial loads and
+        retries; measure that configuration separately for large caches.
 
         Parameters
         ----------

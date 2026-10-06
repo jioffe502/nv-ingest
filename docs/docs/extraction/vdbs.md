@@ -266,6 +266,13 @@ full-text index. For durable retries, persist and reuse `stream_operation_id` as
 described under [Backends with `VDB` implementations](#vdb-backends-implementations).
 An explicit operation ID binds the input schema, row content, and table-result
 settings for retry verification.
+
+Enabling `stream_operation_id` hashes each row during the initial load and
+retries. This detects changed content regardless of input batching, but can
+substantially reduce throughput for large cached-vector loads. The default
+`stream_operation_id=None` skips content hashing. Measure loading throughput
+with the operation ID setting you plan to deploy.
+
 Graph ingestion and the `retriever ingest` CLI continue through their existing
 record-based paths.
 
